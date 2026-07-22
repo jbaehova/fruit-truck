@@ -4,6 +4,8 @@
 node_modules/
 dist/
 target/
+output/
+.playwright-cli/
 *.log
 apps/desktop/src-tauri/gen/
 

@@ -1,0 +1,91 @@
+name: Release macOS app
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release-macos:
+    runs-on: macos-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Install Rust targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "apps/desktop/src-tauri -> target"
+
+      - name: Install desktop dependencies
+        working-directory: apps/desktop
+        run: npm ci
+
+      - name: Verify release tag matches app version
+        if: github.event_name == 'push'
+        working-directory: apps/desktop
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          APP_VERSION=$(node -e "process.stdout.write(require('./src-tauri/tauri.conf.json').version)")
+          test "$RELEASE_TAG" = "v$APP_VERSION"
+
+      - name: Run desktop checks
+        working-directory: apps/desktop
+        run: |
+          npm run test:unit
+          npm run check
+          cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Build Universal DMG and create draft release
+        id: tauri
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: apps/desktop
+          tagName: ${{ github.ref_name }}
+          releaseName: OpenGen UI ${{ github.ref_name }}
+          releaseBody: |
+            Download `OpenGen-UI-macOS-universal.dmg` for Apple Silicon or Intel Macs.
+
+            This build is ad-hoc signed and is not notarized by Apple. After copying the app to Applications, try to open it once, then go to System Settings → Privacy & Security → Open Anyway.
+          releaseDraft: true
+          prerelease: false
+          generateReleaseNotes: true
+          args: --target universal-apple-darwin --bundles dmg
+          releaseAssetNamePattern: OpenGen-UI-macOS-universal[ext]
+
+      - name: Create and upload checksum
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          DMG_PATH=$(find apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/dmg -name '*.dmg' -print -quit)
+          test -n "$DMG_PATH"
+          bash apps/desktop/scripts/clean-dmg-volume-icon.sh "$DMG_PATH" OpenGen-UI-macOS-universal.dmg
+          gh release upload "$RELEASE_TAG" OpenGen-UI-macOS-universal.dmg --clobber
+          DMG_HASH=$(shasum -a 256 OpenGen-UI-macOS-universal.dmg | cut -d ' ' -f 1)
+          printf '%s  %s\n' "$DMG_HASH" "OpenGen-UI-macOS-universal.dmg" > OpenGen-UI-macOS-universal.dmg.sha256
+          gh release upload "$RELEASE_TAG" OpenGen-UI-macOS-universal.dmg.sha256 --clobber
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: gh release edit "$RELEASE_TAG" --draft=false --latest

@@ -11,7 +11,9 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "check": "tsc -b && oxlint",
-    "tauri:dev": "tauri dev"
+    "tauri:dev": "tauri dev",
+    "bundle:mac": "tauri build --bundles dmg",
+    "bundle:mac:universal": "bash scripts/build-macos-universal.sh"
   },
   "dependencies": {
     "@base-ui/react": "^1.6.0",
