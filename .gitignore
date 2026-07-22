@@ -1,0 +1,11 @@
+.DS_Store
+.env
+.env.*
+node_modules/
+dist/
+target/
+*.log
+apps/desktop/src-tauri/gen/
+
+.agent
+AGENTS.md
