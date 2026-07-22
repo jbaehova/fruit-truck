@@ -100,7 +100,10 @@
       <section class="method-section" id="method">
         <div class="method-heading reveal">
           <p class="section-number">02 / 04</p>
-          <h2 class="display" data-i18n="methodTitle">THREE CUTS. ONE GENERATION.</h2>
+          <h2 class="display method-title">
+            <span data-i18n="methodTitleLineOne">THREE CUTS.</span>
+            <span data-i18n="methodTitleLineTwo">ONE GENERATION.</span>
+          </h2>
         </div>
         <ol class="method-list">
           <li class="reveal">
@@ -156,17 +159,17 @@
         </figure>
         <section class="update-guide reveal" id="update" aria-labelledby="update-title">
           <div class="update-intro">
-            <p class="update-label" data-i18n="updateLabel">MANUAL UPDATES FOR NOW</p>
-            <h3 class="display" id="update-title" data-i18n="updateTitle">REPLACE THE APP. KEEP YOUR KEY.</h3>
-            <p data-i18n="updateBody">Automatic updates aren't built in yet. Install each new version over the existing app.</p>
+            <p class="update-label" data-i18n="updateLabel">IN-APP UPDATES FROM 0.2.0</p>
+            <h3 class="display" id="update-title" data-i18n="updateTitle">UPDATE IN APP. KEEP YOUR KEY.</h3>
+            <p data-i18n="updateBody">Install 0.2.0 once, then OpenGen UI checks for signed updates whenever it starts.</p>
           </div>
           <ol class="update-steps">
-            <li><b>01</b><span data-i18n="updateOne">Quit OpenGen UI.</span></li>
-            <li><b>02</b><span data-i18n="updateTwo">Download and open the latest DMG.</span></li>
-            <li><b>03</b><span data-i18n="updateThree">Drag OpenGen UI to Applications and choose Replace.</span></li>
-            <li><b>04</b><span data-i18n="updateFour">If macOS blocks it again, try to open it once and use Privacy &amp; Security → Open Anyway.</span></li>
+            <li><b>01</b><span data-i18n="updateOne">On 0.1.x? Install the latest DMG manually once.</span></li>
+            <li><b>02</b><span data-i18n="updateTwo">New releases appear automatically when the app starts.</span></li>
+            <li><b>03</b><span data-i18n="updateThree">Choose Update and restart. The package is downloaded and cryptographically verified.</span></li>
+            <li><b>04</b><span data-i18n="updateFour">The app replaces itself and returns to your workspace.</span></li>
           </ol>
-          <p class="update-persistence" data-i18n="updatePersistence">Your API key stays in ~/.open-gen-ui, outside the app bundle, so replacing the app does not remove it.</p>
+          <p class="update-persistence" data-i18n="updatePersistence">Your API key stays in ~/.open-gen-ui, outside the app bundle, so updating does not remove it.</p>
           <a class="download-button" data-download href="https://github.com/jbaehova/open-gen-ui/releases/latest/download/OpenGen-UI-macOS-universal.dmg"><span data-i18n="downloadLatest">DOWNLOAD THE LATEST DMG</span><b aria-hidden="true">↓</b></a>
         </section>
         <div class="final-cta reveal">

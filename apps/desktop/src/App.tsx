@@ -21,6 +21,7 @@ import { ModelSidebar } from "@/components/ModelSidebar";
 import { OptionsFields } from "@/components/OptionsFields";
 import { ReferenceUploader } from "@/components/ReferenceUploader";
 import { SettingsDialog } from "@/components/SettingsDialog";
+import { UpdatePrompt } from "@/components/UpdatePrompt";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -338,6 +339,7 @@ export default function App() {
         onSave={async (key) => { const status = await saveApiKey(key); setCredential(status); toast.success("OpenRouter key saved"); }}
         onRemove={async () => { const status = await removeApiKey(); setCredential(status); setCatalogs({ image: [], video: [] }); toast.success("Saved key removed"); }}
       />
+      <UpdatePrompt />
     </div>
   );
 }

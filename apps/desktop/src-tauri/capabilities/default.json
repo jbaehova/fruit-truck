@@ -5,5 +5,5 @@
   "windows": [
     "main"
   ],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "updater:default", "process:default"]
 }

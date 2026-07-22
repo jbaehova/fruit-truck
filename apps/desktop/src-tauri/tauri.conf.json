@@ -2,7 +2,7 @@
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "OpenGen UI",
   "mainBinaryName": "OpenGen UI",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "identifier": "ui.opengen.desktop",
   "build": {
     "frontendDist": "../dist",
@@ -34,10 +34,19 @@
   "bundle": {
     "active": true,
     "targets": ["dmg"],
+    "createUpdaterArtifacts": true,
     "icon": ["icons/icon.icns"],
     "macOS": {
       "bundleName": "OpenGen UI",
       "signingIdentity": "-"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEIzRUY3OTU5M0U3OEZFMgpSV1RpaitlVGxmYytDd1Z2d0oybVNRT1lWa3FkUkt1VnZCNmtzdWt2UDdpbDU1S0lBMlhMcFp5cgo=",
+      "endpoints": [
+        "https://github.com/jbaehova/open-gen-ui/releases/latest/download/latest.json"
+      ]
     }
   }
 }
