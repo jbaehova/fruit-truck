@@ -16,7 +16,7 @@ OpenRouter のモデルを選ぶと、対応する項目だけを表示し、生
 
 <br />
 
-<img src="../../assets/readme/open-gen-ui-hero.png" alt="モデルカタログ、生成コントロール、メディアプレビュー、JSON リクエストインスペクターを備えた OpenGen UI ワークスペース" width="1200" />
+<img src="../../assets/readme/open-gen-ui-hero.png" alt="画像とフィルムのモチーフを抽象的に描いた鮮やかな切り絵風 OpenGen UI バナー" width="1200" />
 
 <br />
 

@@ -16,7 +16,7 @@ Choose an OpenRouter model, see only the controls it supports, and inspect the e
 
 <br />
 
-<img src="./assets/readme/open-gen-ui-hero.png" alt="OpenGen UI workspace with a model catalog, generation controls, media preview, and JSON request inspector" width="1200" />
+<img src="./assets/readme/open-gen-ui-hero.png" alt="Vibrant cut-paper OpenGen UI banner with abstract image and film motifs" width="1200" />
 
 <br />
 

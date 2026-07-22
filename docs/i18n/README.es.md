@@ -16,7 +16,7 @@ Elige un modelo de OpenRouter, consulta solo los controles compatibles y revisa 
 
 <br />
 
-<img src="../../assets/readme/open-gen-ui-hero.png" alt="Espacio de OpenGen UI con catálogo de modelos, controles de generación, vista previa multimedia e inspector de solicitudes JSON" width="1200" />
+<img src="../../assets/readme/open-gen-ui-hero.png" alt="Banner vibrante de OpenGen UI en papel recortado con motivos abstractos de imagen y película" width="1200" />
 
 <br />
 

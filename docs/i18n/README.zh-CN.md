@@ -16,7 +16,7 @@
 
 <br />
 
-<img src="../../assets/readme/open-gen-ui-hero.png" alt="包含模型目录、生成控件、媒体预览和 JSON 请求检查器的 OpenGen UI 工作区" width="1200" />
+<img src="../../assets/readme/open-gen-ui-hero.png" alt="以抽象图像和胶片元素构成的鲜明剪纸风 OpenGen UI 横幅" width="1200" />
 
 <br />
 

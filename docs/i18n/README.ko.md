@@ -16,7 +16,7 @@ OpenRouter 모델을 고르면 지원되는 옵션만 보여 주고, 생성 전�
 
 <br />
 
-<img src="../../assets/readme/open-gen-ui-hero.png" alt="모델 카탈로그, 생성 옵션, 미디어 미리보기, JSON 요청 검사기로 구성된 OpenGen UI 작업 공간" width="1200" />
+<img src="../../assets/readme/open-gen-ui-hero.png" alt="이미지와 필름 모티프를 추상적으로 표현한 선명한 컷페이퍼 OpenGen UI 배너" width="1200" />
 
 <br />
 
