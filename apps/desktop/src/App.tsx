@@ -76,14 +76,7 @@ function priceHint(model: GenerationModel | null, mode: GenerationMode) {
 }
 
 function OpenGenMark() {
-  return (
-    <svg viewBox="0 0 24 24" role="img" aria-label="OpenGen UI">
-      <path d="M5.5 10V7.5a2 2 0 0 1 2-2H10" />
-      <path d="M14 18.5h2.5a2 2 0 0 0 2-2V14" />
-      <circle cx="14.5" cy="9.5" r="2.75" />
-      <circle cx="9.25" cy="14.75" r="1.25" className="mark-dot" />
-    </svg>
-  );
+  return <img src="/open-gen-ui-icon.png" alt="" aria-hidden="true" />;
 }
 
 export default function App() {
