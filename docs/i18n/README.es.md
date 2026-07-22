@@ -16,10 +16,6 @@ Elige un modelo de OpenRouter, consulta solo los controles compatibles y revisa 
 
 <br />
 
-<img src="../../assets/readme/open-gen-ui-hero.png" alt="Banner vibrante de OpenGen UI en papel recortado con motivos abstractos de imagen y película" width="1200" />
-
-<br />
-
 [¿Por qué OpenGen UI?](#por-qué-open-gen-ui) · [Funciones](#funciones) · [Cómo funciona](#cómo-funciona) · [Inicio rápido](#inicio-rápido) · [Seguridad](#seguridad) · [Desarrollo](#desarrollo)
 
 </div>
@@ -124,7 +120,7 @@ open-gen-ui/
 ├── apps/desktop/
 │   ├── src/                 # Espacio React y constructor de solicitudes
 │   └── src-tauri/           # Credenciales y proxy de OpenRouter
-└── assets/readme/           # Recursos gráficos del README
+└── apps/landing/            # Página de inicio de GitHub Pages
 ```
 
 La lógica de solicitudes está en `apps/desktop/src/openrouter.ts`; el límite de seguridad nativo y el proxy de OpenRouter están en `apps/desktop/src-tauri/src/lib.rs`.

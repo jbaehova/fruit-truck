@@ -16,10 +16,6 @@ OpenRouter 모델을 고르면 지원되는 옵션만 보여 주고, 생성 전�
 
 <br />
 
-<img src="../../assets/readme/open-gen-ui-hero.png" alt="이미지와 필름 모티프를 추상적으로 표현한 선명한 컷페이퍼 OpenGen UI 배너" width="1200" />
-
-<br />
-
 [왜 OpenGen UI인가요?](#왜-open-gen-ui인가요) · [주요 기능](#주요-기능) · [작동 방식](#작동-방식) · [빠른 시작](#빠른-시작) · [보안](#보안) · [개발](#개발)
 
 </div>
@@ -124,7 +120,7 @@ open-gen-ui/
 ├── apps/desktop/
 │   ├── src/                 # React 작업 공간 및 요청 빌더
 │   └── src-tauri/           # 자격 증명 저장소 및 OpenRouter 프록시
-└── assets/readme/           # README 이미지
+└── apps/landing/            # GitHub Pages 랜딩 페이지
 ```
 
 요청 생성 로직은 `apps/desktop/src/openrouter.ts`에, 네이티브 보안 경계와 OpenRouter 프록시는 `apps/desktop/src-tauri/src/lib.rs`에 있습니다.
