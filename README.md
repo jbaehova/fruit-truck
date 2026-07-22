@@ -16,6 +16,10 @@ Choose an OpenRouter model, see only the controls it supports, and inspect the e
 
 <br />
 
+<img src="./assets/readme/open-gen-ui-hero.png" alt="Vibrant cut-paper OpenGen UI banner with abstract image and film motifs" width="1200" />
+
+<br />
+
 [Why OpenGen UI?](#why-open-gen-ui) · [Features](#features) · [How it works](#how-it-works) · [Quick start](#quick-start) · [Security](#security) · [Development](#development)
 
 </div>
@@ -120,7 +124,7 @@ open-gen-ui/
 ├── apps/desktop/
 │   ├── src/                 # React workspace and request builder
 │   └── src-tauri/           # Credential storage and OpenRouter proxy
-└── apps/landing/            # GitHub Pages landing page
+└── assets/readme/           # README artwork
 ```
 
 The request-building logic lives in `apps/desktop/src/openrouter.ts`; the native security boundary and OpenRouter proxy live in `apps/desktop/src-tauri/src/lib.rs`.

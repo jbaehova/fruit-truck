@@ -16,6 +16,10 @@
 
 <br />
 
+<img src="../../assets/readme/open-gen-ui-hero.png" alt="以抽象图像和胶片元素构成的鲜明剪纸风 OpenGen UI 横幅" width="1200" />
+
+<br />
+
 [为什么选择 OpenGen UI？](#为什么选择-open-gen-ui) · [功能](#功能) · [工作原理](#工作原理) · [快速开始](#快速开始) · [安全性](#安全性) · [开发](#开发)
 
 </div>
@@ -120,7 +124,7 @@ open-gen-ui/
 ├── apps/desktop/
 │   ├── src/                 # React 工作区与请求构建器
 │   └── src-tauri/           # 凭据存储与 OpenRouter 代理
-└── apps/landing/            # GitHub Pages 着陆页
+└── assets/readme/           # README 图像资源
 ```
 
 请求构建逻辑位于 `apps/desktop/src/openrouter.ts`；原生安全边界与 OpenRouter 代理位于 `apps/desktop/src-tauri/src/lib.rs`。

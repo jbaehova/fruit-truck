@@ -90,12 +90,6 @@ html:lang(ko) body { word-break: keep-all; overflow-wrap: break-word; }
 .section-number { margin: 0; font-size: 11px; font-weight: 900; letter-spacing: .14em; }
 .section-copy h2 { max-width: 880px; font-size: clamp(52px,7.2vw,118px); }
 .section-copy > p:last-child { margin: 5px 0 0; font-size: clamp(16px,1.5vw,22px); font-weight: 600; line-height: 1.52; }
-.product-stage { position: relative; width: min(88vw,1460px); margin: 0 auto; padding: clamp(10px,2vw,28px); background: var(--blue); transform: rotate(-1.5deg); box-shadow: 24px 28px 0 var(--ink); }
-.product-stage::before { content: ""; position: absolute; inset: 18% -3% -4% 35%; z-index: -1; background: var(--pink); transform: rotate(4deg); }
-.product-stage img { display: block; width: 100%; border: 3px solid var(--ink); filter: saturate(.88) contrast(1.04); }
-.tape { position: absolute; z-index: 2; width: 120px; height: 34px; background: rgba(248,232,198,.82); }
-.tape-one { top: -8px; left: 12%; transform: rotate(-7deg); }
-.tape-two { right: 9%; bottom: -8px; transform: rotate(6deg); }
 .feature-lines { margin: clamp(110px,13vw,190px) clamp(24px,6vw,100px) 0; border-top: 5px solid var(--ink); }
 .feature-lines article { display: grid; grid-template-columns: 110px minmax(240px,1fr) minmax(240px,.7fr); gap: clamp(20px,4vw,70px); align-items: start; padding: 34px 0; border-bottom: 2px solid var(--ink); }
 .feature-lines span { color: var(--red); font-size: 11px; font-weight: 950; letter-spacing: .12em; }
@@ -151,9 +145,10 @@ html:lang(ko) body { word-break: keep-all; overflow-wrap: break-word; }
 .update-steps b { color: var(--pink); font-size: 11px; letter-spacing: .1em; }
 .update-persistence { grid-column: 1 / -1; margin: -12px 0 0; padding: 24px clamp(20px,3vw,42px); color: var(--ink); background: var(--teal); border: 3px solid var(--cream); font: 750 clamp(14px,1.3vw,18px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; transform: rotate(.4deg); }
 .update-guide .download-button { grid-column: 2; width: fit-content; margin-top: -10px; box-shadow: 8px 8px 0 var(--pink); }
-.final-cta { display: grid; grid-template-columns: minmax(260px,430px) 1fr; align-items: center; gap: clamp(40px,8vw,130px); margin: clamp(100px,13vw,200px) calc(clamp(24px,6vw,100px) * -1) 0; padding: clamp(60px,8vw,120px) clamp(24px,8vw,140px); color: var(--cream); background: var(--blue); overflow: hidden; }
+.final-cta { display: grid; grid-template-columns: minmax(260px,430px) minmax(0,1fr); align-items: center; gap: clamp(40px,8vw,130px); margin: clamp(100px,13vw,200px) calc(clamp(24px,6vw,100px) * -1) 0; padding: clamp(60px,8vw,120px) clamp(24px,8vw,140px); color: var(--cream); background: var(--blue); overflow: hidden; }
 .final-cta img { width: 100%; transform: rotate(-8deg); filter: drop-shadow(18px 18px 0 var(--ink)); }
-.final-cta h2 { max-width: 800px; font-size: clamp(64px,9vw,146px); }
+.final-cta > div { min-width: 0; }
+.final-cta h2 { width: 100%; max-width: 760px; font-size: clamp(58px,6.25vw,118px); }
 .final-cta .download-button { margin-top: 42px; }
 .download-button.dark { color: var(--cream); background: var(--ink); border-color: var(--cream); box-shadow: 8px 8px 0 var(--yellow); }
 .download-button.dark b { color: var(--ink); background: var(--cream); }
@@ -199,7 +194,7 @@ footer p { margin: 0; } footer p:nth-child(2) { text-align: center; } footer a {
   .hero-body { width: min(100%,520px); margin-top: 32px; font-size: 16px; }.hero-actions { align-items: flex-start; flex-direction: column; width: 100%; }.download-button { width: min(100%,360px); min-width: 0; }
   .hero-art { inset: auto -8% -5% 14%; height: 390px; }.hero-mark { top: 9%; left: 18%; width: 62vw; }.slash-red { inset: -10% 60% 38% 20%; }.slash-blue { inset: 0 0 36% 55%; }.slash-pink { inset: 50% 0 0 55%; }.slash-yellow { inset: 55% 58% -8% 12%; }.scroll-cue { display: none; }
   .section-copy, .install-heading { display: block; padding-inline: 18px; }.section-copy .section-number, .install-heading .section-number { margin-bottom: 28px; }.section-copy h2, .install-heading h2 { font-size: clamp(40px,12vw,58px); }.section-copy > p:last-child, .install-heading > p:last-child { margin-top: 28px; }
-  .product-stage { width: 94vw; box-shadow: 12px 14px 0 var(--ink); }.feature-lines { margin-inline: 18px; }.feature-lines article { display: block; }.feature-lines h3 { margin-top: 18px; }.feature-lines p { margin-top: 14px; }
+  .feature-lines { margin-inline: 18px; }.feature-lines article { display: block; }.feature-lines h3 { margin-top: 18px; }.feature-lines p { margin-top: 14px; }
   .method-section { min-height: 1040px; padding-inline: 18px; }.method-heading { display: block; }.method-heading .section-number { margin-bottom: 28px; }.method-heading h2 { font-size: clamp(40px,12vw,58px); }.method-list { width: 100%; margin-top: 70px; }.method-list li { grid-template-columns: 68px minmax(0,1fr); min-height: 160px; }.method-list b { font-size: 70px; }.method-list h3 { font-size: clamp(29px,9vw,42px); }.method-list p { font-size: 14px; }.method-aperture { left: -620px; opacity: .8; }
   .security-section { display: block; }.security-symbol { min-height: 420px; }.security-symbol::before { width: 270px; height: 270px; border-width: 42px; }.security-symbol::after { left: calc(50% - 30px); width: 60px; height: 250px; }.security-copy { padding: 80px 18px; }.security-copy h2 { font-size: clamp(40px,12vw,58px); }
   .install-section { padding-inline: 18px; }.install-steps { margin-top: 70px; }.install-steps li { grid-template-columns: 54px 1fr; min-height: 120px; font-size: 19px; }

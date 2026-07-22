@@ -16,6 +16,10 @@ OpenRouter のモデルを選ぶと、対応する項目だけを表示し、生
 
 <br />
 
+<img src="../../assets/readme/open-gen-ui-hero.png" alt="画像とフィルムのモチーフを抽象的に描いた鮮やかな切り絵風 OpenGen UI バナー" width="1200" />
+
+<br />
+
 [OpenGen UI を選ぶ理由](#open-gen-ui-を選ぶ理由) · [機能](#機能) · [仕組み](#仕組み) · [クイックスタート](#クイックスタート) · [セキュリティ](#セキュリティ) · [開発](#開発)
 
 </div>
@@ -120,7 +124,7 @@ open-gen-ui/
 ├── apps/desktop/
 │   ├── src/                 # React ワークスペースとリクエストビルダー
 │   └── src-tauri/           # 認証情報ストレージと OpenRouter プロキシ
-└── apps/landing/            # GitHub Pages ランディングページ
+└── assets/readme/           # README 用画像
 ```
 
 リクエスト生成ロジックは `apps/desktop/src/openrouter.ts`、ネイティブのセキュリティ境界と OpenRouter プロキシは `apps/desktop/src-tauri/src/lib.rs` にあります。
