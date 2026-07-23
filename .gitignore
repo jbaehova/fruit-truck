@@ -11,3 +11,4 @@ apps/desktop/src-tauri/gen/
 
 .agent
 AGENTS.md
+run.sh
