@@ -83,10 +83,11 @@ flowchart LR
 
 ```bash
 git clone https://github.com/jbaehova/open-gen-ui.git
-cd open-gen-ui/apps/desktop
-npm install
-npm run tauri:dev
+cd open-gen-ui
+./run.sh
 ```
+
+스크립트가 로컬 도구 모음을 확인하고, 필요하면 JavaScript 의존성을 설치한 뒤 Tauri 앱을 실행합니다. 브라우저 전용 개발 화면을 사용하려면 `./run.sh --web`을 실행하세요.
 
 앱이 열리면 **Settings**에서 OpenRouter API 키를 추가하세요. 모델 카탈로그가 자동으로 로드됩니다.
 
