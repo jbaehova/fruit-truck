@@ -83,11 +83,12 @@ flowchart LR
 
 ```bash
 git clone https://github.com/jbaehova/open-gen-ui.git
-cd open-gen-ui
-./run.sh
+cd open-gen-ui/apps/desktop
+npm ci
+npm run tauri:dev
 ```
 
-The script checks the local toolchain, installs JavaScript dependencies when needed, and starts the Tauri app. To use the browser-only development view instead, run `./run.sh --web`.
+To use the browser-only development view instead, run `npm run dev` from `apps/desktop`.
 
 When the app opens, add your OpenRouter API key in **Settings**. The model catalogs will load automatically.
 

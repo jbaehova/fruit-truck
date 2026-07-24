@@ -17,7 +17,7 @@ const ROLE_LABEL_KEYS: Record<ReferenceRole, MessageKey> = {
   video_reference: "sourceVideo",
 };
 
-export function ReferenceUploader({
+export function InputTray({
   references,
   assets,
   roles,

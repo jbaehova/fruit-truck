@@ -2,7 +2,7 @@ export type GenerationMode = "image" | "video";
 export type VideoWorkflow = "generate" | "edit";
 export type ReferenceRole = "reference" | "first_frame" | "last_frame" | "video_reference";
 
-export type CapabilityDescriptor = {
+type CapabilityDescriptor = {
   type: "enum" | "range" | "boolean";
   values?: Array<string | number>;
   min?: number;
@@ -95,8 +95,6 @@ export type CredentialStatus = {
 export type ImageResult = {
   kind: "image";
   urls: string[];
-  usage?: Record<string, unknown>;
-  requestId?: string;
 };
 
 export type VideoResult = {
@@ -191,7 +189,7 @@ export function imageReferenceLimit(model: ImageModel | null): number {
   return model?.supported_parameters.input_references?.max ?? 0;
 }
 
-export function videoReferenceTypes(model: VideoModel | null): Array<"image" | "video" | "audio"> {
+function videoReferenceTypes(model: VideoModel | null): Array<"image" | "video" | "audio"> {
   if (!model) return [];
   if (Array.isArray(model.input_reference_types)) return model.input_reference_types;
   const declared = model.architecture?.input_modalities ?? [];
@@ -427,8 +425,6 @@ export async function enhancePrompt(input: PromptEnhancementInput): Promise<stri
 export async function generateImage(payload: Record<string, unknown>): Promise<ImageResult> {
   const response = await request<{
     data?: Array<{ b64_json?: string; url?: string; media_type?: string }>;
-    usage?: Record<string, unknown>;
-    id?: string;
   }>("POST", "/images", payload);
   const urls = (response.data ?? []).flatMap((item) => {
     if (item.url) return [item.url];
@@ -436,7 +432,7 @@ export async function generateImage(payload: Record<string, unknown>): Promise<I
     return [];
   });
   if (!urls.length) throw new Error("OpenRouter returned no image data.");
-  return { kind: "image", urls, usage: response.usage, requestId: response.id };
+  return { kind: "image", urls };
 }
 
 export async function submitVideo(payload: Record<string, unknown>): Promise<VideoResult> {

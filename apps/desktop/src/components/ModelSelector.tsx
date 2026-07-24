@@ -24,7 +24,7 @@ function modelName(model: GenerationModel) {
   return model.name.replace(`${providerName(model)}: `, "");
 }
 
-function inputSignature(mode: GenerationMode, model: GenerationModel, language: string, t: ReturnType<typeof useI18n>["t"]) {
+function localizedInputSignature(mode: GenerationMode, model: GenerationModel, language: string, t: ReturnType<typeof useI18n>["t"]) {
   const signature = modelInputSignature(mode, model);
   if (language === "en") return signature;
   return signature
@@ -111,7 +111,7 @@ export function ModelSelector({ mode, models, selectedId, loading, onSelect }: P
                     <span className="model-icon">{mode === "image" ? <ImageIcon /> : <Video />}</span>
                     <span className="model-copy">
                       <strong>{modelName(model)}</strong>
-                      <small>{providerName(model)} · {inputSignature(mode, model, language, t)}</small>
+                      <small>{providerName(model)} · {localizedInputSignature(mode, model, language, t)}</small>
                     </span>
                     {active ? <Check className="model-check" /> : null}
                   </Button>

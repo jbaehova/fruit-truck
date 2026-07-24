@@ -26,11 +26,11 @@ import "./App.css";
 import { AssetLibrary } from "@/components/AssetLibrary";
 import { AssetPreview } from "@/components/AssetPreview";
 import { ConfirmDialog, type Confirmation } from "@/components/ConfirmDialog";
-import { ModelSelector } from "@/components/ModelSidebar";
+import { InputTray } from "@/components/InputTray";
+import { ModelSelector } from "@/components/ModelSelector";
 import { OptionsFields } from "@/components/OptionsFields";
-import { ReferenceUploader } from "@/components/ReferenceUploader";
 import { RequestPreviewDialog } from "@/components/RequestPreviewDialog";
-import { SessionSidebar } from "@/components/SessionSwitcher";
+import { SessionSidebar } from "@/components/SessionSidebar";
 import { SettingsDialog } from "@/components/SettingsDialog";
 import { UpdatePrompt } from "@/components/UpdatePrompt";
 import { Button } from "@/components/ui/button";
@@ -856,7 +856,7 @@ export default function App() {
               </Collapsible.Root>
             ) : null}
 
-            <ReferenceUploader references={draft.references} assets={session.assets} roles={roles} limit={referenceLimit} onChange={(references) => patchDraft({ references, enhancedPrompt: "", enhancedPromptDirty: false })} onImport={importFiles} />
+            <InputTray references={draft.references} assets={session.assets} roles={roles} limit={referenceLimit} onChange={(references) => patchDraft({ references, enhancedPrompt: "", enhancedPromptDirty: false })} onImport={importFiles} />
             <OptionsFields key={`${mode}:${workflow}:${selectedModel?.id ?? ""}`} mode={mode} model={selectedModel} options={draft.options} providerJson={draft.providerJson} providerError={providerError} onOptionsChange={(options) => patchDraft({ options })} onProviderJsonChange={(providerJson) => patchDraft({ providerJson })} />
           </div>
           <footer className="generate-bar">

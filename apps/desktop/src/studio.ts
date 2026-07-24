@@ -2,11 +2,11 @@ import type {
   DraftOptions,
   GenerationMode,
   ReferenceRole,
+  VideoWorkflow,
   VideoResult,
 } from "@/openrouter";
 
-export type VideoWorkflow = "generate" | "edit";
-export type AssetKind = "image" | "video";
+type AssetKind = "image" | "video";
 export type AssetOrigin = "upload" | "generated" | "edited";
 export type PromptModel = "openai/gpt-5.6-luna" | "openai/gpt-5.6-terra";
 
@@ -76,6 +76,7 @@ export type StudioState = {
 };
 
 const STORAGE_KEY = "open-gen-ui.studio.v1";
+const LEGACY_ACTIVE_VIDEO_KEY = "open-gen-ui.active-video-job";
 const DB_NAME = "open-gen-ui-assets";
 const DB_VERSION = 1;
 const BLOB_STORE = "blobs";
@@ -90,7 +91,7 @@ export const PROMPT_MODELS: Array<{
   { id: "openai/gpt-5.6-terra", label: "GPT-5.6 Terra", effort: "high" },
 ];
 
-export function emptyDraft(): GenerationDraftState {
+function emptyDraft(): GenerationDraftState {
   return {
     prompt: "",
     references: [],
@@ -125,7 +126,7 @@ export function createSession(name = "Untitled session"): StudioSession {
   };
 }
 
-export function createInitialStudioState(): StudioState {
+function createInitialStudioState(): StudioState {
   const session = createSession("First session");
   return {
     schemaVersion: 1,
@@ -146,6 +147,7 @@ function validState(value: unknown): value is StudioState {
 
 export function loadStudioState(): StudioState {
   if (typeof localStorage === "undefined") return createInitialStudioState();
+  localStorage.removeItem(LEGACY_ACTIVE_VIDEO_KEY);
   const raw = localStorage.getItem(STORAGE_KEY);
   if (!raw) return createInitialStudioState();
   try {
@@ -182,7 +184,7 @@ function openAssetDb(): Promise<IDBDatabase | null> {
   });
 }
 
-export async function storeAssetBlob(key: string, blob: Blob): Promise<void> {
+async function storeAssetBlob(key: string, blob: Blob): Promise<void> {
   const db = await openAssetDb();
   if (!db) {
     memoryBlobs.set(key, blob);
@@ -197,7 +199,7 @@ export async function storeAssetBlob(key: string, blob: Blob): Promise<void> {
   db.close();
 }
 
-export async function loadAssetBlob(key: string): Promise<Blob | null> {
+async function loadAssetBlob(key: string): Promise<Blob | null> {
   const db = await openAssetDb();
   if (!db) return memoryBlobs.get(key) ?? null;
   const value = await new Promise<Blob | null>((resolve, reject) => {
@@ -356,9 +358,4 @@ export function nextReferenceSlot(references: DraftReference[]): number {
   let slot = 1;
   while (used.has(slot)) slot += 1;
   return slot;
-}
-
-export function referencedAssetIds(session: StudioSession): Set<string> {
-  const drafts = [session.drafts.image, session.drafts.videoGenerate, session.drafts.videoEdit];
-  return new Set(drafts.flatMap((draft) => draft.references.map((reference) => reference.assetId)));
 }

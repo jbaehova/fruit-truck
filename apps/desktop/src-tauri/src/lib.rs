@@ -26,7 +26,6 @@ struct Credentials {
 #[serde(rename_all = "camelCase")]
 struct CachedMedia {
   path: String,
-  content_type: String,
 }
 
 fn credentials_directory(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -238,7 +237,6 @@ async fn cache_video_content(
   std::fs::write(&path, bytes).map_err(|error| error.to_string())?;
   Ok(CachedMedia {
     path: path.to_string_lossy().into_owned(),
-    content_type,
   })
 }
 

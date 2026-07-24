@@ -12,7 +12,7 @@ import type { StudioSession } from "@/studio";
 const MIN_WIDTH = 210;
 const MAX_WIDTH = 420;
 
-function clampWidth(width: number) {
+function clampSidebarWidth(width: number) {
   return Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, width));
 }
 
@@ -56,7 +56,7 @@ export function SessionSidebar({
     event.preventDefault();
     const startX = event.clientX;
     const startWidth = width;
-    const move = (moveEvent: globalThis.PointerEvent) => onWidthChange(clampWidth(startWidth + moveEvent.clientX - startX));
+    const move = (moveEvent: globalThis.PointerEvent) => onWidthChange(clampSidebarWidth(startWidth + moveEvent.clientX - startX));
     const stop = () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", stop);
@@ -70,7 +70,7 @@ export function SessionSidebar({
   const resizeWithKeyboard = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
     event.preventDefault();
-    onWidthChange(clampWidth(width + (event.key === "ArrowRight" ? 12 : -12)));
+    onWidthChange(clampSidebarWidth(width + (event.key === "ArrowRight" ? 12 : -12)));
   };
 
   return (

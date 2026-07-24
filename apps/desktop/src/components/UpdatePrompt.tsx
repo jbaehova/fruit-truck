@@ -2,8 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Dialog } from "@base-ui/react/dialog";
 import { Progress } from "@base-ui/react/progress";
 import { ArrowRight, Download, LoaderCircle, RefreshCw, Sparkles } from "lucide-react";
-import { check, type Update } from "@tauri-apps/plugin-updater";
-import { relaunch } from "@tauri-apps/plugin-process";
+import type { Update } from "@tauri-apps/plugin-updater";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useI18n } from "@/i18n";
@@ -12,7 +11,8 @@ type UpdatePhase = "ready" | "installing" | "failed";
 
 let updateCheck: Promise<Update | null> | null = null;
 
-function checkOnce() {
+async function checkOnce() {
+  const { check } = await import("@tauri-apps/plugin-updater");
   updateCheck ??= check();
   return updateCheck;
 }
@@ -59,6 +59,7 @@ export function UpdatePrompt() {
           setDownloaded(downloadedRef.current);
         }
       });
+      const { relaunch } = await import("@tauri-apps/plugin-process");
       await relaunch();
     } catch (error) {
       setPhase("failed");
