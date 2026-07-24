@@ -1,17 +1,27 @@
 import { Dialog } from "@base-ui/react/dialog";
 import { Field } from "@base-ui/react/field";
 import { Form } from "@base-ui/react/form";
-import { Menu } from "@base-ui/react/menu";
-import { Check, ChevronDown, Pencil, Plus, Trash2, X } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState, type KeyboardEvent, type PointerEvent } from "react";
+import { Check, PanelLeftClose, Pencil, Plus, Search, Trash2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import { useI18n } from "@/i18n";
 import type { StudioSession } from "@/studio";
 
-export function SessionSwitcher({
+const MIN_WIDTH = 210;
+const MAX_WIDTH = 420;
+
+function clampWidth(width: number) {
+  return Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, width));
+}
+
+export function SessionSidebar({
   sessions,
   activeId,
+  width,
+  onWidthChange,
+  onClose,
   onSelect,
   onCreate,
   onRename,
@@ -19,52 +29,124 @@ export function SessionSwitcher({
 }: {
   sessions: StudioSession[];
   activeId: string;
+  width: number;
+  onWidthChange: (width: number) => void;
+  onClose: () => void;
   onSelect: (id: string) => void;
   onCreate: () => void;
   onRename: (id: string, name: string) => void;
   onDelete: (id: string) => void;
 }) {
   const { locale, t } = useI18n();
-  const active = sessions.find((session) => session.id === activeId) ?? sessions[0];
-  const [renameOpen, setRenameOpen] = useState(false);
-  const [name, setName] = useState(active?.name ?? "");
+  const [query, setQuery] = useState("");
+  const [renameId, setRenameId] = useState<string | null>(null);
+  const renaming = sessions.find((session) => session.id === renameId) ?? null;
+  const [name, setName] = useState("");
+  const filtered = useMemo(() => {
+    const value = query.trim().toLowerCase();
+    if (!value) return sessions;
+    return sessions.filter((session) => session.name.toLowerCase().includes(value));
+  }, [query, sessions]);
 
   useEffect(() => {
-    if (renameOpen) setName(active?.name ?? "");
-  }, [active?.name, renameOpen]);
+    if (renaming) setName(renaming.name);
+  }, [renaming]);
+
+  const beginResize = (event: PointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = width;
+    const move = (moveEvent: globalThis.PointerEvent) => onWidthChange(clampWidth(startWidth + moveEvent.clientX - startX));
+    const stop = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", stop);
+      document.body.classList.remove("resizing-session-sidebar");
+    };
+    document.body.classList.add("resizing-session-sidebar");
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", stop, { once: true });
+  };
+
+  const resizeWithKeyboard = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    onWidthChange(clampWidth(width + (event.key === "ArrowRight" ? 12 : -12)));
+  };
 
   return (
     <>
-      <Menu.Root>
-        <Menu.Trigger className="session-trigger">
-          <span><small>{t("session")}</small><strong>{active?.name ?? t("session")}</strong></span>
-          <ChevronDown />
-        </Menu.Trigger>
-        <Menu.Portal>
-          <Menu.Positioner className="menu-positioner" sideOffset={7} align="start">
-            <Menu.Popup className="session-menu">
-              <Menu.Group>
-                <Menu.GroupLabel className="session-menu-title">{t("recentSessions")}</Menu.GroupLabel>
-                {sessions.map((session) => (
-                  <Menu.Item className="session-menu-item" key={session.id} onClick={() => onSelect(session.id)}>
-                    <span className="session-check">{session.id === activeId ? <Check /> : null}</span>
-                    <span>
-                      <strong>{session.name}</strong>
-                      <small>{new Date(session.updatedAt).toLocaleString(locale)}</small>
-                    </span>
-                  </Menu.Item>
-                ))}
-              </Menu.Group>
-              <Menu.Separator className="menu-separator" />
-              <Menu.Item className="session-action" onClick={() => setRenameOpen(true)}><Pencil /> {t("renameCurrent")}</Menu.Item>
-              <Menu.Item className="session-action" disabled={sessions.length === 1} onClick={() => onDelete(activeId)}><Trash2 /> {t("deleteCurrent")}</Menu.Item>
-              <Menu.Item className="session-action" onClick={onCreate}><Plus /> {t("newSession")}</Menu.Item>
-            </Menu.Popup>
-          </Menu.Positioner>
-        </Menu.Portal>
-      </Menu.Root>
+      <aside className="session-sidebar" style={{ width }}>
+        <header className="session-sidebar-header">
+          <div>
+            <span>{t("sessions")}</span>
+            <small>{t("sessionCount", { count: sessions.length })}</small>
+          </div>
+          <Button type="button" variant="ghost" size="icon-sm" aria-label={t("closeSessionSidebar")} onClick={onClose}>
+            <PanelLeftClose />
+          </Button>
+        </header>
+        <div className="session-sidebar-tools">
+          <Field.Root className="session-search">
+            <Field.Label className="sr-only">{t("searchSessions")}</Field.Label>
+            <Search aria-hidden="true" />
+            <Input
+              aria-label={t("searchSessions")}
+              placeholder={t("searchSessions")}
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+            />
+          </Field.Root>
+          <Button type="button" variant="default" size="icon" aria-label={t("newSession")} onClick={onCreate}><Plus /></Button>
+        </div>
+        <ScrollArea className="session-list" aria-label={t("recentSessions")}>
+          {!filtered.length ? <p className="session-empty">{t("noMatchingSessions")}</p> : null}
+          {filtered.map((session) => {
+            const active = session.id === activeId;
+            return (
+              <div className={`session-row ${active ? "active" : ""}`} key={session.id}>
+                <button type="button" className="session-row-main" onClick={() => onSelect(session.id)}>
+                  <span className="session-state">{active ? <Check /> : null}</span>
+                  <span>
+                    <strong>{session.name}</strong>
+                    <small>{new Date(session.updatedAt).toLocaleString(locale)}</small>
+                  </span>
+                </button>
+                <div className="session-row-actions">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-xs"
+                    aria-label={t("renameSessionNamed", { name: session.name })}
+                    onClick={() => setRenameId(session.id)}
+                  ><Pencil /></Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-xs"
+                    disabled={sessions.length === 1}
+                    aria-label={t("deleteSessionNamed", { name: session.name })}
+                    onClick={() => onDelete(session.id)}
+                  ><Trash2 /></Button>
+                </div>
+              </div>
+            );
+          })}
+        </ScrollArea>
+        <div
+          className="session-sidebar-resizer"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label={t("resizeSessionSidebar")}
+          aria-valuemin={MIN_WIDTH}
+          aria-valuemax={MAX_WIDTH}
+          aria-valuenow={Math.round(width)}
+          tabIndex={0}
+          onPointerDown={beginResize}
+          onKeyDown={resizeWithKeyboard}
+        />
+      </aside>
 
-      <Dialog.Root open={renameOpen} onOpenChange={setRenameOpen}>
+      <Dialog.Root open={Boolean(renameId)} onOpenChange={(open) => { if (!open) setRenameId(null); }}>
         <Dialog.Portal>
           <Dialog.Backdrop className="dialog-backdrop" />
           <Dialog.Viewport className="dialog-viewport">
@@ -78,9 +160,9 @@ export function SessionSwitcher({
               </header>
               <Form onFormSubmit={() => {
                 const value = name.trim();
-                if (!value) return;
-                onRename(activeId, value);
-                setRenameOpen(false);
+                if (!value || !renaming) return;
+                onRename(renaming.id, value);
+                setRenameId(null);
               }}>
                 <Field.Root name="sessionName">
                   <Field.Label className="sr-only">{t("sessionName")}</Field.Label>

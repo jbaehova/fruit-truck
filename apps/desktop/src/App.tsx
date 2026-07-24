@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { Collapsible } from "@base-ui/react/collapsible";
 import { Field } from "@base-ui/react/field";
 import { Popover } from "@base-ui/react/popover";
@@ -14,6 +14,7 @@ import {
   Film,
   ImageIcon,
   LoaderCircle,
+  PanelLeftOpen,
   Play,
   Pencil,
   RefreshCw,
@@ -25,11 +26,11 @@ import "./App.css";
 import { AssetLibrary } from "@/components/AssetLibrary";
 import { AssetPreview } from "@/components/AssetPreview";
 import { ConfirmDialog, type Confirmation } from "@/components/ConfirmDialog";
-import { ModelSidebar } from "@/components/ModelSidebar";
+import { ModelSelector } from "@/components/ModelSidebar";
 import { OptionsFields } from "@/components/OptionsFields";
 import { ReferenceUploader } from "@/components/ReferenceUploader";
 import { RequestPreviewDialog } from "@/components/RequestPreviewDialog";
-import { SessionSwitcher } from "@/components/SessionSwitcher";
+import { SessionSidebar } from "@/components/SessionSwitcher";
 import { SettingsDialog } from "@/components/SettingsDialog";
 import { UpdatePrompt } from "@/components/UpdatePrompt";
 import { Button } from "@/components/ui/button";
@@ -108,6 +109,9 @@ const JOB_STATUS_KEYS: Record<string, MessageKey> = {
   completed: "statusCompleted",
 };
 
+const SESSION_SIDEBAR_OPEN_KEY = "open-gen-ui.session-sidebar.open";
+const SESSION_SIDEBAR_WIDTH_KEY = "open-gen-ui.session-sidebar.width";
+
 export default function App() {
   const { language, t } = useI18n();
   const [studio, setStudio] = useState(loadStudioState);
@@ -122,6 +126,14 @@ export default function App() {
   const [generationError, setGenerationError] = useState<string | null>(null);
   const [selectedAssetIds, setSelectedAssetIds] = useState<Set<string>>(new Set());
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
+  const [sessionSidebarOpen, setSessionSidebarOpen] = useState(() =>
+    typeof localStorage === "undefined" || localStorage.getItem(SESSION_SIDEBAR_OPEN_KEY) !== "false",
+  );
+  const [sessionSidebarWidth, setSessionSidebarWidth] = useState(() => {
+    if (typeof localStorage === "undefined") return 264;
+    const stored = Number(localStorage.getItem(SESSION_SIDEBAR_WIDTH_KEY));
+    return Number.isFinite(stored) && stored >= 210 && stored <= 420 ? stored : 264;
+  });
   const composerViewportRef = useRef<HTMLDivElement>(null);
   const polling = useRef(false);
 
@@ -189,6 +201,11 @@ export default function App() {
     const timer = window.setTimeout(() => saveStudioState(studio), 120);
     return () => window.clearTimeout(timer);
   }, [studio]);
+
+  useEffect(() => {
+    localStorage.setItem(SESSION_SIDEBAR_OPEN_KEY, String(sessionSidebarOpen));
+    localStorage.setItem(SESSION_SIDEBAR_WIDTH_KEY, String(Math.round(sessionSidebarWidth)));
+  }, [sessionSidebarOpen, sessionSidebarWidth]);
 
   useEffect(() => {
     void getCredentialStatus().then((status) => {
@@ -656,36 +673,35 @@ export default function App() {
     ? draft.references.filter((reference) => String(reference.slot).startsWith(mentionMatch[1]))
     : [];
   const canGenerate = Boolean(selectedModel && draft.prompt.trim() && !providerError && !referenceValidationError && credential?.configured && !generating && !enhancing);
+  const selectSession = (id: string) => {
+    setStudio((current) => ({ ...current, activeSessionId: id }));
+    setSelectedAssetIds(new Set());
+  };
+  const createNewSession = () => {
+    const created = createSession(t("newSessionName", { count: studio.sessions.length + 1 }));
+    setStudio((current) => ({ ...current, activeSessionId: created.id, sessions: [...current.sessions, created] }));
+  };
+  const deleteStudioSession = (id: string) => void (async () => {
+    const deleting = studio.sessions.find((item) => item.id === id);
+    if (!deleting || studio.sessions.length === 1) return;
+    if (!await confirmAction(
+      t("deleteSessionTitle", { name: deleting.name }),
+      t("deleteSessionHint"),
+      t("deleteSession"),
+    )) return;
+    void deleteSessionBlobs(deleting);
+    setStudio((current) => {
+      const sessions = current.sessions.filter((item) => item.id !== id);
+      return { ...current, sessions, activeSessionId: current.activeSessionId === id ? sessions[0].id : current.activeSessionId };
+    });
+  })();
 
   return (
     <Tooltip.Provider>
     <div className="app-shell">
       <header className="topbar" data-tauri-drag-region>
         <div className="brand" data-tauri-drag-region><span className="brand-mark"><OpenGenMark /></span><strong>OpenGen UI</strong><span className="brand-badge">{t("humanDriven")}</span></div>
-        <SessionSwitcher
-          sessions={studio.sessions}
-          activeId={studio.activeSessionId}
-          onSelect={(id) => { setStudio((current) => ({ ...current, activeSessionId: id })); setSelectedAssetIds(new Set()); }}
-          onCreate={() => {
-            const created = createSession(t("newSessionName", { count: studio.sessions.length + 1 }));
-            setStudio((current) => ({ ...current, activeSessionId: created.id, sessions: [...current.sessions, created] }));
-          }}
-          onRename={(id, name) => patchSession(id, (current) => ({ ...current, name }))}
-          onDelete={(id) => void (async () => {
-            const deleting = studio.sessions.find((item) => item.id === id);
-            if (!deleting || studio.sessions.length === 1) return;
-            if (!await confirmAction(
-              t("deleteSessionTitle", { name: deleting.name }),
-              t("deleteSessionHint"),
-              t("deleteSession"),
-            )) return;
-            void deleteSessionBlobs(deleting);
-            setStudio((current) => {
-              const sessions = current.sessions.filter((item) => item.id !== id);
-              return { ...current, sessions, activeSessionId: current.activeSessionId === id ? sessions[0].id : current.activeSessionId };
-            });
-          })()}
-        />
+        <ModelSelector mode={mode} models={models} selectedId={selectedId} loading={catalogLoading} onSelect={selectModel} />
         <ToggleGroup className="mode-switcher" aria-label={t("generationMode")} value={[mode]} onValueChange={(value) => {
           const next = value[0];
           if (next === "image" || next === "video") switchMode(next);
@@ -699,8 +715,33 @@ export default function App() {
         </div>
       </header>
 
-      <main className="workspace">
-        <ModelSidebar mode={mode} models={models} selectedId={selectedId} loading={catalogLoading} onSelect={selectModel} />
+      <main
+        className={`workspace ${sessionSidebarOpen ? "session-sidebar-open" : "session-sidebar-closed"}`}
+        style={{ "--sessions-width": `${sessionSidebarWidth}px` } as CSSProperties}
+      >
+        {!sessionSidebarOpen ? (
+          <Button
+            type="button"
+            variant="outline"
+            size="icon"
+            className="session-sidebar-reopen"
+            aria-label={t("openSessionSidebar")}
+            onClick={() => setSessionSidebarOpen(true)}
+          ><PanelLeftOpen /></Button>
+        ) : null}
+        {sessionSidebarOpen ? (
+          <SessionSidebar
+            sessions={studio.sessions}
+            activeId={studio.activeSessionId}
+            width={sessionSidebarWidth}
+            onWidthChange={setSessionSidebarWidth}
+            onClose={() => setSessionSidebarOpen(false)}
+            onSelect={selectSession}
+            onCreate={createNewSession}
+            onRename={(id, name) => patchSession(id, (current) => ({ ...current, name }))}
+            onDelete={deleteStudioSession}
+          />
+        ) : null}
         <section className="composer">
           <ScrollArea className="composer-scroll" viewportRef={composerViewportRef}>
           {catalogError ? <div className="catalog-error"><CircleAlert /><span><strong>{t("catalogLoadFailed")}</strong><small>{catalogError}</small></span><Button variant="outline" size="sm" onClick={() => void refreshCatalog()}><RefreshCw /> {t("retry")}</Button></div> : null}
