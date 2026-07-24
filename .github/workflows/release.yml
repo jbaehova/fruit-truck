@@ -66,7 +66,7 @@ jobs:
           releaseBody: |
             Download `OpenGen-UI-macOS-universal.dmg` for Apple Silicon or Intel Macs.
 
-            OpenGen UI 0.2.0 introduces signed in-app updates. This release must be installed manually once when upgrading from 0.1.x; later releases can be installed from inside the app.
+            Signed in-app updates are supported for users on 0.2.0 or newer. Users upgrading from 0.1.x must install this DMG once; later releases can be installed from inside the app.
 
             This build is ad-hoc signed and is not notarized by Apple. After copying the app to Applications, try to open it once, then go to System Settings → Privacy & Security → Open Anyway.
           releaseDraft: true

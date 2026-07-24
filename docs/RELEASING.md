@@ -31,8 +31,8 @@ npm run bundle:mac:universal
 Commit the version, then create and push the matching tag:
 
 ```bash
-git tag v0.2.0
-git push origin v0.2.0
+git tag v0.2.1
+git push origin v0.2.1
 ```
 
 The release workflow will:
