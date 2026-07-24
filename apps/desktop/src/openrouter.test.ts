@@ -1,14 +1,26 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildRequest, defaultOptions, type ImageModel, type ReferenceAsset, type VideoModel } from "./openrouter.ts";
+import {
+  allowedAssetRoles,
+  buildRequest,
+  defaultOptions,
+  productSystemInstruction,
+  promptEnhancerInstruction,
+  validateEnhancedPrompt,
+  modelInputSignature,
+  supportsVideoInput,
+  type ImageModel,
+  type ReferenceAsset,
+  type VideoModel,
+} from "./openrouter.ts";
 
-const asset = (role: ReferenceAsset["role"], name = role): ReferenceAsset => ({
+const asset = (role: ReferenceAsset["role"], name = role, mediaType = "image/png", slot = 1): ReferenceAsset => ({
   id: name,
-  name: `${name}.png`,
-  mediaType: "image/png",
-  dataUrl: `data:image/png;base64,${name}`,
-  previewUrl: "blob:preview",
+  name: `${name}.${mediaType.startsWith("video/") ? "mp4" : "png"}`,
+  mediaType,
+  dataUrl: `data:${mediaType};base64,${name}`,
   role,
+  slot,
 });
 
 test("image request includes only discovered capabilities", () => {
@@ -25,14 +37,14 @@ test("image request includes only discovered capabilities", () => {
     mode: "image",
     model: model.id,
     prompt: "  hello  ",
-    assets: [asset("reference", "one"), asset("reference", "two")],
+    assets: [asset("reference", "one"), asset("reference", "two", "image/png", 2)],
     options: { resolution: "2K", n: 1, quality: "high" },
     providerJson: "",
   }, model);
 
   assert.deepEqual(request, {
     model: model.id,
-    prompt: "hello",
+    prompt: "Attached input mapping: #1 = one.png (reference). Preserve these identities exactly.\n\nhello",
     resolution: "2K",
     n: 1,
     input_references: [{ type: "image_url", image_url: { url: "data:image/png;base64,one" } }],
@@ -41,9 +53,11 @@ test("image request includes only discovered capabilities", () => {
 
 test("video request separates references from first and last frames", () => {
   const model: VideoModel = {
-    id: "alibaba/wan-2.7",
+    id: "example/video",
     name: "Wan",
-    description: "Reference-to-video model",
+    architecture: { input_modalities: ["text", "image"] },
+    input_reference_types: ["image"],
+    max_input_references: 2,
     supported_durations: [4, 8],
     supported_resolutions: ["720p"],
     supported_aspect_ratios: ["16:9"],
@@ -61,9 +75,59 @@ test("video request separates references from first and last frames", () => {
   }, model);
 
   assert.equal((request.input_references as unknown[]).length, 1);
+  assert.match(String(request.prompt), /#1 = reference.png/);
   assert.deepEqual((request.frame_images as Array<{ frame_type: string }>).map((item) => item.frame_type), ["first_frame", "last_frame"]);
   assert.equal(request.quality, undefined);
   assert.deepEqual(request.provider, { order: ["Alibaba"] });
+});
+
+test("video edit support is fail-closed and comes only from structured metadata", () => {
+  const proseOnly: VideoModel = {
+    id: "example/prose",
+    name: "Prose",
+    description: "Excellent video-to-video editing and reference images",
+  };
+  const declared: VideoModel = {
+    id: "example/declared",
+    name: "Declared",
+    architecture: { input_modalities: ["text", "video", "image"] },
+    max_input_references: 2,
+  };
+
+  assert.equal(supportsVideoInput(proseOnly), false);
+  assert.deepEqual(allowedAssetRoles("video", proseOnly, "edit"), []);
+  assert.equal(supportsVideoInput(declared), true);
+  assert.deepEqual(allowedAssetRoles("video", declared, "edit"), ["reference", "video_reference"]);
+  assert.equal(modelInputSignature("video", declared), "Text + image + video");
+
+  const request = buildRequest({
+    mode: "video",
+    videoWorkflow: "edit",
+    model: declared.id,
+    prompt: "turn it into dusk",
+    assets: [asset("video_reference", "source", "video/mp4")],
+    options: {},
+    providerJson: "",
+  }, declared);
+  assert.deepEqual(request.input_references, [{
+    type: "video_url",
+    video_url: { url: "data:video/mp4;base64,source" },
+  }]);
+});
+
+test("image edit enhancement distinguishes the target from context references", () => {
+  const instruction = productSystemInstruction({
+    mode: "image",
+    editMode: true,
+    editTarget: "#2",
+    references: [],
+  });
+  assert.match(instruction, /explicit edit target is "#2"/);
+  assert.match(instruction, /other numbered images are context only/);
+  assert.doesNotMatch(instruction, /Rewrite the user's request/);
+  assert.match(promptEnhancerInstruction(), /instead of forcing a fixed schema/);
+  assert.equal(validateEnhancedPrompt("Keep #1, copy #2", "Keep #1 and copy #2"), null);
+  assert.match(validateEnhancedPrompt("Keep #1", "Keep #1 and use #3") ?? "", /invented #3/);
 });
 
 test("default options come directly from capability values", () => {

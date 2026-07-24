@@ -1,0 +1,201 @@
+import { Checkbox } from "@base-ui/react/checkbox";
+import { Dialog } from "@base-ui/react/dialog";
+import { Progress } from "@base-ui/react/progress";
+import { Toggle } from "@base-ui/react/toggle";
+import { ToggleGroup } from "@base-ui/react/toggle-group";
+import { Check, Download, Eye, ImageIcon, Plus, Trash2, Video, X } from "lucide-react";
+import { useRef, useState } from "react";
+import { AssetPreview } from "@/components/AssetPreview";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { useI18n, type MessageKey } from "@/i18n";
+import { resolveAssetSource, type SessionAsset, type SessionVideoJob } from "@/studio";
+
+const ORIGIN_KEYS: Record<SessionAsset["origin"], MessageKey> = {
+  upload: "originUpload",
+  generated: "originGenerated",
+  edited: "originEdited",
+};
+
+const STATUS_KEYS: Record<string, MessageKey> = {
+  pending: "statusPending",
+  in_progress: "statusInProgress",
+  failed: "statusFailed",
+  completed: "statusCompleted",
+};
+
+export function AssetLibrary({
+  assets,
+  selectedIds,
+  onSelectedIdsChange,
+  onImport,
+  onUse,
+  onDelete,
+  jobs,
+}: {
+  assets: SessionAsset[];
+  selectedIds: Set<string>;
+  onSelectedIdsChange: (ids: Set<string>) => void;
+  onImport: (files: FileList | File[]) => Promise<void>;
+  onUse: (assetId: string) => void;
+  onDelete: (ids: string[]) => void;
+  jobs: SessionVideoJob[];
+}) {
+  const { t } = useI18n();
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [preview, setPreview] = useState<SessionAsset | null>(null);
+  const [filter, setFilter] = useState<"all" | "image" | "video">("all");
+  const visibleAssets = assets
+    .filter((asset) => filter === "all" || asset.kind === filter)
+    .toSorted((a, b) => b.createdAt.localeCompare(a.createdAt));
+
+  const toggle = (id: string, checked: boolean) => {
+    const next = new Set(selectedIds);
+    if (checked) next.add(id);
+    else next.delete(id);
+    onSelectedIdsChange(next);
+  };
+
+  const exportAsset = async (asset: SessionAsset) => {
+    const source = await resolveAssetSource(asset);
+    const anchor = document.createElement("a");
+    anchor.href = source;
+    anchor.download = asset.name;
+    anchor.click();
+    if (source.startsWith("blob:")) window.setTimeout(() => URL.revokeObjectURL(source), 1_000);
+  };
+
+  return (
+    <aside
+      className="asset-library"
+      onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) event.preventDefault(); }}
+      onDrop={(event) => {
+        if (!event.dataTransfer.files.length) return;
+        event.preventDefault();
+        void onImport(event.dataTransfer.files);
+      }}
+    >
+      <header className="asset-library-header">
+        <div>
+          <span className="panel-eyebrow">{t("currentSession")}</span>
+          <strong>{t("assetLibrary")} <small>{assets.length}</small></strong>
+          <p>{t("assetLibraryHint")}</p>
+        </div>
+        <Button size="icon-sm" variant="outline" aria-label={t("importAssets")} onClick={() => inputRef.current?.click()}><Plus /></Button>
+      </header>
+
+      <div className="asset-toolbar">
+        <ToggleGroup
+          className="asset-filters"
+          value={[filter]}
+          onValueChange={(value) => {
+            const next = value[0];
+            if (next === "all" || next === "image" || next === "video") setFilter(next);
+          }}
+        >
+          {(["all", "image", "video"] as const).map((value) => (
+            <Toggle className="asset-filter" aria-label={t("showAssets", { kind: value === "all" ? t("all") : t(value) })} value={value} key={value}>
+              {value === "all" ? t("all") : t(value)}
+            </Toggle>
+          ))}
+        </ToggleGroup>
+        {selectedIds.size ? (
+          <Button
+            size="xs"
+            variant="ghost"
+            aria-label={`${t("deleteAssets")} (${selectedIds.size})`}
+            onClick={() => onDelete([...selectedIds])}
+          >
+            <Trash2 /> {selectedIds.size}
+          </Button>
+        ) : null}
+      </div>
+
+      <Input ref={inputRef} className="sr-only" type="file" accept="image/*,video/*" multiple onChange={(event) => {
+        if (event.target.files) void onImport(event.target.files);
+        event.target.value = "";
+      }} />
+
+      <ScrollArea className="asset-grid" contentClassName="asset-grid-content">
+        {!assets.length ? (
+          <Button variant="ghost" className="asset-empty" onClick={() => inputRef.current?.click()}>
+            <Plus />
+            <span>{t("importMedia")}</span>
+            <small>{t("dropFilesHint")}</small>
+          </Button>
+        ) : null}
+        {jobs.map((job) => (
+          <Progress.Root className="asset-job" key={job.jobId} value={job.progress ?? null} render={<article />}>
+            <span className="asset-job-icon"><Video /></span>
+            <Progress.Label className="asset-job-label"><strong>{job.status === "failed" ? t("videoJobFailed") : t("generatingVideo")}</strong></Progress.Label>
+            <Progress.Value className="asset-job-value">{() => job.progress == null ? t(STATUS_KEYS[job.status] ?? "statusPending") : `${job.progress}%`}</Progress.Value>
+            <Progress.Track className="asset-job-progress"><Progress.Indicator /></Progress.Track>
+          </Progress.Root>
+        ))}
+        {visibleAssets.map((asset) => (
+          <article
+            key={asset.id}
+            className={`asset-tile ${selectedIds.has(asset.id) ? "selected" : ""}`}
+            draggable
+            onDragStart={(event) => {
+              event.dataTransfer.setData("application/x-open-gen-asset", asset.id);
+              event.dataTransfer.effectAllowed = "copy";
+            }}
+          >
+            <Checkbox.Root
+              className="asset-select"
+              checked={selectedIds.has(asset.id)}
+              onCheckedChange={(checked) => toggle(asset.id, checked)}
+              aria-label={t("selectAsset", { name: asset.name })}
+            >
+              <Checkbox.Indicator><Check /></Checkbox.Indicator>
+            </Checkbox.Root>
+            <Button variant="ghost" className="asset-visual" onClick={() => setPreview(asset)}>
+              <AssetPreview asset={asset} />
+              <span>{asset.kind === "image" ? <ImageIcon /> : <Video />}{t(ORIGIN_KEYS[asset.origin])}</span>
+            </Button>
+            <footer>
+              <span title={asset.name}>{asset.name}</span>
+              <div>
+                <Button variant="ghost" size="icon-xs" aria-label={t("export")} onClick={() => void exportAsset(asset)}><Download /></Button>
+                <Button variant="ghost" size="icon-xs" aria-label={t("preview")} onClick={() => setPreview(asset)}><Eye /></Button>
+                <Button variant="ghost" size="icon-xs" aria-label={t("useInput")} onClick={() => onUse(asset.id)}><Plus /></Button>
+              </div>
+            </footer>
+          </article>
+        ))}
+      </ScrollArea>
+
+      <footer className="asset-library-footer">
+        {visibleAssets.length ? (
+          <Button size="xs" variant="ghost" onClick={() => onSelectedIdsChange(selectedIds.size === visibleAssets.length ? new Set() : new Set(visibleAssets.map((asset) => asset.id)))}>
+            {selectedIds.size === visibleAssets.length ? t("clearSelection") : t("selectVisible")}
+          </Button>
+        ) : <span>{t("noAssets", { kind: filter === "all" ? "" : `${t(filter)} ` })}</span>}
+        <Button size="xs" variant="outline" onClick={() => inputRef.current?.click()}><Plus /> {t("import")}</Button>
+      </footer>
+
+      <Dialog.Root open={Boolean(preview)} onOpenChange={(open) => { if (!open) setPreview(null); }}>
+        <Dialog.Portal>
+          <Dialog.Backdrop className="preview-backdrop" />
+          <Dialog.Viewport className="preview-viewport">
+            <Dialog.Popup className="asset-preview-dialog">
+              <header>
+                <span>
+                  <Dialog.Title>{preview?.name}</Dialog.Title>
+                  <Dialog.Description>{preview ? t(preview.kind) : ""} · {preview ? t(ORIGIN_KEYS[preview.origin]) : ""} · {preview?.byteSize ? `${(preview.byteSize / 1024 / 1024).toFixed(2)} MB · ` : ""}{t("localStorage")}</Dialog.Description>
+                </span>
+                <div>
+                  {preview ? <Button variant="ghost" size="sm" onClick={() => void exportAsset(preview)}><Download /> {t("export")}</Button> : null}
+                  <Dialog.Close render={<Button variant="ghost" size="icon" />} aria-label={t("closePreview")}><X /></Dialog.Close>
+                </div>
+              </header>
+              {preview ? <AssetPreview asset={preview} controls /> : null}
+            </Dialog.Popup>
+          </Dialog.Viewport>
+        </Dialog.Portal>
+      </Dialog.Root>
+    </aside>
+  );
+}

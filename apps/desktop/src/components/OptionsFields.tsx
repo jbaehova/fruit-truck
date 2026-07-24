@@ -1,9 +1,12 @@
+import { Collapsible } from "@base-ui/react/collapsible";
+import { Field } from "@base-ui/react/field";
 import { ChevronDown, SlidersHorizontal } from "lucide-react";
 import { useState } from "react";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
+import { useI18n, type MessageKey } from "@/i18n";
 import type { DraftOptions, GenerationMode, GenerationModel, ImageModel, VideoModel } from "@/openrouter";
 
 type Props = {
@@ -16,37 +19,39 @@ type Props = {
   onProviderJsonChange: (value: string) => void;
 };
 
-const LABELS: Record<string, string> = {
-  resolution: "Resolution",
-  aspect_ratio: "Aspect ratio",
-  size: "Size",
-  quality: "Quality",
-  output_format: "Format",
-  background: "Background",
-  n: "Outputs",
-  duration: "Duration",
-  generate_audio: "Generate audio",
-  output_compression: "Compression",
+const LABEL_KEYS: Record<string, MessageKey> = {
+  resolution: "resolution",
+  aspect_ratio: "aspectRatio",
+  size: "size",
+  quality: "quality",
+  output_format: "format",
+  background: "background",
+  n: "outputs",
+  duration: "duration",
+  generate_audio: "generateAudio",
+  output_compression: "compression",
 };
 
 function EnumField({ name, values, value, onChange }: { name: string; values: Array<string | number>; value: unknown; onChange: (value: string | number) => void }) {
+  const { t } = useI18n();
   const stringValue = value == null ? "" : String(value);
   return (
-    <label className="option-field">
-      <span>{LABELS[name] ?? name.replaceAll("_", " ")}</span>
+    <Field.Root className="option-field">
+      <Field.Label className="option-field-label" nativeLabel={false} render={<div />}>{LABEL_KEYS[name] ? t(LABEL_KEYS[name]) : name.replaceAll("_", " ")}</Field.Label>
       <Select value={stringValue} onValueChange={(next) => {
         if (next == null) return;
         const original = values.find((item) => String(item) === next);
         onChange(original ?? next);
       }}>
         <SelectTrigger><SelectValue /></SelectTrigger>
-        <SelectContent>{values.map((item) => <SelectItem value={String(item)} key={String(item)}>{name === "duration" ? `${item} sec` : String(item)}</SelectItem>)}</SelectContent>
+        <SelectContent>{values.map((item) => <SelectItem value={String(item)} key={String(item)}>{name === "duration" ? t("seconds", { value: item }) : String(item)}</SelectItem>)}</SelectContent>
       </Select>
-    </label>
+    </Field.Root>
   );
 }
 
 export function OptionsFields({ mode, model, options, providerJson, providerError, onOptionsChange, onProviderJsonChange }: Props) {
+  const { t } = useI18n();
   const [advanced, setAdvanced] = useState(false);
   if (!model) return null;
   const patch = (name: string, value: string | number | boolean) => onOptionsChange({ ...options, [name]: value });
@@ -62,18 +67,18 @@ export function OptionsFields({ mode, model, options, providerJson, providerErro
         (name === "output_format" || name === "background" ? advancedFields : basic).push(field);
       } else if (descriptor.type === "range") {
         const field = (
-          <label className="option-field" key={name}>
-            <span>{LABELS[name] ?? name.replaceAll("_", " ")}</span>
+          <Field.Root className="option-field" key={name}>
+            <Field.Label>{LABEL_KEYS[name] ? t(LABEL_KEYS[name]) : name.replaceAll("_", " ")}</Field.Label>
             <Input type="number" min={descriptor.min} max={descriptor.max} value={Number(options[name] ?? descriptor.min ?? 0)} onChange={(event) => patch(name, Number(event.target.value))} />
-          </label>
+          </Field.Root>
         );
         (name === "n" ? basic : advancedFields).push(field);
       } else if (descriptor.type === "boolean" && name === "seed") {
         advancedFields.push(
-          <label className="option-field" key={name}>
-            <span>Seed</span>
-            <Input type="number" placeholder="Random" value={options.seed == null ? "" : Number(options.seed)} onChange={(event) => onOptionsChange({ ...options, seed: event.target.value ? Number(event.target.value) : undefined })} />
-          </label>,
+          <Field.Root className="option-field" key={name}>
+            <Field.Label>{t("seed")}</Field.Label>
+            <Input type="number" placeholder={t("random")} value={options.seed == null ? "" : Number(options.seed)} onChange={(event) => onOptionsChange({ ...options, seed: event.target.value ? Number(event.target.value) : undefined })} />
+          </Field.Root>,
         );
       }
     }
@@ -84,25 +89,26 @@ export function OptionsFields({ mode, model, options, providerJson, providerErro
     if (video.supported_aspect_ratios?.length) basic.push(<EnumField key="aspect_ratio" name="aspect_ratio" values={video.supported_aspect_ratios} value={options.aspect_ratio} onChange={(value) => patch("aspect_ratio", value)} />);
     if (video.supported_sizes?.length) advancedFields.push(<EnumField key="size" name="size" values={video.supported_sizes} value={options.size} onChange={(value) => patch("size", value)} />);
     if (video.generate_audio) basic.push(
-      <label className="option-toggle" key="audio"><span><strong>Generate audio</strong><small>Include model-generated sound</small></span><Switch checked={Boolean(options.generate_audio)} onCheckedChange={(value) => patch("generate_audio", value)} /></label>,
+      <Field.Root className="option-toggle" key="audio"><span><Field.Label nativeLabel={false} render={<div />}><strong>{t("generateAudio")}</strong></Field.Label><Field.Description>{t("includeSound")}</Field.Description></span><Switch checked={Boolean(options.generate_audio)} onCheckedChange={(value) => patch("generate_audio", value)} /></Field.Root>,
     );
     if (video.seed) advancedFields.push(
-      <label className="option-field" key="seed"><span>Seed</span><Input type="number" placeholder="Random" value={options.seed == null ? "" : Number(options.seed)} onChange={(event) => onOptionsChange({ ...options, seed: event.target.value ? Number(event.target.value) : undefined })} /></label>,
+      <Field.Root className="option-field" key="seed"><Field.Label>{t("seed")}</Field.Label><Input type="number" placeholder={t("random")} value={options.seed == null ? "" : Number(options.seed)} onChange={(event) => onOptionsChange({ ...options, seed: event.target.value ? Number(event.target.value) : undefined })} /></Field.Root>,
     );
   }
 
   return (
     <div className="options-section">
-      <div className="section-label-row"><span className="section-label">Output options</span><small>Only supported fields</small></div>
-      {basic.length ? <div className="options-grid">{basic}</div> : <p className="empty-options">This model exposes no standard output controls.</p>}
-      <button type="button" className={`advanced-toggle ${advanced ? "open" : ""}`} onClick={() => setAdvanced((value) => !value)}>
-        <span><SlidersHorizontal /> Advanced</span><ChevronDown />
-      </button>
-      {advanced ? (
-        <div className="advanced-content">
+      <div className="section-label-row"><span className="section-label">{t("outputOptions")}</span><small>{t("supportedFieldsOnly")}</small></div>
+      {basic.length ? <div className="options-grid">{basic}</div> : <p className="empty-options">{t("noOutputControls")}</p>}
+      <Collapsible.Root open={advanced} onOpenChange={setAdvanced}>
+        <Collapsible.Trigger className={`advanced-toggle ${advanced ? "open" : ""}`}>
+          <span><SlidersHorizontal /> {t("advanced")}</span><ChevronDown />
+        </Collapsible.Trigger>
+        <Collapsible.Panel className="advanced-panel">
+          <div className="advanced-content">
           {advancedFields.length ? <div className="options-grid">{advancedFields}</div> : null}
-          <label className="provider-json">
-            <span>Provider routing &amp; options</span>
+          <Field.Root className="provider-json" invalid={Boolean(providerError)}>
+            <Field.Label>{t("providerOptions")}</Field.Label>
             <Textarea
               rows={5}
               spellCheck={false}
@@ -111,10 +117,13 @@ export function OptionsFields({ mode, model, options, providerJson, providerErro
               onChange={(event) => onProviderJsonChange(event.target.value)}
               aria-invalid={Boolean(providerError)}
             />
-            <small className={providerError ? "field-error" : ""}>{providerError ?? "Passed through as the provider object."}</small>
-          </label>
-        </div>
-      ) : null}
+            {providerError
+              ? <Field.Error className="field-error" match>{providerError}</Field.Error>
+              : <Field.Description>{t("providerOptionsHint")}</Field.Description>}
+          </Field.Root>
+          </div>
+        </Collapsible.Panel>
+      </Collapsible.Root>
     </div>
   );
 }

@@ -1,7 +1,11 @@
+import { Field } from "@base-ui/react/field";
 import { useMemo, useState } from "react";
 import { Check, ImageIcon, Search, Video } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import type { GenerationMode, GenerationModel } from "@/openrouter";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { useI18n } from "@/i18n";
+import { modelInputSignature, type GenerationMode, type GenerationModel } from "@/openrouter";
 
 type Props = {
   mode: GenerationMode;
@@ -16,6 +20,7 @@ function providerName(model: GenerationModel) {
 }
 
 export function ModelSidebar({ mode, models, selectedId, loading, onSelect }: Props) {
+  const { language, t } = useI18n();
   const [query, setQuery] = useState("");
   const filtered = useMemo(() => {
     const value = query.trim().toLowerCase();
@@ -26,28 +31,30 @@ export function ModelSidebar({ mode, models, selectedId, loading, onSelect }: Pr
   return (
     <aside className="model-sidebar">
       <div className="model-sidebar-heading">
-        <span>Models</span>
+        <span>{t("models")}</span>
         <span className="model-count">{loading ? "—" : models.length}</span>
       </div>
-      <label className="model-search">
+      <Field.Root className="model-search">
+        <Field.Label className="sr-only">{t("searchModels")}</Field.Label>
         <Search aria-hidden="true" />
         <Input
-          aria-label="Search models"
-          placeholder={`Search ${mode} models`}
+          aria-label={t("searchModels")}
+          placeholder={t("searchModels")}
           value={query}
           onChange={(event) => setQuery(event.target.value)}
         />
-      </label>
-      <div className="model-list" aria-label={`${mode} generation models`}>
+      </Field.Root>
+      <ScrollArea className="model-list" aria-label={`${t(mode)} ${t("models")}`}>
         {loading ? Array.from({ length: 7 }, (_, index) => (
           <div className="model-skeleton" key={index}><i /><span /></div>
         )) : null}
-        {!loading && !filtered.length ? <p className="model-empty">No matching models</p> : null}
+        {!loading && !filtered.length ? <p className="model-empty">{t("noMatchingModels")}</p> : null}
         {filtered.map((model) => {
           const active = model.id === selectedId;
           return (
-            <button
+            <Button
               type="button"
+              variant="ghost"
               key={model.id}
               className={`model-row ${active ? "active" : ""}`}
               onClick={() => onSelect(model.id)}
@@ -55,13 +62,18 @@ export function ModelSidebar({ mode, models, selectedId, loading, onSelect }: Pr
               <span className="model-icon">{mode === "image" ? <ImageIcon /> : <Video />}</span>
               <span className="model-copy">
                 <strong>{model.name.replace(`${providerName(model)}: `, "")}</strong>
-                <small>{providerName(model)}</small>
+                <small>{providerName(model)} · {language === "en" ? modelInputSignature(mode, model) : modelInputSignature(mode, model)
+                  .replace("first frame", t("inputFirstFrame"))
+                  .replace("last frame", t("inputLastFrame"))
+                  .replace("Text", t("inputText"))
+                  .replaceAll("image", t("inputImage"))
+                  .replaceAll("video", t("inputVideo"))}</small>
               </span>
               {active ? <Check className="model-check" /> : null}
-            </button>
+            </Button>
           );
         })}
-      </div>
+      </ScrollArea>
     </aside>
   );
 }

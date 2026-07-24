@@ -125,6 +125,8 @@ fn remove_api_key(app: tauri::AppHandle) -> Result<CredentialStatus, String> {
 fn validate_api_path(path: &str) -> Result<(), String> {
   let allowed = path == "/images/models"
     || path == "/videos/models"
+    || path == "/models?output_modalities=video"
+    || path == "/chat/completions"
     || path == "/images"
     || path == "/videos"
     || path.starts_with("/videos/")
@@ -263,6 +265,8 @@ mod tests {
   #[test]
   fn api_paths_are_strictly_scoped() {
     assert!(validate_api_path("/images/models").is_ok());
+    assert!(validate_api_path("/chat/completions").is_ok());
+    assert!(validate_api_path("/models?output_modalities=video").is_ok());
     assert!(validate_api_path("/videos/job-1").is_ok());
     assert!(validate_api_path("https://example.com").is_err());
     assert!(validate_api_path("/models").is_err());

@@ -1,8 +1,12 @@
 import { useEffect, useRef, useState } from "react";
+import { Dialog } from "@base-ui/react/dialog";
+import { Progress } from "@base-ui/react/progress";
 import { ArrowRight, Download, LoaderCircle, RefreshCw, Sparkles } from "lucide-react";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { Button } from "@/components/ui/button";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { useI18n } from "@/i18n";
 
 type UpdatePhase = "ready" | "installing" | "failed";
 
@@ -14,6 +18,7 @@ function checkOnce() {
 }
 
 export function UpdatePrompt() {
+  const { t } = useI18n();
   const [update, setUpdate] = useState<Update | null>(null);
   const [phase, setPhase] = useState<UpdatePhase>("ready");
   const [downloaded, setDownloaded] = useState(0);
@@ -65,32 +70,40 @@ export function UpdatePrompt() {
   const percent = total ? Math.min(100, Math.round((downloaded / total) * 100)) : null;
 
   return (
-    <div className="update-backdrop" role="presentation">
-      <section className="update-dialog" role="dialog" aria-modal="true" aria-labelledby="update-title">
-        <div className="update-art" aria-hidden="true"><Sparkles /><i /><i /><i /></div>
-        <div className="update-copy">
-          <p className="update-kicker">UPDATE AVAILABLE</p>
-          <h2 id="update-title">A sharper build is ready.</h2>
+    <Dialog.Root open onOpenChange={(open) => { if (!open) dismiss(); }} disablePointerDismissal={phase === "installing"}>
+      <Dialog.Portal>
+        <Dialog.Backdrop className="update-backdrop" />
+        <Dialog.Viewport className="dialog-viewport">
+          <Dialog.Popup className="update-dialog">
+            <div className="update-art" aria-hidden="true"><Sparkles /><i /><i /><i /></div>
+            <div className="update-copy">
+          <p className="update-kicker">{t("updateAvailable")}</p>
+          <Dialog.Title className="update-title">{t("updateReady")}</Dialog.Title>
+          <Dialog.Description className="sr-only">{t("installVersion", { version: update.version })}</Dialog.Description>
           <p className="update-version"><span>v{update.currentVersion}</span><ArrowRight /><strong>v{update.version}</strong></p>
-          {update.body ? <p className="update-notes">{update.body}</p> : <p className="update-notes">Install the latest fixes and improvements, then return to your workspace.</p>}
+          <ScrollArea className="update-notes">
+            <p>{update.body ?? t("updateFallback")}</p>
+          </ScrollArea>
 
           {phase === "installing" ? (
-            <div className="update-progress" aria-live="polite">
-              <div><span>Downloading and verifying…</span><b>{percent == null ? "" : `${percent}%`}</b></div>
-              <span className="update-progress-track"><i style={{ width: percent == null ? "18%" : `${percent}%` }} /></span>
-            </div>
+            <Progress.Root className="update-progress" value={percent} aria-live="polite">
+              <div><Progress.Label>{t("downloading")}</Progress.Label><Progress.Value /></div>
+              <Progress.Track className="update-progress-track"><Progress.Indicator /></Progress.Track>
+            </Progress.Root>
           ) : null}
-          {phase === "failed" ? <p className="update-error" role="alert">Update failed. {message}</p> : null}
+          {phase === "failed" ? <p className="update-error" role="alert">{t("updateFailed", { message })}</p> : null}
 
           <div className="update-actions">
-            <Button type="button" variant="ghost" disabled={phase === "installing"} onClick={dismiss}>Later</Button>
+            <Dialog.Close render={<Button type="button" variant="ghost" disabled={phase === "installing"} />}>{t("later")}</Dialog.Close>
             <Button type="button" disabled={phase === "installing"} onClick={() => void install()}>
               {phase === "installing" ? <LoaderCircle className="spin" /> : phase === "failed" ? <RefreshCw /> : <Download />}
-              {phase === "installing" ? "Installing…" : phase === "failed" ? "Try again" : "Update and restart"}
+              {phase === "installing" ? t("installing") : phase === "failed" ? t("tryAgain") : t("updateRestart")}
             </Button>
           </div>
-        </div>
-      </section>
-    </div>
+            </div>
+          </Dialog.Popup>
+        </Dialog.Viewport>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }

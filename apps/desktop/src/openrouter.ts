@@ -1,5 +1,6 @@
 export type GenerationMode = "image" | "video";
-export type ReferenceRole = "reference" | "first_frame" | "last_frame";
+export type VideoWorkflow = "generate" | "edit";
+export type ReferenceRole = "reference" | "first_frame" | "last_frame" | "video_reference";
 
 export type CapabilityDescriptor = {
   type: "enum" | "range" | "boolean";
@@ -18,12 +19,29 @@ export type ImageModel = {
   };
   supported_parameters: Record<string, CapabilityDescriptor>;
   supports_streaming?: boolean;
+  endpoint_count?: number;
+};
+
+export type ImageModelEndpoint = {
+  provider_name: string;
+  provider_slug: string;
+  provider_tag?: string | null;
+  supported_parameters: Record<string, CapabilityDescriptor>;
+  allowed_passthrough_parameters?: string[];
+  pricing?: Array<{ billable: string; unit: string; cost_usd: number; variant?: string }>;
+  supports_streaming?: boolean;
 };
 
 export type VideoModel = {
   id: string;
   name: string;
   description?: string;
+  architecture?: {
+    input_modalities?: string[];
+    output_modalities?: string[];
+  };
+  input_reference_types?: Array<"image" | "video" | "audio"> | null;
+  max_input_references?: number | null;
   supported_resolutions?: string[] | null;
   supported_aspect_ratios?: string[] | null;
   supported_sizes?: string[] | null;
@@ -42,19 +60,30 @@ export type ReferenceAsset = {
   name: string;
   mediaType: string;
   dataUrl: string;
-  previewUrl: string;
   role: ReferenceRole;
+  slot: number;
 };
 
 export type DraftOptions = Record<string, string | number | boolean | undefined>;
 
 export type GenerationDraft = {
   mode: GenerationMode;
+  videoWorkflow?: VideoWorkflow;
   model: string;
   prompt: string;
   assets: ReferenceAsset[];
   options: DraftOptions;
   providerJson: string;
+};
+
+export type PromptEnhancementInput = {
+  promptModel: string;
+  mode: GenerationMode;
+  videoWorkflow?: VideoWorkflow;
+  editMode?: boolean;
+  editTarget?: string;
+  prompt: string;
+  references: Array<{ slot: number; name: string; mediaType: string; role: ReferenceRole }>;
 };
 
 export type CredentialStatus = {
@@ -78,13 +107,6 @@ export type VideoResult = {
   error?: string;
   progress?: number;
 };
-
-const VIDEO_REFERENCE_OVERRIDES = new Set([
-  "alibaba/wan-2.7",
-  "bytedance/seedance-2.0",
-  "bytedance/seedance-2.0-fast",
-  "x-ai/grok-imagine-video",
-]);
 
 export function isTauriRuntime() {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -137,27 +159,87 @@ async function request<T>(method: "GET" | "POST", path: string, body?: unknown):
 export async function loadModels(mode: "image"): Promise<ImageModel[]>;
 export async function loadModels(mode: "video"): Promise<VideoModel[]>;
 export async function loadModels(mode: GenerationMode): Promise<GenerationModel[]> {
-  const response = await request<{ data?: GenerationModel[] }>("GET", `/${mode}s/models`);
-  return Array.isArray(response.data) ? response.data : [];
+  if (mode === "image") {
+    const response = await request<{ data?: ImageModel[] }>("GET", "/images/models");
+    return Array.isArray(response.data) ? response.data : [];
+  }
+  const [videoCatalog, modalCatalog] = await Promise.all([
+    request<{ data?: VideoModel[] }>("GET", "/videos/models"),
+    request<{ data?: Array<Pick<VideoModel, "id" | "architecture">> }>(
+      "GET",
+      "/models?output_modalities=video",
+    ).catch(() => ({ data: [] })),
+  ]);
+  const architecture = new Map(
+    (modalCatalog.data ?? []).map((model) => [model.id, model.architecture]),
+  );
+  return (videoCatalog.data ?? []).map((model) => ({
+    ...model,
+    architecture: model.architecture ?? architecture.get(model.id),
+  }));
+}
+
+export async function loadImageModelEndpoints(modelId: string): Promise<ImageModelEndpoint[]> {
+  const [author, ...slugParts] = modelId.split("/");
+  if (!author || slugParts.length === 0) return [];
+  const path = `/images/models/${encodeURIComponent(author)}/${encodeURIComponent(slugParts.join("/"))}/endpoints`;
+  const response = await request<{ endpoints?: ImageModelEndpoint[] }>("GET", path);
+  return Array.isArray(response.endpoints) ? response.endpoints : [];
 }
 
 export function imageReferenceLimit(model: ImageModel | null): number {
   return model?.supported_parameters.input_references?.max ?? 0;
 }
 
-export function supportsVideoReferences(model: VideoModel | null): boolean {
-  if (!model) return false;
-  return VIDEO_REFERENCE_OVERRIDES.has(model.id)
-    || /reference image|reference-to-video|multi-reference|set of reference/i.test(model.description ?? "");
+export function videoReferenceTypes(model: VideoModel | null): Array<"image" | "video" | "audio"> {
+  if (!model) return [];
+  if (Array.isArray(model.input_reference_types)) return model.input_reference_types;
+  const declared = model.architecture?.input_modalities ?? [];
+  return declared.filter((value): value is "image" | "video" | "audio" =>
+    value === "image" || value === "video" || value === "audio",
+  );
 }
 
-export function allowedAssetRoles(mode: GenerationMode, model: GenerationModel | null): ReferenceRole[] {
+export function supportsVideoInput(model: VideoModel | null): boolean {
+  return videoReferenceTypes(model).includes("video");
+}
+
+export function videoReferenceLimit(model: VideoModel | null): number {
+  if (!model || videoReferenceTypes(model).length === 0) return 0;
+  return model.max_input_references ?? 1;
+}
+
+export function modelInputSignature(
+  mode: GenerationMode,
+  model: GenerationModel,
+): string {
+  if (mode === "image") {
+    const limit = imageReferenceLimit(model as ImageModel);
+    return limit > 0 ? `Text + image ×${limit}` : "Text";
+  }
+  const video = model as VideoModel;
+  const parts = ["Text"];
+  const referenceTypes = videoReferenceTypes(video);
+  if (referenceTypes.includes("image")) parts.push("image");
+  if (referenceTypes.includes("video")) parts.push("video");
+  if (video.supported_frame_images?.includes("first_frame")) parts.push("first frame");
+  if (video.supported_frame_images?.includes("last_frame")) parts.push("last frame");
+  return parts.join(" + ");
+}
+
+export function allowedAssetRoles(
+  mode: GenerationMode,
+  model: GenerationModel | null,
+  workflow: VideoWorkflow = "generate",
+): ReferenceRole[] {
   if (mode === "image") return imageReferenceLimit(model as ImageModel | null) > 0 ? ["reference"] : [];
   const video = model as VideoModel | null;
+  const types = videoReferenceTypes(video);
   const roles: ReferenceRole[] = [];
-  if (supportsVideoReferences(video)) roles.push("reference");
-  if (video?.supported_frame_images?.includes("first_frame")) roles.push("first_frame");
-  if (video?.supported_frame_images?.includes("last_frame")) roles.push("last_frame");
+  if (types.includes("image")) roles.push("reference");
+  if (workflow === "edit" && types.includes("video")) roles.push("video_reference");
+  if (workflow === "generate" && video?.supported_frame_images?.includes("first_frame")) roles.push("first_frame");
+  if (workflow === "generate" && video?.supported_frame_images?.includes("last_frame")) roles.push("last_frame");
   return roles;
 }
 
@@ -195,13 +277,16 @@ function parseProviderJson(raw: string): Record<string, unknown> | undefined {
   return value as Record<string, unknown>;
 }
 
-const asReference = (asset: ReferenceAsset) => ({
-  type: "image_url",
-  image_url: { url: asset.dataUrl },
-});
+function asReference(asset: ReferenceAsset) {
+  if (asset.mediaType.startsWith("video/")) {
+    return { type: "video_url", video_url: { url: asset.dataUrl } };
+  }
+  return { type: "image_url", image_url: { url: asset.dataUrl } };
+}
 
 export function buildRequest(draft: GenerationDraft, model: GenerationModel | null): Record<string, unknown> {
   if (!model) return {};
+  const sentAssets: ReferenceAsset[] = [];
   const payload: Record<string, unknown> = {
     model: draft.model,
     prompt: draft.prompt.trim(),
@@ -212,8 +297,11 @@ export function buildRequest(draft: GenerationDraft, model: GenerationModel | nu
       if (imageModel.supported_parameters[key] && value !== undefined && value !== "") payload[key] = value;
     }
     const limit = imageReferenceLimit(imageModel);
-    if (limit > 0 && draft.assets.length) {
-      payload.input_references = draft.assets.slice(0, limit).map(asReference);
+    const images = draft.assets.filter((asset) => asset.mediaType.startsWith("image/"));
+    if (limit > 0 && images.length) {
+      const selected = images.slice(0, limit);
+      sentAssets.push(...selected);
+      payload.input_references = selected.map(asReference);
     }
   } else {
     const videoModel = model as VideoModel;
@@ -228,12 +316,23 @@ export function buildRequest(draft: GenerationDraft, model: GenerationModel | nu
     for (const [key, value] of Object.entries(draft.options)) {
       if (supported[key] && value !== undefined && value !== "") payload[key] = value;
     }
-    const references = draft.assets.filter((asset) => asset.role === "reference");
-    const frames = draft.assets.filter((asset) => asset.role !== "reference");
-    if (references.length && supportsVideoReferences(videoModel)) {
-      payload.input_references = references.map(asReference);
+    const referenceTypes = videoReferenceTypes(videoModel);
+    const references = draft.assets.filter((asset) => {
+      if (asset.role === "video_reference") return referenceTypes.includes("video");
+      return asset.role === "reference" && referenceTypes.includes("image");
+    });
+    const limit = videoReferenceLimit(videoModel);
+    const frames = draft.assets.filter((asset) =>
+      (asset.role === "first_frame" || asset.role === "last_frame")
+      && videoModel.supported_frame_images?.includes(asset.role),
+    );
+    if (references.length && limit > 0) {
+      const selected = references.slice(0, limit);
+      sentAssets.push(...selected);
+      payload.input_references = selected.map(asReference);
     }
     if (frames.length) {
+      sentAssets.push(...frames);
       payload.frame_images = frames.map((asset) => ({
         ...asReference(asset),
         frame_type: asset.role,
@@ -242,7 +341,87 @@ export function buildRequest(draft: GenerationDraft, model: GenerationModel | nu
   }
   const provider = parseProviderJson(draft.providerJson);
   if (provider) payload.provider = provider;
+  if (sentAssets.length) {
+    const mapping = sentAssets
+      .toSorted((a, b) => a.slot - b.slot)
+      .map((asset) => `#${asset.slot} = ${asset.name} (${asset.role})`)
+      .join("; ");
+    payload.prompt = `Attached input mapping: ${mapping}. Preserve these identities exactly.\n\n${draft.prompt.trim()}`;
+  }
   return payload;
+}
+
+export function productSystemInstruction(input: Omit<PromptEnhancementInput, "promptModel" | "prompt">): string {
+  const task = input.mode === "image"
+    ? input.editMode ? "image editing" : "image generation"
+    : input.videoWorkflow === "edit" ? "video editing" : "video generation";
+  const editRule = input.mode === "image" && input.editMode
+    ? `The explicit edit target is "${input.editTarget}". Treat that numbered image as the canvas to modify; other numbered images are context only.`
+    : input.mode === "video" && input.videoWorkflow === "edit"
+      ? "Treat the numbered video reference as the source footage to transform."
+      : "";
+  return [
+    `The active OpenGen UI task is ${task}.`,
+    "Numbered references are immutable input identities.",
+    "Do not invent inputs or options outside the selected model's declared capabilities.",
+    editRule,
+  ].filter(Boolean).join(" ");
+}
+
+export function promptEnhancerInstruction(): string {
+  return [
+    "You are OpenGen UI's prompt enhancer.",
+    "Rewrite the user's request into one production-ready media prompt.",
+    "Infer the best structure for this request instead of forcing a fixed schema.",
+    "Preserve intent, names, constraints, ambiguity that should remain creative, and every #number reference.",
+    "Preserve the user's language and every negative or forbidden condition.",
+    "Add useful visual, temporal, camera, material, lighting, composition, and continuity detail only when relevant.",
+    "Return only the enhanced prompt. Do not add headings, analysis, JSON, or markdown.",
+  ].filter(Boolean).join(" ");
+}
+
+export function validateEnhancedPrompt(original: string, enhanced: string, editTarget?: string): string | null {
+  if (!enhanced.trim()) return "The enhanced prompt is empty.";
+  const tokens = (value: string) => [...value.matchAll(/#(\d+)/g)].map((match) => Number(match[1]));
+  const originalTokens = new Set(tokens(`${original} ${editTarget ?? ""}`));
+  const enhancedTokens = new Set(tokens(enhanced));
+  for (const token of originalTokens) {
+    if (!enhancedTokens.has(token)) return `Prompt enhancement removed #${token}.`;
+  }
+  for (const token of enhancedTokens) {
+    if (!originalTokens.has(token)) return `Prompt enhancement invented #${token}.`;
+  }
+  return null;
+}
+
+export async function enhancePrompt(input: PromptEnhancementInput): Promise<string> {
+  const catalog = input.references.length
+    ? `\n\nAvailable references:\n${input.references.map((reference) =>
+      `#${reference.slot}: ${reference.name} (${reference.mediaType}, ${reference.role})`,
+    ).join("\n")}`
+    : "";
+  const response = await request<{
+    choices?: Array<{ message?: { content?: string | Array<{ type?: string; text?: string }> } }>;
+  }>("POST", "/chat/completions", {
+    model: input.promptModel,
+    reasoning: { effort: input.promptModel.endsWith("luna") ? "xhigh" : "high" },
+    messages: [
+      {
+        role: "system",
+        content: productSystemInstruction(input),
+      },
+      { role: "system", content: promptEnhancerInstruction() },
+      { role: "user", content: `${input.prompt.trim()}${catalog}` },
+    ],
+  });
+  const content = response.choices?.[0]?.message?.content;
+  const text = typeof content === "string"
+    ? content
+    : content?.map((part) => part.text ?? "").join("");
+  if (!text?.trim()) throw new Error("The prompt model returned no enhanced prompt.");
+  const validationError = validateEnhancedPrompt(input.prompt, text, input.editTarget);
+  if (validationError) throw new Error(validationError);
+  return text.trim();
 }
 
 export async function generateImage(payload: Record<string, unknown>): Promise<ImageResult> {
