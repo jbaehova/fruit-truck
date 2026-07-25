@@ -137,6 +137,12 @@ export async function removeApiKey(): Promise<CredentialStatus> {
   return getCredentialStatus();
 }
 
+export async function fetchRemoteImageDataUrl(url: string): Promise<string> {
+  if (!isTauriRuntime()) return url;
+  const result = await invokeTauri<{ dataUrl: string }>("fetch_image_data_url", { url });
+  return result.dataUrl;
+}
+
 async function request<T>(method: "GET" | "POST", path: string, body?: unknown): Promise<T> {
   if (isTauriRuntime()) {
     return invokeTauri<T>("openrouter_request", { method, path, body: body ?? null });

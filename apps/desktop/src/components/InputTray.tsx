@@ -22,6 +22,7 @@ export function InputTray({
   assets,
   roles,
   limit,
+  error,
   onChange,
   onImport,
 }: {
@@ -29,6 +30,7 @@ export function InputTray({
   assets: SessionAsset[];
   roles: ReferenceRole[];
   limit: number;
+  error?: string | null;
   onChange: (references: DraftReference[]) => void;
   onImport: (files: FileList | File[]) => Promise<SessionAsset[]>;
 }) {
@@ -57,16 +59,27 @@ export function InputTray({
   const addFiles = async (files: FileList | File[]) => addAssets(await onImport(files));
 
   return (
-    <div
-      className="reference-section"
-      onDragOver={(event) => {
+    <Field.Root
+      className={`reference-section ${dragging ? "dragging" : ""}`}
+      invalid={Boolean(error)}
+      onDragEnter={(event) => {
         if (!enabled) return;
-        if (event.dataTransfer.types.includes("application/x-open-gen-asset") || event.dataTransfer.types.includes("Files")) {
+        if (Array.from(event.dataTransfer.types).some((type) => type === "application/x-open-gen-asset" || type === "Files")) {
           event.preventDefault();
           setDragging(true);
         }
       }}
-      onDragLeave={() => setDragging(false)}
+      onDragOver={(event) => {
+        if (!enabled) return;
+        if (Array.from(event.dataTransfer.types).some((type) => type === "application/x-open-gen-asset" || type === "Files")) {
+          event.preventDefault();
+          event.dataTransfer.dropEffect = "copy";
+          setDragging(true);
+        }
+      }}
+      onDragLeave={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false);
+      }}
       onDrop={(event) => {
         event.preventDefault();
         setDragging(false);
@@ -85,6 +98,7 @@ export function InputTray({
         if (event.target.files) void addFiles(event.target.files);
         event.target.value = "";
       }} />
+      {dragging ? <div className="reference-drop-indicator"><Upload /> {t("releaseToAttach")}</div> : null}
       {!references.length ? (
         <Button type="button" variant="ghost" disabled={!enabled} className={`dropzone ${dragging ? "dragging" : ""}`} onClick={() => input.current?.click()}>
           {enabled ? <Upload /> : <ImagePlus />}
@@ -121,6 +135,7 @@ export function InputTray({
           {references.length < limit ? <Button type="button" variant="outline" size="sm" className="add-reference" onClick={() => input.current?.click()}><ImagePlus /> {t("addInput")}</Button> : null}
         </div>
       )}
-    </div>
+      {error ? <Field.Error className="field-error reference-error" match>{error}</Field.Error> : null}
+    </Field.Root>
   );
 }

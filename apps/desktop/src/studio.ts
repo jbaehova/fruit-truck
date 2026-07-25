@@ -5,6 +5,7 @@ import type {
   VideoWorkflow,
   VideoResult,
 } from "@/openrouter";
+import { fetchRemoteImageDataUrl, isTauriRuntime } from "@/openrouter";
 
 type AssetKind = "image" | "video";
 export type AssetOrigin = "upload" | "generated" | "edited";
@@ -31,6 +32,17 @@ export type DraftReference = {
   role: ReferenceRole;
 };
 
+export type MaskPoint = {
+  x: number;
+  y: number;
+};
+
+export type MaskStroke = {
+  points: MaskPoint[];
+  size: number;
+  operation?: "paint" | "erase";
+};
+
 export type GenerationDraftState = {
   prompt: string;
   references: DraftReference[];
@@ -41,6 +53,8 @@ export type GenerationDraftState = {
   enhancedPromptDirty: boolean;
   imageEditMode: boolean;
   imageEditTarget: string;
+  maskInstructions: string;
+  maskStrokes: MaskStroke[];
 };
 
 export type SessionVideoJob = VideoResult & {
@@ -102,6 +116,8 @@ function emptyDraft(): GenerationDraftState {
     enhancedPromptDirty: false,
     imageEditMode: false,
     imageEditTarget: "",
+    maskInstructions: "",
+    maskStrokes: [],
   };
 }
 
@@ -153,7 +169,25 @@ export function loadStudioState(): StudioState {
   try {
     const parsed = JSON.parse(raw) as unknown;
     if (!validState(parsed)) return createInitialStudioState();
-    const state = parsed;
+    const state = {
+      ...parsed,
+      sessions: parsed.sessions.map((session) => ({
+        ...session,
+        drafts: Object.fromEntries(Object.entries(session.drafts).map(([key, draft]) => [
+          key,
+          {
+            ...draft,
+            maskInstructions: draft.maskInstructions ?? "",
+            maskStrokes: Array.isArray(draft.maskStrokes)
+              ? draft.maskStrokes.map((stroke) => ({
+                ...stroke,
+                operation: stroke.operation === "erase" ? "erase" as const : "paint" as const,
+              }))
+              : [],
+          },
+        ])) as StudioSession["drafts"],
+      })),
+    };
     if (!state.sessions.some((session) => session.id === state.activeSessionId)) {
       state.activeSessionId = state.sessions[0].id;
     }
@@ -262,7 +296,14 @@ export async function importGeneratedImage(
   const id = crypto.randomUUID();
   const blobKey = `asset:${id}`;
   try {
-    const response = await fetch(source);
+    let response: Response;
+    try {
+      response = await fetch(source);
+      if (!response.ok) throw new Error("Could not cache generated image");
+    } catch (error) {
+      if (!isTauriRuntime() || !/^https?:/i.test(source)) throw error;
+      response = await fetch(await fetchRemoteImageDataUrl(source));
+    }
     if (!response.ok) throw new Error("Could not cache generated image");
     const blob = await response.blob();
     await storeAssetBlob(blobKey, blob);
@@ -349,7 +390,11 @@ export async function assetRequestUrl(asset: SessionAsset): Promise<string> {
     if (!blob) throw new Error(`${asset.name} is missing from local storage.`);
     return blobToDataUrl(blob);
   }
-  if (asset.externalUrl) return asset.externalUrl;
+  if (asset.externalUrl) {
+    return isTauriRuntime() && /^https?:/i.test(asset.externalUrl)
+      ? fetchRemoteImageDataUrl(asset.externalUrl)
+      : asset.externalUrl;
+  }
   throw new Error(`${asset.name} has no readable source.`);
 }
 

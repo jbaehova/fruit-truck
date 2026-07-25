@@ -46,6 +46,7 @@ export function AssetLibrary({
   const inputRef = useRef<HTMLInputElement>(null);
   const [preview, setPreview] = useState<SessionAsset | null>(null);
   const [filter, setFilter] = useState<"all" | "image" | "video">("all");
+  const [draggingFiles, setDraggingFiles] = useState(false);
   const visibleAssets = assets
     .filter((asset) => filter === "all" || asset.kind === filter)
     .toSorted((a, b) => b.createdAt.localeCompare(a.createdAt));
@@ -68,9 +69,22 @@ export function AssetLibrary({
 
   return (
     <aside
-      className="asset-library"
-      onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) event.preventDefault(); }}
+      className={`asset-library ${draggingFiles ? "dragging-files" : ""}`}
+      onDragEnter={(event) => {
+        if (!Array.from(event.dataTransfer.types).includes("Files")) return;
+        event.preventDefault();
+        setDraggingFiles(true);
+      }}
+      onDragOver={(event) => {
+        if (!Array.from(event.dataTransfer.types).includes("Files")) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "copy";
+      }}
+      onDragLeave={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDraggingFiles(false);
+      }}
       onDrop={(event) => {
+        setDraggingFiles(false);
         if (!event.dataTransfer.files.length) return;
         event.preventDefault();
         void onImport(event.dataTransfer.files);
@@ -175,6 +189,7 @@ export function AssetLibrary({
         ) : <span>{t("noAssets", { kind: filter === "all" ? "" : `${t(filter)} ` })}</span>}
         <Button size="xs" variant="outline" onClick={() => inputRef.current?.click()}><Plus /> {t("import")}</Button>
       </footer>
+      {draggingFiles ? <div className="asset-library-drop-overlay"><Plus /> <strong>{t("releaseToImport")}</strong><small>{t("dropFilesHint")}</small></div> : null}
 
       <Dialog.Root open={Boolean(preview)} onOpenChange={(open) => { if (!open) setPreview(null); }}>
         <Dialog.Portal>

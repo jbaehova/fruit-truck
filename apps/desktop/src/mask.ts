@@ -1,0 +1,108 @@
+import type { MaskStroke } from "@/studio";
+
+function drawStroke(
+  context: CanvasRenderingContext2D,
+  stroke: MaskStroke,
+  width: number,
+  height: number,
+) {
+  if (!stroke.points.length) return;
+  context.lineCap = "round";
+  context.lineJoin = "round";
+  context.lineWidth = stroke.size * Math.min(width, height);
+  const first = stroke.points[0];
+  if (stroke.points.length === 1) {
+    context.beginPath();
+    context.arc(first.x * width, first.y * height, context.lineWidth / 2, 0, Math.PI * 2);
+    context.fill();
+    return;
+  }
+  context.beginPath();
+  context.moveTo(first.x * width, first.y * height);
+  for (const point of stroke.points.slice(1)) {
+    context.lineTo(point.x * width, point.y * height);
+  }
+  context.stroke();
+}
+
+export function renderSelectionMask(
+  context: CanvasRenderingContext2D,
+  strokes: MaskStroke[],
+  width: number,
+  height: number,
+) {
+  context.clearRect(0, 0, width, height);
+  for (const stroke of strokes) {
+    context.globalCompositeOperation = stroke.operation === "erase" ? "destination-out" : "source-over";
+    context.fillStyle = "#fff";
+    context.strokeStyle = "#fff";
+    drawStroke(context, stroke, width, height);
+  }
+  context.globalCompositeOperation = "source-over";
+}
+
+function loadImage(source: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.decoding = "async";
+    if (/^https?:/i.test(source)) image.crossOrigin = "anonymous";
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("The edit image could not be loaded for masking."));
+    image.src = source;
+  });
+}
+
+export async function applyAlphaMask(source: string, strokes: MaskStroke[]): Promise<string> {
+  if (!strokes.some((stroke) => stroke.operation !== "erase")) return source;
+  const image = await loadImage(source);
+  const canvas = document.createElement("canvas");
+  canvas.width = image.naturalWidth;
+  canvas.height = image.naturalHeight;
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("The edit mask canvas is unavailable.");
+  context.drawImage(image, 0, 0);
+  const mask = document.createElement("canvas");
+  mask.width = canvas.width;
+  mask.height = canvas.height;
+  const maskContext = mask.getContext("2d");
+  if (!maskContext) throw new Error("The edit mask could not be prepared.");
+  renderSelectionMask(maskContext, strokes, mask.width, mask.height);
+  context.globalCompositeOperation = "destination-out";
+  context.drawImage(mask, 0, 0);
+  context.globalCompositeOperation = "source-over";
+  try {
+    return canvas.toDataURL("image/png");
+  } catch {
+    throw new Error("The edit image could not be converted into a mask-ready PNG.");
+  }
+}
+
+export function composeEditPrompt({
+  prompt,
+  target,
+  hasMask,
+  maskInstructions,
+}: {
+  prompt: string;
+  target: string;
+  hasMask: boolean;
+  maskInstructions: string;
+}) {
+  const sections = [
+    "[EDIT TASK]",
+    `Target image: ${target}`,
+    "Use every other numbered input only as a reference.",
+  ];
+  if (hasMask) {
+    sections.push(
+      "",
+      "[MASK SEMANTICS]",
+      `Transparent pixels in ${target} are the editable mask. Apply changes only inside that transparent region. Preserve every opaque pixel outside the mask as closely as possible.`,
+      "",
+      "[MASK INSTRUCTIONS]",
+      maskInstructions.trim() || "Apply the user prompt inside the selected region.",
+    );
+  }
+  sections.push("", "[USER PROMPT]", prompt.trim());
+  return sections.join("\n");
+}

@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::Manager;
@@ -7,6 +8,7 @@ use tauri::Manager;
 const API_BASE: &str = "https://openrouter.ai/api/v1";
 const CREDENTIALS_FILE: &str = "credentials.json";
 const MAX_ERROR_BYTES: usize = 2_000;
+const MAX_IMAGE_BYTES: u64 = 30 * 1024 * 1024;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -26,6 +28,12 @@ struct Credentials {
 #[serde(rename_all = "camelCase")]
 struct CachedMedia {
   path: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CachedImageData {
+  data_url: String,
 }
 
 fn credentials_directory(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -194,6 +202,87 @@ async fn openrouter_request(
     .map_err(|error| format!("OpenRouter returned invalid JSON: {error}"))
 }
 
+fn validate_remote_image_url(value: &str) -> Result<reqwest::Url, String> {
+  let url = reqwest::Url::parse(value).map_err(|_| "The image URL is invalid.".to_string())?;
+  if !matches!(url.scheme(), "http" | "https") || !url.username().is_empty() || url.password().is_some() {
+    return Err("Only public HTTP image URLs are supported.".into());
+  }
+  let host = url.host_str().ok_or("The image URL has no host.")?;
+  if host.eq_ignore_ascii_case("localhost") || host.ends_with(".localhost") {
+    return Err("Local image URLs are not supported.".into());
+  }
+  if let Ok(address) = host.parse::<std::net::IpAddr>() {
+    let blocked = match address {
+      std::net::IpAddr::V4(value) => {
+        value.is_private()
+          || value.is_loopback()
+          || value.is_link_local()
+          || value.is_broadcast()
+          || value.is_unspecified()
+      }
+      std::net::IpAddr::V6(value) => value.is_loopback() || value.is_unspecified(),
+    };
+    if blocked {
+      return Err("Private network image URLs are not supported.".into());
+    }
+  }
+  Ok(url)
+}
+
+#[tauri::command]
+async fn fetch_image_data_url(url: String) -> Result<CachedImageData, String> {
+  let url = validate_remote_image_url(&url)?;
+  let client = reqwest::Client::builder()
+    .timeout(std::time::Duration::from_secs(45))
+    .redirect(reqwest::redirect::Policy::custom(|attempt| {
+      if attempt.previous().len() >= 5 {
+        return attempt.error("too many redirects");
+      }
+      if validate_remote_image_url(attempt.url().as_str()).is_ok() {
+        attempt.follow()
+      } else {
+        attempt.stop()
+      }
+    }))
+    .build()
+    .map_err(|error| error.to_string())?;
+  let response = client
+    .get(url)
+    .send()
+    .await
+    .map_err(|error| format!("Could not download the image: {error}"))?;
+  if !response.status().is_success() {
+    return Err(format!("Image download failed with HTTP {}.", response.status().as_u16()));
+  }
+  if response.content_length().is_some_and(|length| length > MAX_IMAGE_BYTES) {
+    return Err("The image is larger than 30 MB.".into());
+  }
+  let content_type = response
+    .headers()
+    .get(reqwest::header::CONTENT_TYPE)
+    .and_then(|value| value.to_str().ok())
+    .and_then(|value| value.split(';').next())
+    .unwrap_or("")
+    .trim()
+    .to_ascii_lowercase();
+  if !content_type.starts_with("image/") {
+    return Err("The downloaded file is not an image.".into());
+  }
+  let bytes = response
+    .bytes()
+    .await
+    .map_err(|error| format!("Could not read the image: {error}"))?;
+  if bytes.len() as u64 > MAX_IMAGE_BYTES {
+    return Err("The image is larger than 30 MB.".into());
+  }
+  Ok(CachedImageData {
+    data_url: format!(
+      "data:{content_type};base64,{}",
+      base64::engine::general_purpose::STANDARD.encode(bytes)
+    ),
+  })
+}
+
 #[tauri::command]
 async fn cache_video_content(
   app: tauri::AppHandle,
@@ -250,6 +339,7 @@ pub fn run() {
       save_api_key,
       remove_api_key,
       openrouter_request,
+      fetch_image_data_url,
       cache_video_content
     ])
     .run(tauri::generate_context!())
@@ -258,7 +348,7 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-  use super::{mask_key, validate_api_path};
+  use super::{mask_key, validate_api_path, validate_remote_image_url};
 
   #[test]
   fn api_paths_are_strictly_scoped() {
@@ -273,5 +363,14 @@ mod tests {
   #[test]
   fn api_keys_are_masked() {
     assert_eq!(mask_key("sk-or-v1-1234567890"), "sk-or-v…7890");
+  }
+
+  #[test]
+  fn remote_image_urls_reject_local_targets() {
+    assert!(validate_remote_image_url("https://images.example.com/output.png").is_ok());
+    assert!(validate_remote_image_url("file:///tmp/output.png").is_err());
+    assert!(validate_remote_image_url("http://localhost/output.png").is_err());
+    assert!(validate_remote_image_url("http://127.0.0.1/output.png").is_err());
+    assert!(validate_remote_image_url("http://192.168.1.2/output.png").is_err());
   }
 }

@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { Collapsible } from "@base-ui/react/collapsible";
 import { Field } from "@base-ui/react/field";
-import { Popover } from "@base-ui/react/popover";
 import { Progress } from "@base-ui/react/progress";
 import { Toggle } from "@base-ui/react/toggle";
 import { ToggleGroup } from "@base-ui/react/toggle-group";
@@ -26,6 +25,7 @@ import "./App.css";
 import { AssetLibrary } from "@/components/AssetLibrary";
 import { AssetPreview } from "@/components/AssetPreview";
 import { ConfirmDialog, type Confirmation } from "@/components/ConfirmDialog";
+import { EditMediaPanel } from "@/components/EditMediaPanel";
 import { InputTray } from "@/components/InputTray";
 import { ModelSelector } from "@/components/ModelSelector";
 import { OptionsFields } from "@/components/OptionsFields";
@@ -34,12 +34,12 @@ import { SessionSidebar } from "@/components/SessionSidebar";
 import { SettingsDialog } from "@/components/SettingsDialog";
 import { UpdatePrompt } from "@/components/UpdatePrompt";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "@/components/ui/toast-manager";
 import { useI18n, type MessageKey } from "@/i18n";
+import { applyAlphaMask, composeEditPrompt } from "@/mask";
 import {
   allowedAssetRoles,
   buildRequest,
@@ -334,21 +334,27 @@ export default function App() {
 
   const importFiles = async (files: FileList | File[]): Promise<SessionAsset[]> => {
     const imported: SessionAsset[] = [];
+    const resolved: SessionAsset[] = [];
     for (const file of Array.from(files)) {
       const fingerprint = `${file.name}:${file.size}:${file.lastModified}:${file.type}`;
       const duplicate = session.assets.find((asset) => asset.fingerprint === fingerprint);
       if (duplicate) {
+        resolved.push(duplicate);
         toast.info(t("alreadyInSession", { name: file.name }));
         continue;
       }
-      try { imported.push(await importFileAsset(file)); }
+      try {
+        const asset = await importFileAsset(file);
+        imported.push(asset);
+        resolved.push(asset);
+      }
       catch (error) { toast.error(errorMessage(error)); }
     }
     if (imported.length) {
       patchActive((current) => ({ ...current, assets: [...current.assets, ...imported] }));
       toast.success(t("assetsImported", { count: imported.length }));
     }
-    return imported;
+    return resolved;
   };
 
   const addAssetAsReference = (assetId: string) => {
@@ -368,6 +374,7 @@ export default function App() {
     patchActive((current) => {
       const imageDraft = current.drafts.image;
       const existing = imageDraft.references.find((reference) => reference.assetId === assetId);
+      const previousTarget = imageDraft.references.find((reference) => `#${reference.slot}` === imageDraft.imageEditTarget);
       const slot = existing?.slot ?? nextReferenceSlot(imageDraft.references);
       return {
         ...current,
@@ -378,6 +385,8 @@ export default function App() {
             ...imageDraft,
             imageEditMode: true,
             imageEditTarget: `#${slot}`,
+            maskStrokes: previousTarget?.assetId === assetId ? imageDraft.maskStrokes : [],
+            maskInstructions: previousTarget?.assetId === assetId ? imageDraft.maskInstructions : "",
             enhancedPrompt: "",
             enhancedPromptDirty: false,
             references: existing ? imageDraft.references : [...imageDraft.references, { assetId, slot, role: "reference" }],
@@ -385,6 +394,54 @@ export default function App() {
         },
       };
     });
+  };
+
+  const setEditTargetAsset = (assetId: string, incomingAsset?: SessionAsset) => {
+    const asset = assetMap.get(assetId) ?? incomingAsset;
+    const expectedKind = mode === "image" ? "image" : "video";
+    if (!asset || asset.kind !== expectedKind) {
+      toast.error(t(expectedKind === "image" ? "editImageRequired" : "editVideoRequired"));
+      return;
+    }
+    patchActive((current) => {
+      const currentKey = draftKey(current);
+      const currentDraft = current.drafts[currentKey];
+      const role = current.mode === "video" ? "video_reference" as const : "reference" as const;
+      const previousTarget = current.mode === "image"
+        ? currentDraft.references.find((reference) => `#${reference.slot}` === currentDraft.imageEditTarget)
+        : currentDraft.references.find((reference) => reference.role === "video_reference");
+      const existing = currentDraft.references.find((reference) => reference.assetId === assetId);
+      const slot = existing?.slot
+        ?? (current.mode === "video" ? previousTarget?.slot : undefined)
+        ?? nextReferenceSlot(currentDraft.references);
+      const references = currentDraft.references
+        .filter((reference) => current.mode !== "video" || reference.role !== "video_reference" || reference.assetId === assetId)
+        .map((reference) => reference.assetId === assetId ? { ...reference, role } : reference);
+      if (!references.some((reference) => reference.assetId === assetId)) references.push({ assetId, slot, role });
+      return {
+        ...current,
+        drafts: {
+          ...current.drafts,
+          [currentKey]: {
+            ...currentDraft,
+            imageEditTarget: current.mode === "image" ? `#${slot}` : currentDraft.imageEditTarget,
+            references,
+            maskStrokes: previousTarget?.assetId === assetId ? currentDraft.maskStrokes : [],
+            maskInstructions: previousTarget?.assetId === assetId ? currentDraft.maskInstructions : "",
+            enhancedPrompt: "",
+            enhancedPromptDirty: false,
+          },
+        },
+      };
+    });
+  };
+
+  const importEditTarget = async (files: FileList | File[]) => {
+    const expectedKind = mode === "image" ? "image" : "video";
+    const assets = await importFiles(files);
+    const target = assets.find((asset) => asset.kind === expectedKind);
+    if (target) setEditTargetAsset(target.id, target);
+    else toast.error(t(expectedKind === "image" ? "editImageRequired" : "editVideoRequired"));
   };
 
   const routeImageToVideo = (assetId: string) => {
@@ -472,26 +529,40 @@ export default function App() {
 
   const previewReferences = useMemo<ReferenceAsset[]>(() => draft.references.flatMap((reference) => {
     const asset = assetMap.get(reference.assetId);
+    const masked = mode === "image"
+      && draft.imageEditMode
+      && `#${reference.slot}` === draft.imageEditTarget.trim()
+      && draft.maskStrokes.length > 0;
     return asset ? [{
       id: asset.id,
-      name: asset.name,
-      mediaType: asset.mimeType,
+      name: masked ? `${asset.name} (transparent edit mask)` : asset.name,
+      mediaType: masked ? "image/png" : asset.mimeType,
       dataUrl: `local-asset://#${reference.slot}/${asset.name}`,
       role: reference.role,
       slot: reference.slot,
     }] : [];
-  }), [assetMap, draft.references]);
+  }), [assetMap, draft.imageEditMode, draft.imageEditTarget, draft.maskStrokes.length, draft.references, mode]);
 
   const effectivePrompt = draft.enhancePrompt && draft.enhancedPrompt.trim()
     ? draft.enhancedPrompt
     : draft.prompt;
+  const prepareGenerationPrompt = (prompt: string) => {
+    if (mode !== "image" || !draft.imageEditMode) return prompt.trim();
+    return composeEditPrompt({
+      prompt,
+      target: draft.imageEditTarget.trim(),
+      hasMask: draft.maskStrokes.length > 0,
+      maskInstructions: draft.maskInstructions,
+    });
+  };
+  const preparedPrompt = prepareGenerationPrompt(effectivePrompt);
   const requestPayload = useMemo(() => {
     try {
       return buildRequest({
         mode,
         videoWorkflow: workflow,
         model: selectedId,
-        prompt: effectivePrompt,
+        prompt: preparedPrompt,
         assets: previewReferences,
         options: draft.options,
         providerJson: draft.providerJson,
@@ -499,18 +570,27 @@ export default function App() {
     } catch {
       return {};
     }
-  }, [draft.options, draft.providerJson, effectivePrompt, mode, previewReferences, selectedId, selectedModel, workflow]);
+  }, [draft.options, draft.providerJson, mode, preparedPrompt, previewReferences, selectedId, selectedModel, workflow]);
 
   const editTargetError = useMemo(() => {
     if (mode !== "image" || !draft.imageEditMode) return null;
+    if (!draft.imageEditTarget.trim()) return t("chooseEditTarget");
     const match = draft.imageEditTarget.trim().match(/^#(\d+)$/);
     if (!match) return t("editTargetFormat");
     const reference = draft.references.find((item) => item.slot === Number(match[1]));
     const asset = reference ? assetMap.get(reference.assetId) : null;
     return !asset || asset.kind !== "image" ? t("targetNotAttached", { target: draft.imageEditTarget || t("thatTarget") }) : null;
   }, [assetMap, draft.imageEditMode, draft.imageEditTarget, draft.references, mode, t]);
+  const imageEditReference = mode === "image" && draft.imageEditMode
+    ? draft.references.find((reference) => `#${reference.slot}` === draft.imageEditTarget.trim())
+    : undefined;
+  const videoEditReference = mode === "video" && workflow === "edit"
+    ? draft.references.find((reference) => reference.role === "video_reference")
+    : undefined;
+  const editReference = imageEditReference ?? videoEditReference;
+  const editTargetAsset = editReference ? assetMap.get(editReference.assetId) ?? null : null;
 
-  const referenceValidationError = useMemo(() => {
+  const inputValidationError = useMemo(() => {
     const unsupported = draft.references.find((reference) => {
       const asset = assetMap.get(reference.assetId);
       if (!asset) return true;
@@ -524,16 +604,31 @@ export default function App() {
       const hasFrame = draft.references.some((reference) => reference.role === "first_frame" || reference.role === "last_frame");
       if (hasReference && hasFrame) return t("mixedInputStyles");
     }
-    const slots = new Set(draft.references.map((reference) => reference.slot));
-    const mentioned = [...draft.prompt.matchAll(/#(\d+)/g)].map((match) => Number(match[1]));
-    const missing = mentioned.find((slot) => !slots.has(slot));
-    if (missing) return t("missingMention", { slot: missing });
-    if (editTargetError) return editTargetError;
     if (mode === "video" && workflow === "edit" && !draft.references.some((reference) => reference.role === "video_reference")) {
       return t("attachSourceVideo");
     }
     return null;
-  }, [assetMap, draft.prompt, draft.references, editTargetError, mode, referenceLimit, roles, t, workflow]);
+  }, [assetMap, draft.references, mode, referenceLimit, roles, t, workflow]);
+
+  const promptReferenceError = useMemo(() => {
+    const slots = new Set(draft.references.map((reference) => reference.slot));
+    const mentioned = [...draft.prompt.matchAll(/#(\d+)/g)].map((match) => Number(match[1]));
+    const missing = mentioned.find((slot) => !slots.has(slot));
+    return missing ? t("missingMention", { slot: missing }) : null;
+  }, [draft.prompt, draft.references, t]);
+
+  const maskReferenceError = useMemo(() => {
+    if (mode !== "image" || !draft.imageEditMode || !draft.maskStrokes.length) return null;
+    const slots = new Set(draft.references.map((reference) => reference.slot));
+    const mentioned = [...draft.maskInstructions.matchAll(/#(\d+)/g)].map((match) => Number(match[1]));
+    const missing = mentioned.find((slot) => !slots.has(slot));
+    return missing ? t("missingMention", { slot: missing }) : null;
+  }, [draft.imageEditMode, draft.maskInstructions, draft.maskStrokes.length, draft.references, mode, t]);
+
+  const generationValidationError = editTargetError
+    ?? inputValidationError
+    ?? promptReferenceError
+    ?? maskReferenceError;
 
   const runEnhancement = async () => {
     if (!draft.prompt.trim()) throw new Error(t("enterPromptFirst"));
@@ -561,11 +656,16 @@ export default function App() {
   const hydrateReferences = async (): Promise<ReferenceAsset[]> => Promise.all(draft.references.map(async (reference) => {
     const asset = assetMap.get(reference.assetId);
     if (!asset) throw new Error(t("missingReference", { slot: reference.slot }));
+    const source = await assetRequestUrl(asset);
+    const masked = mode === "image"
+      && draft.imageEditMode
+      && `#${reference.slot}` === draft.imageEditTarget.trim()
+      && draft.maskStrokes.length > 0;
     return {
       id: asset.id,
-      name: asset.name,
-      mediaType: asset.mimeType,
-      dataUrl: await assetRequestUrl(asset),
+      name: masked ? `${asset.name} (transparent edit mask)` : asset.name,
+      mediaType: masked ? "image/png" : asset.mimeType,
+      dataUrl: masked ? await applyAlphaMask(source, draft.maskStrokes) : source,
       role: reference.role,
       slot: reference.slot,
     };
@@ -573,7 +673,7 @@ export default function App() {
 
   const runGeneration = async () => {
     if (!credential?.configured) { setSettingsOpen(true); return; }
-    if (!selectedModel || !draft.prompt.trim() || providerError || referenceValidationError) return;
+    if (!selectedModel || !draft.prompt.trim() || providerError || generationValidationError) return;
     setGenerating(true);
     setGenerationError(null);
     try {
@@ -596,9 +696,7 @@ export default function App() {
           }
         }
       }
-      if (mode === "image" && draft.imageEditMode) {
-        prompt = `EDIT MODE. Edit only ${draft.imageEditTarget.trim()} as the target image; use all other numbered inputs as references. ${prompt}`;
-      }
+      prompt = prepareGenerationPrompt(prompt);
       const payload = buildRequest({
         mode,
         videoWorkflow: workflow,
@@ -657,8 +755,18 @@ export default function App() {
       ...current,
       assets: current.assets.filter((asset) => !ids.includes(asset.id)),
       drafts: Object.fromEntries(Object.entries(current.drafts).map(([draftName, value]) => [
-        draftName,
-        { ...value, references: value.references.filter((reference) => !ids.includes(reference.assetId)) },
+        draftName, (() => {
+          const removedTarget = value.references.some((reference) =>
+            ids.includes(reference.assetId) && `#${reference.slot}` === value.imageEditTarget,
+          );
+          return {
+            ...value,
+            references: value.references.filter((reference) => !ids.includes(reference.assetId)),
+            imageEditTarget: removedTarget ? "" : value.imageEditTarget,
+            maskStrokes: removedTarget ? [] : value.maskStrokes,
+            maskInstructions: removedTarget ? "" : value.maskInstructions,
+          };
+        })(),
       ])) as StudioSession["drafts"],
       lastResultAssetIds: {
         image: current.lastResultAssetIds.image.filter((id) => !ids.includes(id)),
@@ -672,7 +780,24 @@ export default function App() {
   const mentionSuggestions = mentionMatch
     ? draft.references.filter((reference) => String(reference.slot).startsWith(mentionMatch[1]))
     : [];
-  const canGenerate = Boolean(selectedModel && draft.prompt.trim() && !providerError && !referenceValidationError && credential?.configured && !generating && !enhancing);
+  const canGenerate = Boolean(selectedModel && draft.prompt.trim() && !providerError && !generationValidationError && credential?.configured && !generating && !enhancing);
+  const showResult = Boolean(lastAssets.length || visibleJob || generating || generationError);
+  const resultSignal = [
+    generating ? "generating" : "",
+    generationError ?? "",
+    ...session.lastResultAssetIds[mode],
+    visibleJob ? `${visibleJob.jobId}:${visibleJob.status}:${visibleJob.progress ?? ""}` : "",
+  ].join("|");
+  const previousResultSignal = useRef("");
+  useEffect(() => {
+    if (!showResult || !resultSignal || resultSignal === previousResultSignal.current) return;
+    previousResultSignal.current = resultSignal;
+    const frame = window.requestAnimationFrame(() => {
+      const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      composerViewportRef.current?.scrollTo({ top: 0, left: 0, behavior: reduceMotion ? "auto" : "smooth" });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [resultSignal, showResult]);
   const selectSession = (id: string) => {
     setStudio((current) => ({ ...current, activeSessionId: id }));
     setSelectedAssetIds(new Set());
@@ -752,14 +877,12 @@ export default function App() {
             </div>
             {selectedModel ? <div className="model-meta"><span>{providerLabel(selectedModel)}</span>{mode === "image" && imageEndpoints[selectedId] ? <span>{t("endpointsVerified", { count: imageEndpoints[selectedId].length })}</span> : null}</div> : null}
           </header>
-          <section className={`result-canvas ${lastAssets.length || visibleJob || generating ? "active" : ""}`}>
+          {showResult ? <section className={`result-canvas ${lastAssets.length || visibleJob || generating ? "active" : ""}`}>
             <header className="result-canvas-header">
               <div><span className="panel-eyebrow">{t("latestOutput")}</span><strong>{lastAssets.length ? t("savedResults", { count: lastAssets.length }) : t("generationCanvas")}</strong></div>
-              <RequestPreviewDialog mode={mode} request={prettyRequest(requestPayload)} references={previewReferences} />
             </header>
             <div className="result-view">
               {generationError ? <div className="generation-error"><CircleAlert /><div><strong>{t("generationFailed")}</strong><p>{generationError}</p></div></div> : null}
-              {!lastAssets.length && !visibleJob && !generating ? <div className="result-empty"><span>{mode === "image" ? <ImageIcon /> : <Video />}</span><h2>{t("outputWillAppear", { mode: t(mode) })}</h2><p>{t("outputSavedHint")}</p></div> : null}
               {generating && !lastAssets.length ? <div className="result-loading"><span><LoaderCircle className="spin" /></span><strong>{t("submittingRequest")}</strong><small>{t("processingPrompt")}</small></div> : null}
               {lastAssets.length ? <div className={`result-assets count-${lastAssets.length}`}>{lastAssets.map((asset) => <div className="result-asset" key={asset.id}><AssetPreview asset={asset} controls /><div>{asset.kind === "image" ? <><Button size="sm" variant="outline" onClick={() => editImageAsset(asset.id)}><Pencil /> {t("editThisImage")}</Button><Button size="sm" variant="outline" onClick={() => routeImageToVideo(asset.id)}><Film /> {t("useInVideo")}</Button></> : null}<Button size="sm" variant="outline" onClick={() => addAssetAsReference(asset.id)}>{t("useAsInput")}</Button></div></div>)}<div className="result-details"><span><Check /> {t("completedSaved")}</span></div></div> : null}
               {visibleJob ? (
@@ -773,7 +896,7 @@ export default function App() {
                 </Progress.Root>
               ) : null}
             </div>
-          </section>
+          </section> : null}
           {mode === "video" ? (
             <div className="workflow-row">
               <ToggleGroup className="workflow-switch" aria-label={t("videoWorkflow")} value={[workflow]} onValueChange={(value) => {
@@ -793,39 +916,48 @@ export default function App() {
                 <Switch checked={draft.imageEditMode} onCheckedChange={(value) => patchDraft({ imageEditMode: value })} />
               </Field.Root>
             ) : null}
-            {mode === "image" && draft.imageEditMode ? (
-              <Field.Root className="edit-target" invalid={Boolean(editTargetError)}>
-                <Field.Label>{t("editTarget")}</Field.Label>
-                <Input aria-invalid={Boolean(editTargetError)} value={draft.imageEditTarget} placeholder="#2" onChange={(event) => patchDraft({ imageEditTarget: event.target.value })} />
-                <Field.Description>{t("editTargetHint")}</Field.Description>
-                {editTargetError ? <Field.Error className="field-error" match>{editTargetError}</Field.Error> : null}
-              </Field.Root>
-            ) : null}
-            <Field.Root className="prompt-field" invalid={Boolean(referenceValidationError && !editTargetError)}>
-              <Field.Label className="section-label-row"><span className="section-label">{t("prompt")}</span><small>{t("characters", { count: draft.prompt.length.toLocaleString(language === "ko" ? "ko-KR" : "en-US") })}</small></Field.Label>
-              <Popover.Root open={mentionSuggestions.length > 0}>
-                <Popover.Trigger
-                  nativeButton={false}
-                  render={<Textarea
-                    autoFocus
-                    rows={7}
-                    value={draft.prompt}
-                    placeholder={mode === "image" ? t("imagePromptPlaceholder") : t("videoPromptPlaceholder")}
-                    onChange={(event) => patchDraft({ prompt: event.target.value, enhancedPrompt: "", enhancedPromptDirty: false })}
-                    onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") void runGeneration(); }}
-                  />}
+            {(mode === "image" && draft.imageEditMode) || (mode === "video" && workflow === "edit") ? (
+              <>
+                <EditMediaPanel
+                  asset={editTargetAsset}
+                  targetLabel={editReference ? `#${editReference.slot}` : ""}
+                  kind={mode === "image" ? "image" : "video"}
+                  maskStrokes={mode === "image" ? draft.maskStrokes : undefined}
+                  maskInstructions={mode === "image" ? draft.maskInstructions : undefined}
+                  maskError={mode === "image" ? maskReferenceError : undefined}
+                  onMaskStrokesChange={mode === "image" ? (maskStrokes) => patchDraft({
+                    maskStrokes,
+                    maskInstructions: maskStrokes.length ? draft.maskInstructions : "",
+                    enhancedPrompt: "",
+                    enhancedPromptDirty: false,
+                  }) : undefined}
+                  onMaskInstructionsChange={mode === "image" ? (maskInstructions) => patchDraft({ maskInstructions, enhancedPrompt: "", enhancedPromptDirty: false }) : undefined}
+                  onDropAsset={setEditTargetAsset}
+                  onImport={importEditTarget}
                 />
-                <Popover.Portal>
-                  <Popover.Positioner side="bottom" sideOffset={6} align="end">
-                    <Popover.Popup className="mention-menu">
-                      {mentionSuggestions.map((reference) => {
-                        const asset = assetMap.get(reference.assetId);
-                        return <Button type="button" variant="ghost" key={reference.assetId} onClick={() => patchDraft({ prompt: draft.prompt.replace(/#\d*$/, `#${reference.slot} `) })}><b>#{reference.slot}</b>{asset?.name}</Button>;
-                      })}
-                    </Popover.Popup>
-                  </Popover.Positioner>
-                </Popover.Portal>
-              </Popover.Root>
+                {editTargetError ? <div className="field-error edit-canvas-error">{editTargetError}</div> : null}
+              </>
+            ) : null}
+            <Field.Root className="prompt-field" invalid={Boolean(promptReferenceError)}>
+              <Field.Label className="section-label-row"><span className="section-label">{t("prompt")}</span><small>{t("characters", { count: draft.prompt.length.toLocaleString(language === "ko" ? "ko-KR" : "en-US") })}</small></Field.Label>
+              <div className="prompt-input-wrap">
+                <Textarea
+                  autoFocus
+                  rows={7}
+                  value={draft.prompt}
+                  placeholder={mode === "image" ? t("imagePromptPlaceholder") : t("videoPromptPlaceholder")}
+                  onChange={(event) => patchDraft({ prompt: event.target.value, enhancedPrompt: "", enhancedPromptDirty: false })}
+                  onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") void runGeneration(); }}
+                />
+                {mentionSuggestions.length ? (
+                  <div className="mention-menu" role="listbox" aria-label={t("numberedInputs")}>
+                    {mentionSuggestions.map((reference) => {
+                      const asset = assetMap.get(reference.assetId);
+                      return <Button type="button" variant="ghost" key={reference.assetId} onClick={() => patchDraft({ prompt: draft.prompt.replace(/#\d*$/, `#${reference.slot} `) })}><b>#{reference.slot}</b>{asset?.name}</Button>;
+                    })}
+                  </div>
+                ) : null}
+              </div>
               {draft.references.length ? <div className="prompt-references">{draft.references.map((reference) => {
                 const asset = assetMap.get(reference.assetId);
                 return asset ? (
@@ -839,7 +971,7 @@ export default function App() {
                   </Tooltip.Root>
                 ) : <Button type="button" variant="ghost" key={reference.assetId} onClick={() => patchDraft({ prompt: `${draft.prompt}${draft.prompt.endsWith(" ") || !draft.prompt ? "" : " "}#${reference.slot} ` })}>#{reference.slot}</Button>;
               })}</div> : null}
-              {referenceValidationError && !editTargetError ? <Field.Error className="field-error" match>{referenceValidationError}</Field.Error> : null}
+              {promptReferenceError ? <Field.Error className="field-error" match>{promptReferenceError}</Field.Error> : null}
             </Field.Root>
 
             <Field.Root className="enhance-row">
@@ -856,11 +988,24 @@ export default function App() {
               </Collapsible.Root>
             ) : null}
 
-            <InputTray references={draft.references} assets={session.assets} roles={roles} limit={referenceLimit} onChange={(references) => patchDraft({ references, enhancedPrompt: "", enhancedPromptDirty: false })} onImport={importFiles} />
+            <InputTray references={draft.references} assets={session.assets} roles={roles} limit={referenceLimit} error={inputValidationError} onChange={(references) => {
+              const targetStillAttached = references.some((reference) => `#${reference.slot}` === draft.imageEditTarget);
+              patchDraft({
+                references,
+                imageEditTarget: mode === "image" && draft.imageEditMode && !targetStillAttached ? "" : draft.imageEditTarget,
+                maskStrokes: mode === "image" && draft.imageEditMode && !targetStillAttached ? [] : draft.maskStrokes,
+                maskInstructions: mode === "image" && draft.imageEditMode && !targetStillAttached ? "" : draft.maskInstructions,
+                enhancedPrompt: "",
+                enhancedPromptDirty: false,
+              });
+            }} onImport={importFiles} />
             <OptionsFields key={`${mode}:${workflow}:${selectedModel?.id ?? ""}`} mode={mode} model={selectedModel} options={draft.options} providerJson={draft.providerJson} providerError={providerError} onOptionsChange={(options) => patchDraft({ options })} onProviderJsonChange={(providerJson) => patchDraft({ providerJson })} />
           </div>
           <footer className="generate-bar">
-            <div><span>{selectedModel ? t("requestFields", { count: Object.keys(requestPayload).length }) : t("noModelSelected")}</span><small>{mode === "video" ? t("backgroundJobs", { count: session.activeVideoJobs.length }) : t("commandGenerate")}</small></div>
+            <div className="generate-meta">
+              <div><span>{selectedModel ? t("requestFields", { count: Object.keys(requestPayload).length }) : t("noModelSelected")}</span><small>{mode === "video" ? t("backgroundJobs", { count: session.activeVideoJobs.length }) : t("commandGenerate")}</small></div>
+              <RequestPreviewDialog mode={mode} request={prettyRequest(requestPayload)} references={previewReferences} />
+            </div>
             <Button size="lg" className="generate-button" disabled={!canGenerate} onClick={() => void runGeneration()}>
               {generating || enhancing ? <LoaderCircle className="spin" /> : mode === "image" ? <Sparkles /> : <Play />}
               {generating || enhancing
