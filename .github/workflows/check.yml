@@ -31,14 +31,6 @@ jobs:
             apps/desktop/package-lock.json
             agent-kit/package-lock.json
 
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: "apps/desktop/src-tauri -> target"
-
       - name: Install desktop dependencies
         run: npm ci
 
@@ -46,28 +38,13 @@ jobs:
         run: |
           npx playwright install --with-deps chromium
           sudo apt-get update
-          sudo apt-get install --yes \
-            build-essential \
-            curl \
-            ffmpeg \
-            file \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            libssl-dev \
-            libwebkit2gtk-4.1-dev \
-            libxdo-dev \
-            wget
+          sudo apt-get install --yes ffmpeg
 
       - name: Run TypeScript, lint, and unit checks
         run: |
           npm run check
           npm run test:unit
           npm run build
-
-      - name: Run Rust tests
-        run: |
-          cargo test --manifest-path src-tauri/Cargo.toml
-          cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
       - name: Run headless full-window E2E
         run: npm run test:e2e
@@ -100,6 +77,11 @@ jobs:
 
       - name: Install desktop dependencies
         run: npm ci
+
+      - name: Run Rust tests
+        run: |
+          cargo test --manifest-path src-tauri/Cargo.toml
+          cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
       - name: Build native desktop test bundle
         run: npm run build:e2e:desktop
