@@ -309,7 +309,8 @@ test("Settings keeps Agent Skill import and history read-only for session activa
       },
     };
   });
-  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Settings" }).focus();
+  await page.keyboard.press("Enter");
   await expect(page.getByRole("heading", { name: "App settings" })).toBeVisible();
   await expect(page.getByText("Agent Skills", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Import" })).toBeVisible();
