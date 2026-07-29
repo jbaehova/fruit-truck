@@ -137,12 +137,6 @@ export async function removeApiKey(): Promise<CredentialStatus> {
   return getCredentialStatus();
 }
 
-export async function fetchRemoteImageDataUrl(url: string): Promise<string> {
-  if (!isTauriRuntime()) return url;
-  const result = await invokeTauri<{ dataUrl: string }>("fetch_image_data_url", { url });
-  return result.dataUrl;
-}
-
 async function request<T>(method: "GET" | "POST", path: string, body?: unknown): Promise<T> {
   if (isTauriRuntime()) {
     return invokeTauri<T>("openrouter_request", { method, path, body: body ?? null });
@@ -430,9 +424,10 @@ export async function enhancePrompt(input: PromptEnhancementInput): Promise<stri
 
 export async function generateImage(payload: Record<string, unknown>): Promise<ImageResult> {
   const response = await request<{
-    data?: Array<{ b64_json?: string; url?: string; media_type?: string }>;
+    data?: Array<{ b64_json?: string; url?: string; local_path?: string; media_type?: string }>;
   }>("POST", "/images", payload);
   const urls = (response.data ?? []).flatMap((item) => {
+    if (item.local_path) return [item.local_path];
     if (item.url) return [item.url];
     if (item.b64_json) return [`data:${item.media_type ?? "image/png"};base64,${item.b64_json}`];
     return [];
@@ -460,7 +455,7 @@ export async function pollVideo(jobId: string): Promise<VideoResult> {
     error?: string | { message?: string };
     unsigned_urls?: string[];
     data?: Array<{ url?: string }>;
-  }>("GET", `/videos/${jobId}`);
+  }>("GET", `/videos/${encodeURIComponent(jobId)}`);
   const error = typeof response.error === "string" ? response.error : response.error?.message;
   const url = response.unsigned_urls?.[0] ?? response.data?.[0]?.url;
   return {
@@ -476,15 +471,13 @@ export async function pollVideo(jobId: string): Promise<VideoResult> {
 export async function cacheVideo(jobId: string): Promise<string> {
   if (!isTauriRuntime()) throw new Error("Video content caching requires the Tauri app.");
   const result = await invokeTauri<{ path: string }>("cache_video_content", { jobId });
-  const { convertFileSrc } = await import("@tauri-apps/api/core");
-  return convertFileSrc(result.path);
+  return result.path;
 }
 
 export function prettyRequest(payload: Record<string, unknown>): string {
   return JSON.stringify(payload, (_key, value) => {
     if (typeof value === "string" && value.startsWith("data:") && value.length > 120) {
-      const [header] = value.split(",", 1);
-      return `${header},<base64 omitted · ${Math.round(value.length / 1024)} KB>`;
+      return `<media payload omitted · ${Math.round(value.length / 1024)} KB>`;
     }
     return value;
   }, 2);

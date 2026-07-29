@@ -23,6 +23,8 @@ export function AssetPreview({
       }
       objectUrl = value;
       setSource(value);
+    }).catch(() => {
+      if (active) setSource("");
     });
     return () => {
       active = false;

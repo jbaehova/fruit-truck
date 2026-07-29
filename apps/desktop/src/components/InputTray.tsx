@@ -1,9 +1,8 @@
 import { Field } from "@base-ui/react/field";
 import { ImagePlus, Trash2, Upload } from "lucide-react";
-import { useRef, useState } from "react";
+import { useState } from "react";
 import { AssetPreview } from "@/components/AssetPreview";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useI18n, type MessageKey } from "@/i18n";
 import type { ReferenceRole } from "@/openrouter";
@@ -25,6 +24,7 @@ export function InputTray({
   error,
   onChange,
   onImport,
+  onPick,
 }: {
   references: DraftReference[];
   assets: SessionAsset[];
@@ -33,9 +33,9 @@ export function InputTray({
   error?: string | null;
   onChange: (references: DraftReference[]) => void;
   onImport: (files: FileList | File[]) => Promise<SessionAsset[]>;
+  onPick: () => Promise<SessionAsset[]>;
 }) {
   const { t } = useI18n();
-  const input = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
   const enabled = roles.length > 0 && limit > 0;
   const assetMap = new Map(assets.map((asset) => [asset.id, asset]));
@@ -57,6 +57,7 @@ export function InputTray({
   };
 
   const addFiles = async (files: FileList | File[]) => addAssets(await onImport(files));
+  const pickFiles = async () => addAssets(await onPick());
 
   return (
     <Field.Root
@@ -94,13 +95,9 @@ export function InputTray({
         <div><span className="section-label">{t("numberedInputs")}</span><small>{enabled ? t("inputCountHint", { count: references.length, limit }) : t("inputsUnsupported")}</small></div>
         {references.length ? <Button type="button" variant="ghost" size="xs" onClick={() => onChange([])}>{t("clear")}</Button> : null}
       </div>
-      <Input ref={input} className="sr-only" type="file" accept="image/*,video/*" multiple onChange={(event) => {
-        if (event.target.files) void addFiles(event.target.files);
-        event.target.value = "";
-      }} />
       {dragging ? <div className="reference-drop-indicator"><Upload /> {t("releaseToAttach")}</div> : null}
       {!references.length ? (
-        <Button type="button" variant="ghost" disabled={!enabled} className={`dropzone ${dragging ? "dragging" : ""}`} onClick={() => input.current?.click()}>
+        <Button type="button" variant="ghost" disabled={!enabled} className={`dropzone ${dragging ? "dragging" : ""}`} onClick={() => void pickFiles()}>
           {enabled ? <Upload /> : <ImagePlus />}
           <span>{enabled ? t("dropAssets") : t("textOnlyInput")}</span>
           {enabled ? <small>{t("stableNumbersHint")}</small> : null}
@@ -132,7 +129,7 @@ export function InputTray({
               </div>
             );
           })}
-          {references.length < limit ? <Button type="button" variant="outline" size="sm" className="add-reference" onClick={() => input.current?.click()}><ImagePlus /> {t("addInput")}</Button> : null}
+          {references.length < limit ? <Button type="button" variant="outline" size="sm" className="add-reference" onClick={() => void pickFiles()}><ImagePlus /> {t("addInput")}</Button> : null}
         </div>
       )}
       {error ? <Field.Error className="field-error reference-error" match>{error}</Field.Error> : null}

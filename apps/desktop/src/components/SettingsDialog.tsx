@@ -1,14 +1,21 @@
 import { Dialog } from "@base-ui/react/dialog";
 import { Field } from "@base-ui/react/field";
 import { Form } from "@base-ui/react/form";
-import { useEffect, useState } from "react";
-import { ExternalLink, KeyRound, ShieldCheck, X } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { ExternalLink, History, ShieldCheck, SlidersHorizontal, Upload, WandSparkles, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useI18n, type Language } from "@/i18n";
 import type { CredentialStatus } from "@/openrouter";
 import { PROMPT_MODELS, type PromptModel } from "@/studio";
+import {
+  importCustomSkill,
+  listCustomSkills,
+  readCustomSkill,
+  rollbackCustomSkill,
+  type CustomSkillSummary,
+} from "@/agentBridge";
 
 type Props = {
   open: boolean;
@@ -18,29 +25,56 @@ type Props = {
   onRemove: () => Promise<void>;
   promptModel: PromptModel;
   onPromptModelChange: (model: PromptModel) => void;
+  activeCustomSkillNames: string[];
 };
 
-export function SettingsDialog({ open, status, onClose, onSave, onRemove, promptModel, onPromptModelChange }: Props) {
+export function SettingsDialog({
+  open,
+  status,
+  onClose,
+  onSave,
+  onRemove,
+  promptModel,
+  onPromptModelChange,
+  activeCustomSkillNames,
+}: Props) {
   const { language, setLanguage, t } = useI18n();
   const [key, setKey] = useState("");
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [keyError, setKeyError] = useState<string | null>(null);
+  const [skillError, setSkillError] = useState<string | null>(null);
+  const [skills, setSkills] = useState<CustomSkillSummary[]>([]);
+  const [skillsBusy, setSkillsBusy] = useState(false);
+  const importRef = useRef<HTMLInputElement>(null);
+
+  const refreshSkills = async () => {
+    try {
+      setSkillsBusy(true);
+      setSkills(await listCustomSkills());
+    } catch (cause) {
+      setSkillError(String(cause));
+    } finally {
+      setSkillsBusy(false);
+    }
+  };
 
   useEffect(() => {
     if (open) {
       setKey("");
-      setError(null);
+      setKeyError(null);
+      setSkillError(null);
+      void refreshSkills();
     }
   }, [open]);
 
   const saveKey = async () => {
     try {
       setBusy(true);
-      setError(null);
+      setKeyError(null);
       await onSave(key);
       setKey("");
     } catch (cause) {
-      setError(String(cause));
+      setKeyError(String(cause));
     } finally {
       setBusy(false);
     }
@@ -54,23 +88,23 @@ export function SettingsDialog({ open, status, onClose, onSave, onRemove, prompt
           <Dialog.Popup className="settings-dialog">
             <header className="dialog-header">
               <div className="dialog-heading">
-                <span className="dialog-icon"><KeyRound /></span>
+                <span className="dialog-icon"><SlidersHorizontal /></span>
                 <div>
-                  <Dialog.Title className="dialog-title">{t("openRouterConnection")}</Dialog.Title>
-                  <Dialog.Description className="dialog-description">{t("connectionHint")}</Dialog.Description>
+                  <Dialog.Title className="dialog-title">{t("settingsTitle")}</Dialog.Title>
+                  <Dialog.Description className="dialog-description">{t("settingsHint")}</Dialog.Description>
                 </div>
               </div>
               <Dialog.Close render={<Button type="button" variant="ghost" size="icon" />} aria-label={t("closeSettings")}><X /></Dialog.Close>
             </header>
             <div className="settings-body">
               <Form onFormSubmit={() => void saveKey()}>
-                <Field.Root className="settings-key-field" name="apiKey" invalid={Boolean(error)}>
+                <Field.Root className="settings-key-field" name="apiKey" invalid={Boolean(keyError)}>
                   <Field.Label>{t("apiKey")}</Field.Label>
                   <div>
                     <Input type="password" autoComplete="off" placeholder={status?.maskedKey ?? "sk-or-v1-…"} value={key} onChange={(event) => setKey(event.target.value)} />
                     <Button type="submit" disabled={busy || key.trim().length < 12}>{t("saveKey")}</Button>
                   </div>
-                  {error ? <Field.Error className="field-error" match>{error}</Field.Error> : null}
+                  {keyError ? <Field.Error className="field-error" match>{keyError}</Field.Error> : null}
                 </Field.Root>
               </Form>
               <div className="credential-location">
@@ -99,6 +133,40 @@ export function SettingsDialog({ open, status, onClose, onSave, onRemove, prompt
                 </Select>
                 <Field.Description>{t("promptModelHint")}</Field.Description>
               </Field.Root>
+              <section className="settings-agent-skills" aria-labelledby="settings-agent-skills-title">
+                <header>
+                  <span><WandSparkles /></span>
+                  <div><strong id="settings-agent-skills-title">{t("agentSkills")}</strong><small>{t("agentSkillsHint")}</small></div>
+                  <Button size="xs" variant="outline" onClick={() => importRef.current?.click()}><Upload /> {t("import")}</Button>
+                </header>
+                <Input ref={importRef} className="sr-only" type="file" accept=".md,text/markdown,text/plain" onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  event.target.value = "";
+                  if (!file) return;
+                  void file.text()
+                    .then((markdown) => importCustomSkill(file.name.replace(/\.md$/i, ""), markdown))
+                    .then(refreshSkills)
+                    .catch((cause) => setSkillError(String(cause)));
+                }} />
+                <div className="settings-skill-list">
+                  {skills.map((skill) => {
+                    const active = activeCustomSkillNames.includes(skill.name);
+                    return <article key={skill.path}>
+                      <div><strong>{skill.name}</strong><small>v{skill.version} · {skill.versions.length} {t("versions")}</small></div>
+                      {active ? <span className="settings-skill-active">{t("activeInSession")}</span> : null}
+                      <Button size="icon-xs" variant="ghost" aria-label={t("viewSkill")} onClick={() => void readCustomSkill(skill.name).then((value) => {
+                        const blob = new Blob([value.markdown], { type: "text/markdown" });
+                        const url = URL.createObjectURL(blob);
+                        window.open(url, "_blank", "noopener,noreferrer");
+                        window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+                      }).catch((cause) => setSkillError(String(cause)))}><ExternalLink /></Button>
+                      {skill.versions.length > 1 ? <Button size="icon-xs" variant="ghost" aria-label={t("rollbackSkill")} onClick={() => void rollbackCustomSkill(skill.name, skill.versions[1]).then(refreshSkills).catch((cause) => setSkillError(String(cause)))}><History /></Button> : null}
+                    </article>;
+                  })}
+                  {!skills.length ? <p>{skillsBusy ? t("loading") : t("noAgentSkills")}</p> : null}
+                </div>
+                {skillError ? <p className="settings-skill-error" role="alert">{skillError}</p> : null}
+              </section>
               <p className="settings-note">{t("keyPrivacyHint")}</p>
               <Button
                 variant="ghost"

@@ -77,6 +77,36 @@ export async function applyAlphaMask(source: string, strokes: MaskStroke[]): Pro
   }
 }
 
+export async function applyAlphaMaskBlob(source: string, strokes: MaskStroke[]): Promise<Blob> {
+  if (!strokes.some((stroke) => stroke.operation !== "erase")) {
+    const response = await fetch(source);
+    if (!response.ok) throw new Error("The edit image could not be loaded for masking.");
+    return response.blob();
+  }
+  const image = await loadImage(source);
+  const canvas = document.createElement("canvas");
+  canvas.width = image.naturalWidth;
+  canvas.height = image.naturalHeight;
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("The edit mask canvas is unavailable.");
+  context.drawImage(image, 0, 0);
+  const mask = document.createElement("canvas");
+  mask.width = canvas.width;
+  mask.height = canvas.height;
+  const maskContext = mask.getContext("2d");
+  if (!maskContext) throw new Error("The edit mask could not be prepared.");
+  renderSelectionMask(maskContext, strokes, mask.width, mask.height);
+  context.globalCompositeOperation = "destination-out";
+  context.drawImage(mask, 0, 0);
+  context.globalCompositeOperation = "source-over";
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (blob) resolve(blob);
+      else reject(new Error("The edit image could not be converted into a mask-ready PNG."));
+    }, "image/png");
+  });
+}
+
 export function composeEditPrompt({
   prompt,
   target,

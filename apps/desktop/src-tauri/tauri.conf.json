@@ -21,14 +21,18 @@
         "resizable": true,
         "maximized": true,
         "fullscreen": false,
-        "dragDropEnabled": false
+        "dragDropEnabled": true
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost https://openrouter.ai; img-src 'self' asset: http://asset.localhost blob: data: https:; media-src 'self' asset: http://asset.localhost blob: data: https:; style-src 'self' 'unsafe-inline'; script-src 'self'",
+      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost https://openrouter.ai; img-src 'self' asset: http://asset.localhost blob:; media-src 'self' asset: http://asset.localhost blob:; style-src 'self' 'unsafe-inline'; script-src 'self'",
       "assetProtocol": {
         "enable": true,
-        "scope": ["$APPCACHE/generated/**"]
+        "scope": [
+          "$APPCACHE/generated/**",
+          "$HOME/.open-gen-ui/assets/**",
+          "$HOME/.open-gen-ui/generated/**"
+        ]
       }
     }
   },

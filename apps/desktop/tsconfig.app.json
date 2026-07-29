@@ -9,7 +9,8 @@
     "paths": {
       "@/*": ["./src/*"]
     },
-    "types": ["vite/client"],
+    "types": ["vite/client", "node"],
+    "strict": true,
     "allowArbitraryExtensions": true,
     "skipLibCheck": true,
 
@@ -27,6 +28,5 @@
     "erasableSyntaxOnly": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["src"],
-  "exclude": ["src/**/*.test.ts"]
+  "include": ["src"]
 }

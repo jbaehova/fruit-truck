@@ -1,14 +1,23 @@
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
+use tauri_plugin_dialog::DialogExt;
 
 const API_BASE: &str = "https://openrouter.ai/api/v1";
 const CREDENTIALS_FILE: &str = "credentials.json";
+const AGENT_SESSIONS_FILE: &str = "agent-sessions.json";
+const AGENT_SESSIONS_LOCK: &str = ".agent-sessions.lock";
 const MAX_ERROR_BYTES: usize = 2_000;
 const MAX_IMAGE_BYTES: u64 = 30 * 1024 * 1024;
+const MAX_VIDEO_BYTES: u64 = 700 * 1024 * 1024;
+const MAX_OPENROUTER_JSON_BYTES: u64 = 48 * 1024 * 1024;
+const LOCAL_MEDIA_MARKER: &str = "open-gen-ui-local:";
+static MEDIA_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -30,13 +39,67 @@ struct CachedMedia {
   path: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SharedAssetInput {
+  asset_id: String,
+  name: String,
+  mime_type: String,
+  origin: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ManagedAssetFile {
+  name: String,
+  kind: String,
+  mime_type: String,
+  local_path: String,
+  byte_size: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AssemblyClip {
+  source: String,
+  name: String,
+  start_seconds: f64,
+  end_seconds: f64,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct CachedImageData {
-  data_url: String,
+struct AssemblyResult {
+  path: String,
+  duration: f64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SavedCustomSkill {
+  name: String,
+  version: u64,
+  markdown: String,
+  path: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CustomSkillSummary {
+  name: String,
+  version: u64,
+  path: String,
+  versions: Vec<u64>,
 }
 
 fn credentials_directory(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+  if let Some(path) = std::env::var_os("OPEN_GEN_UI_HOME") {
+    let path = PathBuf::from(path);
+    if !path.is_absolute() {
+      return Err("OPEN_GEN_UI_HOME must be an absolute path.".into());
+    }
+    return Ok(path);
+  }
   Ok(app
     .path()
     .home_dir()
@@ -48,12 +111,381 @@ fn credentials_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
   Ok(credentials_directory(app)?.join(CREDENTIALS_FILE))
 }
 
+fn agent_sessions_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+  Ok(credentials_directory(app)?.join(AGENT_SESSIONS_FILE))
+}
+
+fn generated_directory(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+  Ok(credentials_directory(app)?.join("generated"))
+}
+
+fn assets_directory(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+  Ok(credentials_directory(app)?.join("assets"))
+}
+
+fn inspect_media(bytes: &[u8], name: &str) -> Result<(&'static str, &'static str, &'static str), String> {
+  let extension = Path::new(name)
+    .extension()
+    .and_then(|value| value.to_str())
+    .unwrap_or("")
+    .to_ascii_lowercase();
+  let detected = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+    ("image", "image/png", "png")
+  } else if bytes.starts_with(b"\xff\xd8\xff") {
+    ("image", "image/jpeg", "jpg")
+  } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+    ("image", "image/gif", "gif")
+  } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+    ("image", "image/webp", "webp")
+  } else if bytes.starts_with(b"\x1a\x45\xdf\xa3") {
+    ("video", "video/webm", "webm")
+  } else if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
+    if extension == "mov" {
+      ("video", "video/quicktime", "mov")
+    } else {
+      ("video", "video/mp4", "mp4")
+    }
+  } else {
+    return Err("The selected file is not a supported image or video.".into());
+  };
+  let extension_matches = match detected.2 {
+    "jpg" => matches!(extension.as_str(), "jpg" | "jpeg"),
+    value => extension == value,
+  };
+  if !extension_matches {
+    return Err("The file extension does not match its media contents.".into());
+  }
+  Ok(detected)
+}
+
+fn managed_roots(app: &tauri::AppHandle) -> Result<[PathBuf; 2], String> {
+  Ok([assets_directory(app)?, generated_directory(app)?])
+}
+
+fn validate_media_path_in_roots(path: &Path, roots: &[PathBuf]) -> Result<PathBuf, String> {
+  let canonical = path
+    .canonicalize()
+    .map_err(|_| "The managed media file is missing or unreadable.".to_string())?;
+  if !canonical.is_file() {
+    return Err("The managed media path is not a file.".into());
+  }
+  let allowed = roots.iter().any(|root| {
+    root.canonicalize().is_ok_and(|canonical_root| canonical.starts_with(canonical_root))
+  });
+  if !allowed {
+    return Err("The media path is outside OpenGen UI managed storage.".into());
+  }
+  Ok(canonical)
+}
+
+fn validate_managed_media_path(app: &tauri::AppHandle, path: &Path) -> Result<PathBuf, String> {
+  validate_media_path_in_roots(path, &managed_roots(app)?)
+}
+
+fn unique_media_path(root: &Path, prefix: &str, extension: &str) -> Result<PathBuf, String> {
+  secure_directory(root)?;
+  let stamp = std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .map_err(|error| error.to_string())?
+    .as_millis();
+  let sequence = MEDIA_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+  Ok(root.join(format!("{prefix}-{stamp}-{}-{sequence}.{extension}", std::process::id())))
+}
+
+fn set_private_file_permissions(path: &Path) -> Result<(), String> {
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+      .map_err(|error| error.to_string())?;
+  }
+  Ok(())
+}
+
+fn write_managed_media(
+  root: &Path,
+  name: &str,
+  bytes: &[u8],
+  prefix: &str,
+) -> Result<ManagedAssetFile, String> {
+  let (kind, mime_type, extension) = inspect_media(bytes, name)?;
+  let limit = if kind == "video" { MAX_VIDEO_BYTES } else { MAX_IMAGE_BYTES };
+  if bytes.is_empty() || bytes.len() as u64 > limit {
+    return Err("The media file exceeds the local safety limit.".into());
+  }
+  let path = unique_media_path(root, prefix, extension)?;
+  let temporary = path.with_extension(format!("{extension}.tmp"));
+  std::fs::write(&temporary, bytes).map_err(|error| error.to_string())?;
+  set_private_file_permissions(&temporary)?;
+  std::fs::rename(&temporary, &path).map_err(|error| error.to_string())?;
+  Ok(ManagedAssetFile {
+    name: Path::new(name)
+      .file_name()
+      .and_then(|value| value.to_str())
+      .filter(|value| !value.is_empty())
+      .unwrap_or("media")
+      .to_string(),
+    kind: kind.into(),
+    mime_type: mime_type.into(),
+    local_path: path.to_string_lossy().into_owned(),
+    byte_size: bytes.len() as u64,
+  })
+}
+
+fn import_media_file(source: &Path, root: &Path) -> Result<ManagedAssetFile, String> {
+  let canonical = source
+    .canonicalize()
+    .map_err(|_| "The selected media file is missing or unreadable.".to_string())?;
+  if !canonical.is_file() {
+    return Err("The selected media path is not a file.".into());
+  }
+  let name = canonical
+    .file_name()
+    .and_then(|value| value.to_str())
+    .ok_or("The selected file name is invalid.")?;
+  let mut input = std::fs::File::open(&canonical).map_err(|error| error.to_string())?;
+  let metadata = input.metadata().map_err(|error| error.to_string())?;
+  if metadata.len() == 0 || metadata.len() > MAX_VIDEO_BYTES {
+    return Err("The selected media exceeds the local safety limit.".into());
+  }
+  let mut header = [0u8; 16];
+  let read = input.read(&mut header).map_err(|error| error.to_string())?;
+  let (kind, mime_type, extension) = inspect_media(&header[..read], name)?;
+  let limit = if kind == "video" { MAX_VIDEO_BYTES } else { MAX_IMAGE_BYTES };
+  if metadata.len() > limit {
+    return Err("The selected media exceeds the local safety limit.".into());
+  }
+  input.rewind().map_err(|error| error.to_string())?;
+  let path = unique_media_path(root, "asset", extension)?;
+  let temporary = path.with_extension(format!("{extension}.tmp"));
+  let mut output = std::fs::OpenOptions::new()
+    .write(true)
+    .create_new(true)
+    .open(&temporary)
+    .map_err(|error| error.to_string())?;
+  let copied = std::io::copy(&mut input.take(limit + 1), &mut output)
+    .map_err(|error| error.to_string())?;
+  output.flush().map_err(|error| error.to_string())?;
+  if copied == 0 || copied > limit {
+    let _ = std::fs::remove_file(&temporary);
+    return Err("The selected media exceeds the local safety limit.".into());
+  }
+  set_private_file_permissions(&temporary)?;
+  std::fs::rename(&temporary, &path).map_err(|error| error.to_string())?;
+  Ok(ManagedAssetFile {
+    name: name.into(),
+    kind: kind.into(),
+    mime_type: mime_type.into(),
+    local_path: path.to_string_lossy().into_owned(),
+    byte_size: copied,
+  })
+}
+
+fn validate_shared_asset_input(input: &SharedAssetInput) -> Result<(), String> {
+  if input.asset_id.is_empty()
+    || input.asset_id.len() > 128
+    || !input.asset_id.chars().all(|value| value.is_ascii_alphanumeric() || value == '-' || value == '_')
+  {
+    return Err("Shared asset ID is invalid.".into());
+  }
+  if !input.mime_type.starts_with("image/") && !input.mime_type.starts_with("video/") {
+    return Err("Only image and video assets may be shared.".into());
+  }
+  Ok(())
+}
+
+fn shared_asset_root(app: &tauri::AppHandle, origin: Option<&str>) -> Result<PathBuf, String> {
+  if origin == Some("upload") {
+    assets_directory(app)
+  } else {
+    generated_directory(app)
+  }
+}
+
+fn shared_upload_path(root: &Path, upload_id: &str) -> Result<PathBuf, String> {
+  if upload_id.is_empty()
+    || upload_id.len() > 128
+    || !upload_id.chars().all(|value| value.is_ascii_alphanumeric() || value == '-' || value == '_')
+  {
+    return Err("Shared upload ID is invalid.".into());
+  }
+  secure_directory(root)?;
+  Ok(root.join(format!(".shared-{upload_id}.part")))
+}
+
+fn append_shared_asset_chunk_to_root(
+  root: &Path,
+  upload_id: &str,
+  bytes: &[u8],
+) -> Result<(), String> {
+  if bytes.is_empty() {
+    return Err("Shared asset chunk is empty.".into());
+  }
+  let temporary = shared_upload_path(root, upload_id)?;
+  let current_size = std::fs::metadata(&temporary).map(|value| value.len()).unwrap_or(0);
+  if current_size.saturating_add(bytes.len() as u64) > MAX_VIDEO_BYTES {
+    let _ = std::fs::remove_file(&temporary);
+    return Err("Shared asset exceeds the local safety limit.".into());
+  }
+  let mut output = std::fs::OpenOptions::new()
+    .create(true)
+    .append(true)
+    .open(&temporary)
+    .map_err(|error| error.to_string())?;
+  output.write_all(bytes).map_err(|error| error.to_string())?;
+  output.flush().map_err(|error| error.to_string())?;
+  set_private_file_permissions(&temporary)
+}
+
+fn finish_shared_asset_to_root(
+  root: &Path,
+  upload_id: &str,
+  input: &SharedAssetInput,
+) -> Result<CachedMedia, String> {
+  validate_shared_asset_input(input)?;
+  let temporary = shared_upload_path(root, upload_id)?;
+  let result = (|| {
+    let metadata = std::fs::metadata(&temporary).map_err(|_| "Shared asset upload is missing.".to_string())?;
+    let limit = if input.mime_type.starts_with("video/") { MAX_VIDEO_BYTES } else { MAX_IMAGE_BYTES };
+    if metadata.len() == 0 || metadata.len() > limit {
+      return Err("Shared asset exceeds the local safety limit.".into());
+    }
+    let mut source = std::fs::File::open(&temporary).map_err(|error| error.to_string())?;
+    let mut header = [0u8; 16];
+    let read = source.read(&mut header).map_err(|error| error.to_string())?;
+    let (_, detected_mime, extension) = inspect_media(&header[..read], &input.name)?;
+    if detected_mime != input.mime_type {
+      return Err("Shared asset MIME type does not match its contents.".into());
+    }
+    let path = unique_media_path(root, "legacy", extension)?;
+    std::fs::rename(&temporary, &path).map_err(|error| error.to_string())?;
+    set_private_file_permissions(&path)?;
+    Ok(CachedMedia { path: path.to_string_lossy().into_owned() })
+  })();
+  if result.is_err() {
+    let _ = std::fs::remove_file(&temporary);
+  }
+  result
+}
+
+#[tauri::command]
+fn append_shared_asset_chunk(
+  app: tauri::AppHandle,
+  request: tauri::ipc::Request<'_>,
+) -> Result<(), String> {
+  let upload_id = request
+    .headers()
+    .get("x-open-gen-upload-id")
+    .and_then(|value| value.to_str().ok())
+    .ok_or("Shared upload ID header is required.")?;
+  let origin = request
+    .headers()
+    .get("x-open-gen-origin")
+    .and_then(|value| value.to_str().ok());
+  let bytes = match request.body() {
+    tauri::ipc::InvokeBody::Raw(bytes) => bytes,
+    tauri::ipc::InvokeBody::Json(_) => return Err("Shared asset chunks must use raw IPC.".into()),
+  };
+  let root = shared_asset_root(&app, origin)?;
+  append_shared_asset_chunk_to_root(&root, upload_id, bytes)
+}
+
+#[tauri::command]
+fn finish_shared_asset(
+  app: tauri::AppHandle,
+  upload_id: String,
+  input: SharedAssetInput,
+) -> Result<CachedMedia, String> {
+  validate_shared_asset_input(&input)?;
+  let root = shared_asset_root(&app, input.origin.as_deref())?;
+  finish_shared_asset_to_root(&root, &upload_id, &input)
+}
+
+#[tauri::command]
+fn abort_shared_asset(
+  app: tauri::AppHandle,
+  upload_id: String,
+  origin: Option<String>,
+) -> Result<(), String> {
+  let root = shared_asset_root(&app, origin.as_deref())?;
+  let temporary = shared_upload_path(&root, &upload_id)?;
+  match std::fs::remove_file(temporary) {
+    Ok(()) => Ok(()),
+    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+    Err(error) => Err(error.to_string()),
+  }
+}
+
+#[tauri::command]
+async fn pick_and_import_assets(app: tauri::AppHandle) -> Result<Vec<ManagedAssetFile>, String> {
+  let selection = app
+    .dialog()
+    .file()
+    .add_filter("Images and videos", &["png", "jpg", "jpeg", "webp", "gif", "mp4", "mov", "webm"])
+    .blocking_pick_files();
+  let Some(files) = selection else { return Ok(Vec::new()) };
+  let root = assets_directory(&app)?;
+  tauri::async_runtime::spawn_blocking(move || {
+    files
+      .into_iter()
+      .map(|file| file.into_path().map_err(|error| error.to_string()))
+      .map(|path| path.and_then(|value| import_media_file(&value, &root)))
+      .collect()
+  })
+  .await
+  .map_err(|error| format!("Managed asset import task failed: {error}"))?
+}
+
+#[tauri::command]
+fn delete_managed_asset(app: tauri::AppHandle, path: String) -> Result<(), String> {
+  let canonical = validate_managed_media_path(&app, Path::new(&path))?;
+  std::fs::remove_file(canonical).map_err(|error| error.to_string())
+}
+
+struct AgentStoreLock(PathBuf);
+
+impl Drop for AgentStoreLock {
+  fn drop(&mut self) {
+    let _ = std::fs::remove_file(&self.0);
+  }
+}
+
+fn acquire_agent_store_lock(app: &tauri::AppHandle) -> Result<AgentStoreLock, String> {
+  let directory = credentials_directory(app)?;
+  secure_directory(&directory)?;
+  let path = directory.join(AGENT_SESSIONS_LOCK);
+  for _ in 0..200 {
+    match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+      Ok(_) => return Ok(AgentStoreLock(path)),
+      Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+        let stale = std::fs::metadata(&path)
+          .and_then(|metadata| metadata.modified())
+          .and_then(|modified| modified.elapsed().map_err(std::io::Error::other))
+          .is_ok_and(|elapsed| elapsed.as_secs() > 30);
+        if stale {
+          let _ = std::fs::remove_file(&path);
+        } else {
+          std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+      }
+      Err(error) => return Err(error.to_string()),
+    }
+  }
+  Err("The shared agent session store is busy. Reload the session and try again.".into())
+}
+
 #[cfg(unix)]
 fn secure_directory(path: &Path) -> Result<(), String> {
   use std::os::unix::fs::PermissionsExt;
+  let existed = path.exists();
   std::fs::create_dir_all(path).map_err(|error| error.to_string())?;
-  std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
-    .map_err(|error| error.to_string())
+  if !existed {
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+      .map_err(|error| error.to_string())?;
+  } else if !path.is_dir() {
+    return Err(format!("{} must be a directory.", path.display()));
+  }
+  Ok(())
 }
 
 #[cfg(not(unix))]
@@ -77,10 +509,13 @@ fn read_api_key(app: &tauri::AppHandle) -> Result<Option<String>, String> {
 }
 
 fn mask_key(key: &str) -> String {
-  if key.len() < 12 {
+  let characters = key.chars().collect::<Vec<_>>();
+  if characters.len() < 12 {
     return "••••••••".into();
   }
-  format!("{}…{}", &key[..7], &key[key.len() - 4..])
+  let prefix = characters.iter().take(7).collect::<String>();
+  let suffix = characters[characters.len() - 4..].iter().collect::<String>();
+  format!("{prefix}…{suffix}")
 }
 
 #[tauri::command]
@@ -97,7 +532,7 @@ fn credential_status(app: tauri::AppHandle) -> Result<CredentialStatus, String> 
 #[tauri::command]
 fn save_api_key(app: tauri::AppHandle, api_key: String) -> Result<CredentialStatus, String> {
   let value = api_key.trim();
-  if value.len() < 12 {
+  if value.len() < 12 || !value.is_ascii() || value.chars().any(char::is_whitespace) {
     return Err("Enter a valid OpenRouter API key.".into());
   }
   let directory = credentials_directory(&app)?;
@@ -129,25 +564,427 @@ fn remove_api_key(app: tauri::AppHandle) -> Result<CredentialStatus, String> {
   credential_status(app)
 }
 
-fn validate_api_path(path: &str) -> Result<(), String> {
-  let allowed = path == "/images/models"
-    || path == "/videos/models"
-    || path == "/models?output_modalities=video"
-    || path == "/chat/completions"
-    || path == "/images"
-    || path == "/videos"
-    || path.starts_with("/videos/")
-    || (path.starts_with("/images/models/") && path.ends_with("/endpoints"));
-  if !allowed || path.contains("://") || path.contains("..") {
-    return Err("Unsupported OpenRouter API path.".into());
+fn read_agent_sessions_file(app: &tauri::AppHandle) -> Result<Value, String> {
+  let path = agent_sessions_path(app)?;
+  if !path.exists() {
+    return Ok(serde_json::json!({ "schemaVersion": 1, "revision": 0, "sessions": [] }));
+  }
+  let metadata = std::fs::metadata(&path).map_err(|error| error.to_string())?;
+  if metadata.len() > 10 * 1024 * 1024 {
+    return Err("The agent session bridge file exceeds 10 MB.".into());
+  }
+  let raw = std::fs::read(&path).map_err(|error| error.to_string())?;
+  let value: Value = serde_json::from_slice(&raw).map_err(|_| "The agent session bridge file is invalid JSON.")?;
+  if value.get("schemaVersion").and_then(Value::as_u64) != Some(1)
+    || !value.get("sessions").is_some_and(Value::is_array)
+  {
+    return Err("The agent session bridge file has an unsupported schema.".into());
+  }
+  Ok(value)
+}
+
+fn write_agent_sessions_file(app: &tauri::AppHandle, value: &Value) -> Result<(), String> {
+  let directory = credentials_directory(app)?;
+  secure_directory(&directory)?;
+  let path = agent_sessions_path(app)?;
+  let temporary = directory.join(format!(".agent-sessions-{}.tmp", std::process::id()));
+  let bytes = serde_json::to_vec_pretty(value).map_err(|error| error.to_string())?;
+  if bytes.len() > 10 * 1024 * 1024 {
+    return Err("The agent session bridge file exceeds 10 MB.".into());
+  }
+  if bytes.windows(b"data:image/".len()).any(|window| window.eq_ignore_ascii_case(b"data:image/"))
+    || bytes.windows(b"data:video/".len()).any(|window| window.eq_ignore_ascii_case(b"data:video/"))
+    || bytes.windows(b";base64,".len()).any(|window| window.eq_ignore_ascii_case(b";base64,"))
+  {
+    return Err("Agent session metadata cannot contain Base64 or data URL media.".into());
+  }
+  std::fs::write(&temporary, bytes).map_err(|error| error.to_string())?;
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o600))
+      .map_err(|error| error.to_string())?;
+  }
+  std::fs::rename(&temporary, &path).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn read_agent_sessions(app: tauri::AppHandle) -> Result<Value, String> {
+  read_agent_sessions_file(&app)
+}
+
+#[tauri::command]
+async fn wait_for_agent_sessions(
+  app: tauri::AppHandle,
+  after_revision: u64,
+  timeout_ms: Option<u64>,
+) -> Result<Value, String> {
+  let timeout_ms = timeout_ms.unwrap_or(20_000).clamp(100, 25_000);
+  tauri::async_runtime::spawn_blocking(move || {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    let path = agent_sessions_path(&app)?;
+    let stamp = |path: &Path| {
+      std::fs::metadata(path)
+        .ok()
+        .map(|metadata| (metadata.len(), metadata.modified().ok()))
+    };
+    let mut last_stamp = stamp(&path);
+    let initial = read_agent_sessions_file(&app)?;
+    if initial.get("revision").and_then(Value::as_u64).unwrap_or(0) > after_revision {
+      return Ok(initial);
+    }
+    loop {
+      if std::time::Instant::now() >= deadline {
+        return read_agent_sessions_file(&app);
+      }
+      std::thread::sleep(std::time::Duration::from_millis(200));
+      let next_stamp = stamp(&path);
+      if next_stamp != last_stamp {
+        last_stamp = next_stamp;
+        let envelope = read_agent_sessions_file(&app)?;
+        if envelope.get("revision").and_then(Value::as_u64).unwrap_or(0) > after_revision {
+          return Ok(envelope);
+        }
+      }
+    }
+  })
+  .await
+  .map_err(|error| format!("Agent session wait task failed: {error}"))?
+}
+
+#[tauri::command]
+fn upsert_agent_session(
+  app: tauri::AppHandle,
+  mut session: Value,
+  expected_revision: Option<u64>,
+) -> Result<Value, String> {
+  let id = session.get("id").and_then(Value::as_str).ok_or("Agent session ID is required.")?;
+  if id.is_empty() || id.len() > 128 || !id.chars().all(|value| value.is_ascii_alphanumeric() || value == '-' || value == '_') {
+    return Err("Agent session ID is invalid.".into());
+  }
+  if !session.get("agent").is_some_and(Value::is_object) {
+    return Err("Agent session state is required.".into());
+  }
+  let _lock = acquire_agent_store_lock(&app)?;
+  let mut envelope = read_agent_sessions_file(&app)?;
+  let sessions = envelope.get_mut("sessions").and_then(Value::as_array_mut).ok_or("Agent session list is invalid.")?;
+  if let Some(index) = sessions.iter().position(|item| item.get("id").and_then(Value::as_str) == Some(id)) {
+    let current_revision = sessions[index].pointer("/agent/revision").and_then(Value::as_u64).unwrap_or(0);
+    if expected_revision != Some(current_revision) {
+      return Err(format!(
+        "AGENT_SESSION_CONFLICT: expected revision {}, but the shared session is at revision {}. Reload it before saving.",
+        expected_revision.map_or_else(|| "none".into(), |value| value.to_string()),
+        current_revision,
+      ));
+    }
+    *session.pointer_mut("/agent/revision").ok_or("Agent session revision is required.")?
+      = Value::from(current_revision + 1);
+    sessions[index] = session;
+  } else {
+    if expected_revision.is_some_and(|value| value != 0) {
+      return Err("AGENT_SESSION_CONFLICT: the shared session no longer exists. Reload before saving.".into());
+    }
+    *session.pointer_mut("/agent/revision").ok_or("Agent session revision is required.")?
+      = Value::from(1);
+    sessions.push(session);
+  }
+  let revision = envelope.get("revision").and_then(Value::as_u64).unwrap_or(0) + 1;
+  envelope["revision"] = Value::from(revision);
+  write_agent_sessions_file(&app, &envelope)?;
+  Ok(envelope)
+}
+
+fn custom_skill_slug(name: &str) -> String {
+  let mut slug = String::new();
+  let mut separator = false;
+  for value in name.to_ascii_lowercase().chars() {
+    if value.is_ascii_alphanumeric() {
+      slug.push(value);
+      separator = false;
+    } else if !separator && !slug.is_empty() {
+      slug.push('-');
+      separator = true;
+    }
+  }
+  let slug = slug.trim_matches('-');
+  if slug.is_empty() { "custom-production".into() } else { slug.into() }
+}
+
+fn validate_custom_skill_text(markdown: &str) -> Result<(), String> {
+  if markdown.trim().is_empty() || markdown.len() > 200_000 {
+    return Err("Custom Skill Markdown must be between 1 and 200,000 characters.".into());
+  }
+  let lower = markdown.to_ascii_lowercase();
+  let contains_bound_id = lower
+    .split(|value: char| !(value.is_ascii_alphanumeric() || value == '-'))
+    .any(|value| {
+      let uuid_like = value.len() == 36
+        && value.chars().enumerate().all(|(index, character)| {
+          if matches!(index, 8 | 13 | 18 | 23) { character == '-' } else { character.is_ascii_hexdigit() }
+        });
+      ((value.starts_with("asset-") || value.starts_with("session-")) && value.len() > 16) || uuid_like
+    });
+  if lower.contains("file://")
+    || lower.contains("/users/")
+    || lower.contains("/home/")
+    || lower.contains("~/")
+    || lower.contains("api_key")
+    || lower.contains("api-key")
+    || lower.contains("access_token")
+    || contains_bound_id
+    || lower.contains("begin rsa private key")
+    || lower.contains("begin openssh private key")
+    || lower.contains("begin ec private key")
+    || lower.contains("sk-or-")
+    || lower.contains("sk-proj-")
+    || markdown.lines().any(|line| {
+      let trimmed = line.trim();
+      trimmed.len() > 3
+        && trimmed.as_bytes()[1] == b':'
+        && trimmed.as_bytes()[0].is_ascii_alphabetic()
+        && matches!(trimmed.as_bytes()[2], b'\\' | b'/')
+    })
+  {
+    return Err("Custom Skill text contains a local path or secret-like value.".into());
   }
   Ok(())
 }
 
+#[tauri::command]
+fn save_custom_skill_text(
+  app: tauri::AppHandle,
+  name: String,
+  markdown: String,
+) -> Result<SavedCustomSkill, String> {
+  let skills_root = credentials_directory(&app)?.join("skills");
+  secure_directory(&skills_root)?;
+  save_custom_skill_to_root(&skills_root, &name, &markdown)
+}
+
+fn save_custom_skill_to_root(
+  skills_root: &Path,
+  name: &str,
+  markdown: &str,
+) -> Result<SavedCustomSkill, String> {
+  let name = name.trim();
+  if name.is_empty() || name.len() > 100 {
+    return Err("Custom Skill name must be between 1 and 100 characters.".into());
+  }
+  validate_custom_skill_text(markdown)?;
+  let directory = skills_root.join(custom_skill_slug(name));
+  secure_directory(&directory)?;
+  let path = directory.join("SKILL.md");
+  let version = if path.exists() {
+    let current = std::fs::read_to_string(&path).unwrap_or_default();
+    current.lines()
+      .find_map(|line| line.strip_prefix("version:").and_then(|value| value.trim().parse::<u64>().ok()))
+      .unwrap_or(1) + 1
+  } else {
+    1
+  };
+  let mut replaced = false;
+  let markdown = markdown.lines().map(|line| {
+    if !replaced && line.starts_with("version:") {
+      replaced = true;
+      format!("version: {version}")
+    } else {
+      line.to_string()
+    }
+  }).collect::<Vec<_>>().join("\n");
+  let temporary = directory.join(format!(".skill-{}.tmp", std::process::id()));
+  std::fs::write(&temporary, &markdown).map_err(|error| error.to_string())?;
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o600))
+      .map_err(|error| error.to_string())?;
+  }
+  std::fs::rename(&temporary, &path).map_err(|error| error.to_string())?;
+  let versions = directory.join("versions");
+  secure_directory(&versions)?;
+  let version_path = versions.join(format!("{version}.md"));
+  std::fs::write(&version_path, &markdown).map_err(|error| error.to_string())?;
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&version_path, std::fs::Permissions::from_mode(0o600))
+      .map_err(|error| error.to_string())?;
+  }
+  Ok(SavedCustomSkill {
+    name: name.into(),
+    version,
+    markdown,
+    path: path.to_string_lossy().into_owned(),
+  })
+}
+
+fn list_custom_skills_from_root(skills_root: &Path) -> Result<Vec<CustomSkillSummary>, String> {
+  if !skills_root.exists() {
+    return Ok(Vec::new());
+  }
+  let mut summaries = Vec::new();
+  for entry in std::fs::read_dir(skills_root).map_err(|error| error.to_string())? {
+    let entry = entry.map_err(|error| error.to_string())?;
+    if !entry.file_type().map_err(|error| error.to_string())?.is_dir() {
+      continue;
+    }
+    let path = entry.path().join("SKILL.md");
+    if !path.exists() {
+      continue;
+    }
+    let markdown = std::fs::read_to_string(&path).map_err(|error| error.to_string())?;
+    let fallback_name = entry.file_name().to_string_lossy().into_owned();
+    let name = markdown.lines()
+      .find_map(|line| line.strip_prefix("name:").map(str::trim))
+      .filter(|value| !value.is_empty())
+      .unwrap_or(&fallback_name)
+      .to_string();
+    let version = markdown.lines()
+      .find_map(|line| line.strip_prefix("version:").and_then(|value| value.trim().parse::<u64>().ok()))
+      .unwrap_or(1);
+    let versions_directory = entry.path().join("versions");
+    let mut versions = if versions_directory.exists() {
+      std::fs::read_dir(&versions_directory)
+        .map_err(|error| error.to_string())?
+        .filter_map(Result::ok)
+        .filter_map(|item| item.path().file_stem()?.to_str()?.parse::<u64>().ok())
+        .collect::<Vec<_>>()
+    } else {
+      Vec::new()
+    };
+    if !versions.contains(&version) {
+      versions.push(version);
+    }
+    versions.sort_unstable_by(|left, right| right.cmp(left));
+    summaries.push(CustomSkillSummary {
+      name,
+      version,
+      path: path.to_string_lossy().into_owned(),
+      versions,
+    });
+  }
+  summaries.sort_by_key(|item| item.name.to_ascii_lowercase());
+  Ok(summaries)
+}
+
+fn read_custom_skill_from_root(
+  skills_root: &Path,
+  name: &str,
+  version: Option<u64>,
+) -> Result<SavedCustomSkill, String> {
+  let directory = skills_root.join(custom_skill_slug(name));
+  let path = version
+    .map(|value| directory.join("versions").join(format!("{value}.md")))
+    .unwrap_or_else(|| directory.join("SKILL.md"));
+  if !path.exists() {
+    return Err("Custom Skill version does not exist.".into());
+  }
+  let markdown = std::fs::read_to_string(&path).map_err(|error| error.to_string())?;
+  let resolved_version = markdown.lines()
+    .find_map(|line| line.strip_prefix("version:").and_then(|value| value.trim().parse::<u64>().ok()))
+    .or(version)
+    .unwrap_or(1);
+  Ok(SavedCustomSkill {
+    name: name.trim().into(),
+    version: resolved_version,
+    markdown,
+    path: path.to_string_lossy().into_owned(),
+  })
+}
+
+#[tauri::command]
+fn list_custom_skills(app: tauri::AppHandle) -> Result<Vec<CustomSkillSummary>, String> {
+  list_custom_skills_from_root(&credentials_directory(&app)?.join("skills"))
+}
+
+#[tauri::command]
+fn read_custom_skill(
+  app: tauri::AppHandle,
+  name: String,
+  version: Option<u64>,
+) -> Result<SavedCustomSkill, String> {
+  read_custom_skill_from_root(&credentials_directory(&app)?.join("skills"), &name, version)
+}
+
+#[tauri::command]
+fn import_custom_skill_text(
+  app: tauri::AppHandle,
+  name: String,
+  markdown: String,
+) -> Result<SavedCustomSkill, String> {
+  let skills_root = credentials_directory(&app)?.join("skills");
+  secure_directory(&skills_root)?;
+  save_custom_skill_to_root(&skills_root, &name, &markdown)
+}
+
+#[tauri::command]
+fn rollback_custom_skill(
+  app: tauri::AppHandle,
+  name: String,
+  version: u64,
+) -> Result<SavedCustomSkill, String> {
+  let skills_root = credentials_directory(&app)?.join("skills");
+  let historical = read_custom_skill_from_root(&skills_root, &name, Some(version))?;
+  save_custom_skill_to_root(&skills_root, &name, &historical.markdown)
+}
+
+fn openrouter_url(path: &str) -> Result<reqwest::Url, String> {
+  let relative = path
+    .strip_prefix('/')
+    .filter(|value| !value.starts_with('/'))
+    .ok_or("Unsupported OpenRouter API path.")?;
+  let base = reqwest::Url::parse(&format!("{API_BASE}/"))
+    .map_err(|_| "OpenRouter API base URL is invalid.")?;
+  let url = base
+    .join(relative)
+    .map_err(|_| "Unsupported OpenRouter API path.")?;
+  if url.scheme() != base.scheme()
+    || url.host_str() != base.host_str()
+    || url.port_or_known_default() != base.port_or_known_default()
+    || !url.username().is_empty()
+    || url.password().is_some()
+    || url.fragment().is_some()
+    || !url.path().starts_with("/api/v1/")
+  {
+    return Err("Unsupported OpenRouter API path.".into());
+  }
+  let normalized_path = url.path().strip_prefix("/api/v1").unwrap_or("");
+  let safe_job_id = normalized_path
+    .strip_prefix("/videos/")
+    .is_some_and(|value| {
+      !value.is_empty()
+        && !value.contains('/')
+        && value.chars().all(|character| {
+          character.is_ascii_alphanumeric() || character == '-' || character == '_'
+        })
+    });
+  let safe_endpoint_lookup = normalized_path
+    .strip_prefix("/images/models/")
+    .is_some_and(|value| {
+      value.ends_with("/endpoints")
+        && value.len() > "/endpoints".len()
+        && !value.to_ascii_lowercase().contains("%2e")
+    });
+  let allowed_path = matches!(
+    normalized_path,
+    "/images/models" | "/videos/models" | "/models" | "/chat/completions" | "/images" | "/videos"
+  ) || safe_job_id || safe_endpoint_lookup;
+  let allowed_query = match normalized_path {
+    "/models" => url.query() == Some("output_modalities=video"),
+    _ => url.query().is_none(),
+  };
+  if !allowed_path || !allowed_query {
+    return Err("Unsupported OpenRouter API path.".into());
+  }
+  Ok(url)
+}
+
 async fn response_error(response: reqwest::Response) -> String {
   let status = response.status();
-  let text = response.text().await.unwrap_or_default();
-  let bounded = text.chars().take(MAX_ERROR_BYTES).collect::<String>();
+  let bounded = read_bounded_response(response, MAX_ERROR_BYTES as u64, "OpenRouter error")
+    .await
+    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+    .unwrap_or_default();
   if let Ok(payload) = serde_json::from_str::<Value>(&bounded) {
     let message = payload
       .pointer("/error/message")
@@ -165,73 +1002,53 @@ async fn response_error(response: reqwest::Response) -> String {
   )
 }
 
-#[tauri::command]
-async fn openrouter_request(
-  app: tauri::AppHandle,
-  method: String,
-  path: String,
-  body: Option<Value>,
-) -> Result<Value, String> {
-  validate_api_path(&path)?;
-  let api_key = read_api_key(&app)?.ok_or("Add an OpenRouter API key in Settings first.")?;
-  let client = reqwest::Client::builder()
-    .timeout(std::time::Duration::from_secs(180))
-    .build()
-    .map_err(|error| error.to_string())?;
-  let request = match method.as_str() {
-    "GET" => client.get(format!("{API_BASE}{path}")),
-    "POST" => client.post(format!("{API_BASE}{path}")),
-    _ => return Err("Unsupported HTTP method.".into()),
-  }
-  .bearer_auth(api_key)
-  .header("Content-Type", "application/json")
-  .header("HTTP-Referer", "https://open-gen-ui.local")
-  .header("X-Title", "OpenGen UI");
-  let response = if let Some(payload) = body {
-    request.json(&payload).send().await
-  } else {
-    request.send().await
-  }
-  .map_err(|error| format!("Could not reach OpenRouter: {error}"))?;
-  if !response.status().is_success() {
-    return Err(response_error(response).await);
-  }
-  response
-    .json::<Value>()
-    .await
-    .map_err(|error| format!("OpenRouter returned invalid JSON: {error}"))
-}
-
-fn validate_remote_image_url(value: &str) -> Result<reqwest::Url, String> {
-  let url = reqwest::Url::parse(value).map_err(|_| "The image URL is invalid.".to_string())?;
-  if !matches!(url.scheme(), "http" | "https") || !url.username().is_empty() || url.password().is_some() {
-    return Err("Only public HTTP image URLs are supported.".into());
-  }
-  let host = url.host_str().ok_or("The image URL has no host.")?;
-  if host.eq_ignore_ascii_case("localhost") || host.ends_with(".localhost") {
-    return Err("Local image URLs are not supported.".into());
-  }
-  if let Ok(address) = host.parse::<std::net::IpAddr>() {
-    let blocked = match address {
-      std::net::IpAddr::V4(value) => {
-        value.is_private()
-          || value.is_loopback()
-          || value.is_link_local()
-          || value.is_broadcast()
-          || value.is_unspecified()
+fn hydrate_local_media_references(app: &tauri::AppHandle, value: &mut Value) -> Result<(), String> {
+  match value {
+    Value::String(source) if source.starts_with(LOCAL_MEDIA_MARKER) => {
+      let path = PathBuf::from(&source[LOCAL_MEDIA_MARKER.len()..]);
+      let path = validate_managed_media_path(app, &path)?;
+      let metadata = std::fs::metadata(&path).map_err(|error| error.to_string())?;
+      if metadata.len() == 0 || metadata.len() > MAX_VIDEO_BYTES {
+        return Err("A managed request asset exceeds the local safety limit.".into());
       }
-      std::net::IpAddr::V6(value) => value.is_loopback() || value.is_unspecified(),
-    };
-    if blocked {
-      return Err("Private network image URLs are not supported.".into());
+      let bytes = std::fs::read(&path).map_err(|error| error.to_string())?;
+      let name = path.file_name().and_then(|item| item.to_str()).unwrap_or("media.png");
+      let (kind, mime_type, _) = inspect_media(&bytes[..bytes.len().min(16)], name)?;
+      let limit = if kind == "video" { MAX_VIDEO_BYTES } else { MAX_IMAGE_BYTES };
+      if bytes.len() as u64 > limit {
+        return Err("A managed request asset exceeds the local safety limit.".into());
+      }
+      *source = format!(
+        "data:{mime_type};base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes),
+      );
     }
+    Value::Array(items) => {
+      for item in items {
+        hydrate_local_media_references(app, item)?;
+      }
+    }
+    Value::Object(object) => {
+      for item in object.values_mut() {
+        hydrate_local_media_references(app, item)?;
+      }
+    }
+    _ => {}
   }
-  Ok(url)
+  Ok(())
 }
 
-#[tauri::command]
-async fn fetch_image_data_url(url: String) -> Result<CachedImageData, String> {
-  let url = validate_remote_image_url(&url)?;
+fn media_name_for_mime(mime_type: &str) -> &'static str {
+  match mime_type {
+    "image/jpeg" => "result.jpg",
+    "image/webp" => "result.webp",
+    "image/gif" => "result.gif",
+    _ => "result.png",
+  }
+}
+
+async fn download_public_image(url: &str) -> Result<(Vec<u8>, String), String> {
+  let url = validate_remote_image_url(url)?;
   let client = reqwest::Client::builder()
     .timeout(std::time::Duration::from_secs(45))
     .redirect(reqwest::redirect::Policy::custom(|attempt| {
@@ -250,14 +1067,14 @@ async fn fetch_image_data_url(url: String) -> Result<CachedImageData, String> {
     .get(url)
     .send()
     .await
-    .map_err(|error| format!("Could not download the image: {error}"))?;
+    .map_err(|error| format!("Could not download the generated image: {error}"))?;
   if !response.status().is_success() {
-    return Err(format!("Image download failed with HTTP {}.", response.status().as_u16()));
+    return Err(format!("Generated image download failed with HTTP {}.", response.status().as_u16()));
   }
   if response.content_length().is_some_and(|length| length > MAX_IMAGE_BYTES) {
-    return Err("The image is larger than 30 MB.".into());
+    return Err("The generated image is larger than 30 MB.".into());
   }
-  let content_type = response
+  let mime_type = response
     .headers()
     .get(reqwest::header::CONTENT_TYPE)
     .and_then(|value| value.to_str().ok())
@@ -265,22 +1082,162 @@ async fn fetch_image_data_url(url: String) -> Result<CachedImageData, String> {
     .unwrap_or("")
     .trim()
     .to_ascii_lowercase();
-  if !content_type.starts_with("image/") {
-    return Err("The downloaded file is not an image.".into());
+  if !mime_type.starts_with("image/") {
+    return Err("The generated result is not an image.".into());
   }
-  let bytes = response
-    .bytes()
+  let bytes = read_bounded_response(response, MAX_IMAGE_BYTES, "The generated image").await?;
+  Ok((bytes, mime_type))
+}
+
+async fn materialize_openrouter_images(
+  app: &tauri::AppHandle,
+  payload: &mut Value,
+) -> Result<(), String> {
+  let Some(items) = payload.get_mut("data").and_then(Value::as_array_mut) else {
+    return Ok(());
+  };
+  for item in items {
+    let Some(object) = item.as_object_mut() else { continue };
+    let declared_mime = object
+      .get("media_type")
+      .and_then(Value::as_str)
+      .unwrap_or("image/png")
+      .to_string();
+    let materialized = if let Some(encoded) = object.get("b64_json").and_then(Value::as_str) {
+      if encoded.len() as u64 > (MAX_IMAGE_BYTES * 4 / 3) + 8 {
+        return Err("The generated image exceeds the 30 MB local safety limit.".into());
+      }
+      let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|_| "OpenRouter returned invalid image base64.")?;
+      write_managed_media(
+        &generated_directory(app)?,
+        media_name_for_mime(&declared_mime),
+        &bytes,
+        "image",
+      )?
+    } else if let Some(url) = object.get("url").and_then(Value::as_str) {
+      let (bytes, mime_type) = download_public_image(url).await?;
+      write_managed_media(
+        &generated_directory(app)?,
+        media_name_for_mime(&mime_type),
+        &bytes,
+        "image",
+      )?
+    } else {
+      continue;
+    };
+    object.remove("b64_json");
+    object.remove("url");
+    object.insert("local_path".into(), Value::String(materialized.local_path));
+    object.insert("media_type".into(), Value::String(materialized.mime_type));
+    object.insert("byte_size".into(), Value::from(materialized.byte_size));
+  }
+  Ok(())
+}
+
+#[tauri::command]
+async fn openrouter_request(
+  app: tauri::AppHandle,
+  method: String,
+  path: String,
+  body: Option<Value>,
+) -> Result<Value, String> {
+  let url = openrouter_url(&path)?;
+  let api_key = read_api_key(&app)?.ok_or("Add an OpenRouter API key in Settings first.")?;
+  let client = reqwest::Client::builder()
+    .timeout(std::time::Duration::from_secs(180))
+    .build()
+    .map_err(|error| error.to_string())?;
+  let request = match method.as_str() {
+    "GET" => client.get(url.clone()),
+    "POST" => client.post(url),
+    _ => return Err("Unsupported HTTP method.".into()),
+  }
+  .bearer_auth(api_key)
+  .header("Content-Type", "application/json")
+  .header("HTTP-Referer", "https://open-gen-ui.local")
+  .header("X-Title", "OpenGen UI");
+  let response = if let Some(mut payload) = body {
+    hydrate_local_media_references(&app, &mut payload)?;
+    request.json(&payload).send().await
+  } else {
+    request.send().await
+  }
+  .map_err(|error| format!("Could not reach OpenRouter: {error}"))?;
+  if !response.status().is_success() {
+    return Err(response_error(response).await);
+  }
+  let bytes = read_bounded_response(response, MAX_OPENROUTER_JSON_BYTES, "OpenRouter response").await?;
+  let mut payload = serde_json::from_slice::<Value>(&bytes)
+    .map_err(|error| format!("OpenRouter returned invalid JSON: {error}"))?;
+  if path == "/images" {
+    materialize_openrouter_images(&app, &mut payload).await?;
+  }
+  Ok(payload)
+}
+
+fn is_blocked_ip_address(address: std::net::IpAddr) -> bool {
+  match address {
+    std::net::IpAddr::V4(value) => {
+      value.is_private()
+        || value.is_loopback()
+        || value.is_link_local()
+        || value.is_broadcast()
+        || value.is_unspecified()
+        || value.is_multicast()
+        || value.octets()[0] == 0
+    }
+    std::net::IpAddr::V6(value) => {
+      let segments = value.segments();
+      value.is_loopback()
+        || value.is_unspecified()
+        || value.is_multicast()
+        || (segments[0] & 0xfe00) == 0xfc00
+        || (segments[0] & 0xffc0) == 0xfe80
+        || value
+          .to_ipv4_mapped()
+          .is_some_and(|mapped| is_blocked_ip_address(std::net::IpAddr::V4(mapped)))
+    }
+  }
+}
+
+fn validate_remote_image_url(value: &str) -> Result<reqwest::Url, String> {
+  let url = reqwest::Url::parse(value).map_err(|_| "The image URL is invalid.".to_string())?;
+  if !matches!(url.scheme(), "http" | "https") || !url.username().is_empty() || url.password().is_some() {
+    return Err("Only public HTTP image URLs are supported.".into());
+  }
+  let host = url.host_str().ok_or("The image URL has no host.")?;
+  if host.eq_ignore_ascii_case("localhost") || host.ends_with(".localhost") {
+    return Err("Local image URLs are not supported.".into());
+  }
+  if let Ok(address) = host.trim_matches(['[', ']']).parse::<std::net::IpAddr>() {
+    if is_blocked_ip_address(address) {
+      return Err("Private network image URLs are not supported.".into());
+    }
+  }
+  Ok(url)
+}
+
+async fn read_bounded_response(
+  mut response: reqwest::Response,
+  limit: u64,
+  label: &str,
+) -> Result<Vec<u8>, String> {
+  let mut bytes = Vec::with_capacity(
+    response.content_length().unwrap_or(0).min(limit) as usize,
+  );
+  while let Some(chunk) = response
+    .chunk()
     .await
-    .map_err(|error| format!("Could not read the image: {error}"))?;
-  if bytes.len() as u64 > MAX_IMAGE_BYTES {
-    return Err("The image is larger than 30 MB.".into());
+    .map_err(|error| format!("Could not read {label}: {error}"))?
+  {
+    if bytes.len() as u64 + chunk.len() as u64 > limit {
+      return Err(format!("{label} exceeds the local safety limit."));
+    }
+    bytes.extend_from_slice(&chunk);
   }
-  Ok(CachedImageData {
-    data_url: format!(
-      "data:{content_type};base64,{}",
-      base64::engine::general_purpose::STANDARD.encode(bytes)
-    ),
-  })
+  Ok(bytes)
 }
 
 #[tauri::command]
@@ -298,6 +1255,7 @@ async fn cache_video_content(
   let api_key = read_api_key(&app)?.ok_or("Add an OpenRouter API key in Settings first.")?;
   let response = reqwest::Client::new()
     .get(format!("{API_BASE}/videos/{job_id}/content?index=0"))
+    .timeout(std::time::Duration::from_secs(180))
     .bearer_auth(api_key)
     .send()
     .await
@@ -311,36 +1269,243 @@ async fn cache_video_content(
     .and_then(|value| value.to_str().ok())
     .unwrap_or("video/mp4")
     .to_string();
-  let bytes = response
-    .bytes()
-    .await
-    .map_err(|error| format!("Could not read generated video: {error}"))?;
-  let directory = app
-    .path()
-    .app_cache_dir()
-    .map_err(|error| error.to_string())?
-    .join("generated");
-  std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+  if !content_type.starts_with("video/") {
+    return Err("Generated video content has an invalid media type.".into());
+  }
+  if response.content_length().is_some_and(|length| length > MAX_VIDEO_BYTES) {
+    return Err("Generated video exceeds the 700 MB local safety limit.".into());
+  }
+  let bytes = read_bounded_response(response, MAX_VIDEO_BYTES, "Generated video").await?;
+  let directory = generated_directory(&app)?;
   let extension = if content_type.contains("webm") { "webm" } else { "mp4" };
-  let path = directory.join(format!("{job_id}.{extension}"));
-  std::fs::write(&path, bytes).map_err(|error| error.to_string())?;
+  let managed = write_managed_media(
+    &directory,
+    &format!("{job_id}.{extension}"),
+    &bytes,
+    "video",
+  )?;
   Ok(CachedMedia {
-    path: path.to_string_lossy().into_owned(),
+    path: managed.local_path,
   })
+}
+
+fn command_available(name: &str) -> bool {
+  std::process::Command::new(name)
+    .arg("-version")
+    .stdout(std::process::Stdio::null())
+    .stderr(std::process::Stdio::null())
+    .status()
+    .is_ok_and(|status| status.success())
+}
+
+fn video_dimensions(path: &Path) -> Result<(u32, u32), String> {
+  let output = std::process::Command::new("ffprobe")
+    .args([
+      "-v", "error",
+      "-select_streams", "v:0",
+      "-show_entries", "stream=width,height",
+      "-of", "csv=s=x:p=0",
+    ])
+    .arg(path)
+    .output()
+    .map_err(|error| format!("Could not inspect video dimensions: {error}"))?;
+  if !output.status.success() {
+    return Err("FFprobe could not inspect the first assembly clip.".into());
+  }
+  let value = String::from_utf8_lossy(&output.stdout);
+  let (width, height) = value
+    .trim()
+    .split_once('x')
+    .ok_or("FFprobe returned an invalid video size.")?;
+  let width = width.parse::<u32>().map_err(|_| "Invalid video width.")?;
+  let height = height.parse::<u32>().map_err(|_| "Invalid video height.")?;
+  if width == 0 || height == 0 || width > 8192 || height > 8192 {
+    return Err("The assembly video size is unsupported.".into());
+  }
+  Ok((width - width % 2, height - height % 2))
+}
+
+fn write_assembly_source(
+  source: &str,
+  _target: &Path,
+  safe_roots: &[PathBuf],
+  total_bytes: &mut usize,
+) -> Result<PathBuf, String> {
+  let path = PathBuf::from(source);
+  let canonical = path.canonicalize().map_err(|_| "An assembly source is not a readable local file.")?;
+  let allowed = safe_roots.iter().any(|root| {
+    root.canonicalize().is_ok_and(|safe_root| canonical.starts_with(safe_root))
+  });
+  if !allowed {
+    return Err("Only videos in OpenGen UI managed storage may be assembled.".into());
+  }
+  let size = std::fs::metadata(&canonical).map_err(|error| error.to_string())?.len() as usize;
+  *total_bytes = total_bytes.saturating_add(size);
+  if *total_bytes > MAX_VIDEO_BYTES as usize {
+    return Err("Assembly inputs exceed the 700 MB local safety limit.".into());
+  }
+  Ok(canonical)
+}
+
+#[tauri::command]
+fn assemble_video(
+  app: tauri::AppHandle,
+  clips: Vec<AssemblyClip>,
+  expected_duration: Option<f64>,
+) -> Result<AssemblyResult, String> {
+  if clips.is_empty() || clips.len() > 24 {
+    return Err("Choose between 1 and 24 clips for an assembly.".into());
+  }
+  if !command_available("ffmpeg") || !command_available("ffprobe") {
+    return Err("FFmpeg and FFprobe are required for final video rendering. Install FFmpeg, then try again.".into());
+  }
+  let duration = clips.iter().try_fold(0.0, |total, clip| {
+    let clip_duration = clip.end_seconds - clip.start_seconds;
+    if !clip.start_seconds.is_finite()
+      || !clip.end_seconds.is_finite()
+      || clip.start_seconds < 0.0
+      || clip_duration <= 0.0
+      || clip_duration > 120.0
+    {
+      return Err(format!("{} has an invalid crop range.", clip.name));
+    }
+    if total + clip_duration > 600.0 {
+      return Err("Final video duration may not exceed 10 minutes.".into());
+    }
+    Ok(total + clip_duration)
+  })?;
+  if let Some(expected) = expected_duration {
+    let tolerance = (expected * 0.01).clamp(0.1, 0.25);
+    if !expected.is_finite() || expected <= 0.0 || (duration - expected).abs() > tolerance {
+      return Err(format!(
+        "The final assembly is {:.2} seconds, but the confirmed output length is {:.2} seconds.",
+        duration, expected,
+      ));
+    }
+  }
+  let cache = app.path().app_cache_dir().map_err(|error| error.to_string())?;
+  let assets = assets_directory(&app)?;
+  let generated = generated_directory(&app)?;
+  std::fs::create_dir_all(&cache).map_err(|error| error.to_string())?;
+  secure_directory(&generated)?;
+  let stamp = std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .map_err(|error| error.to_string())?
+    .as_millis();
+  let work = cache.join(format!("assembly-{}-{stamp}", std::process::id()));
+  let legacy_generated = cache.join("generated");
+  let output_directory = generated;
+  std::fs::create_dir_all(&work).map_err(|error| error.to_string())?;
+  std::fs::create_dir_all(&legacy_generated).map_err(|error| error.to_string())?;
+  std::fs::create_dir_all(&output_directory).map_err(|error| error.to_string())?;
+
+  let result = (|| -> Result<AssemblyResult, String> {
+    let mut total_bytes = 0usize;
+    let mut sources = Vec::with_capacity(clips.len());
+    for (index, clip) in clips.iter().enumerate() {
+      let staged = work.join(format!("input-{index}.mp4"));
+      sources.push(write_assembly_source(
+        &clip.source,
+        &staged,
+        &[assets.clone(), output_directory.clone()],
+        &mut total_bytes,
+      )?);
+    }
+    let (width, height) = video_dimensions(&sources[0])?;
+    let mut segments = Vec::with_capacity(clips.len());
+    for (index, (clip, source)) in clips.iter().zip(sources.iter()).enumerate() {
+      let segment = work.join(format!("segment-{index}.mp4"));
+      let clip_duration = clip.end_seconds - clip.start_seconds;
+      let filter = format!(
+        "scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black,setsar=1"
+      );
+      let status = std::process::Command::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-ss"])
+        .arg(format!("{:.3}", clip.start_seconds))
+        .arg("-i")
+        .arg(source)
+        .args(["-t"])
+        .arg(format!("{clip_duration:.3}"))
+        .args(["-vf", &filter, "-an", "-r", "30", "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p", "-movflags", "+faststart"])
+        .arg(&segment)
+        .status()
+        .map_err(|error| format!("Could not launch FFmpeg: {error}"))?;
+      if !status.success() {
+        return Err(format!("FFmpeg could not render crop {} ({}).", index + 1, clip.name));
+      }
+      segments.push(segment);
+    }
+    let concat_file = work.join("concat.txt");
+    let concat = segments.iter()
+      .map(|path| format!("file '{}'", path.to_string_lossy().replace('\'', "'\\''")))
+      .collect::<Vec<_>>()
+      .join("\n");
+    std::fs::write(&concat_file, concat).map_err(|error| error.to_string())?;
+    let output = output_directory.join(format!("final-{stamp}.mp4"));
+    let status = std::process::Command::new("ffmpeg")
+      .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i"])
+      .arg(&concat_file)
+      .args(["-c", "copy", "-movflags", "+faststart"])
+      .arg(&output)
+      .status()
+      .map_err(|error| format!("Could not launch FFmpeg: {error}"))?;
+    if !status.success() {
+      return Err("FFmpeg could not merge the cropped clips.".into());
+    }
+    set_private_file_permissions(&output)?;
+    Ok(AssemblyResult { path: output.to_string_lossy().into_owned(), duration })
+  })();
+  let _ = std::fs::remove_dir_all(&work);
+  result
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
   tauri::Builder::default()
+    .plugin(tauri_plugin_dialog::init())
     .plugin(tauri_plugin_process::init())
     .plugin(tauri_plugin_updater::Builder::new().build())
+    .on_window_event(|window, event| {
+      let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event else {
+        return;
+      };
+      let app = window.app_handle().clone();
+      let emitter = window.clone();
+      let paths = paths.clone();
+      tauri::async_runtime::spawn_blocking(move || {
+        let result = assets_directory(&app).and_then(|root| {
+          paths.iter().map(|path| import_media_file(path, &root)).collect::<Result<Vec<_>, _>>()
+        });
+        match result {
+          Ok(assets) => {
+            let _ = emitter.emit("managed-assets-imported", assets);
+          }
+          Err(error) => {
+            let _ = emitter.emit("managed-assets-import-failed", error);
+          }
+        }
+      });
+    })
     .invoke_handler(tauri::generate_handler![
       credential_status,
       save_api_key,
       remove_api_key,
       openrouter_request,
-      fetch_image_data_url,
-      cache_video_content
+      cache_video_content,
+      append_shared_asset_chunk,
+      finish_shared_asset,
+      abort_shared_asset,
+      pick_and_import_assets,
+      delete_managed_asset,
+      assemble_video,
+      read_agent_sessions,
+      wait_for_agent_sessions,
+      upsert_agent_session,
+      save_custom_skill_text,
+      list_custom_skills,
+      read_custom_skill,
+      import_custom_skill_text,
+      rollback_custom_skill
     ])
     .run(tauri::generate_context!())
     .expect("error while running OpenGen UI");
@@ -348,21 +1513,39 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-  use super::{mask_key, validate_api_path, validate_remote_image_url};
+  use super::{
+    command_available,
+    list_custom_skills_from_root,
+    mask_key,
+    read_custom_skill_from_root,
+    save_custom_skill_to_root,
+    validate_custom_skill_text,
+    validate_media_path_in_roots,
+    import_media_file,
+    append_shared_asset_chunk_to_root,
+    finish_shared_asset_to_root,
+    openrouter_url,
+    validate_remote_image_url,
+    write_assembly_source,
+  };
 
   #[test]
   fn api_paths_are_strictly_scoped() {
-    assert!(validate_api_path("/images/models").is_ok());
-    assert!(validate_api_path("/chat/completions").is_ok());
-    assert!(validate_api_path("/models?output_modalities=video").is_ok());
-    assert!(validate_api_path("/videos/job-1").is_ok());
-    assert!(validate_api_path("https://example.com").is_err());
-    assert!(validate_api_path("/models").is_err());
+    assert_eq!(openrouter_url("/images/models").unwrap().path(), "/api/v1/images/models");
+    assert!(openrouter_url("/chat/completions").is_ok());
+    assert!(openrouter_url("/models?output_modalities=video").is_ok());
+    assert!(openrouter_url("/videos/job-1").is_ok());
+    assert!(openrouter_url("https://example.com").is_err());
+    assert!(openrouter_url("/models").is_err());
+    assert!(openrouter_url("/videos/%2e%2e/%2e%2e/keys").is_err());
+    assert!(openrouter_url("/videos/%2E%2E/%2E%2E/credits").is_err());
+    assert!(openrouter_url("//example.com/api/v1/images").is_err());
   }
 
   #[test]
   fn api_keys_are_masked() {
     assert_eq!(mask_key("sk-or-v1-1234567890"), "sk-or-v…7890");
+    assert_eq!(mask_key("가나다라마바사아자차카타"), "가나다라마바사…자차카타");
   }
 
   #[test]
@@ -372,5 +1555,128 @@ mod tests {
     assert!(validate_remote_image_url("http://localhost/output.png").is_err());
     assert!(validate_remote_image_url("http://127.0.0.1/output.png").is_err());
     assert!(validate_remote_image_url("http://192.168.1.2/output.png").is_err());
+    assert!(validate_remote_image_url("http://[::1]/output.png").is_err());
+    assert!(validate_remote_image_url("http://[fc00::1]/output.png").is_err());
+    assert!(validate_remote_image_url("http://[fe80::1]/output.png").is_err());
+    assert!(validate_remote_image_url("http://[::ffff:169.254.169.254]/output.png").is_err());
+  }
+
+  #[test]
+  fn command_probe_never_panics() {
+    assert!(!command_available("open-gen-ui-command-that-does-not-exist"));
+  }
+
+  #[test]
+  fn custom_skill_approval_writes_and_versions_skill_markdown() {
+    let root = std::env::temp_dir().join(format!(
+      "open-gen-ui-skill-test-{}-{}",
+      std::process::id(),
+      std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let markdown = "---\nname: Test workflow\nversion: 1\n---\n\n# Test workflow";
+    let first = save_custom_skill_to_root(&root, "Test workflow", markdown).unwrap();
+    let second = save_custom_skill_to_root(&root, "Test workflow", markdown).unwrap();
+    assert!(std::path::Path::new(&first.path).exists());
+    assert_eq!(first.version, 1);
+    assert_eq!(second.version, 2);
+    assert!(second.markdown.contains("version: 2"));
+    let listed = list_custom_skills_from_root(&root).unwrap();
+    assert_eq!(listed[0].versions, vec![2, 1]);
+    let historical = read_custom_skill_from_root(&root, "Test workflow", Some(1)).unwrap();
+    assert!(historical.markdown.contains("version: 1"));
+    let _ = std::fs::remove_dir_all(root);
+  }
+
+  #[test]
+  fn custom_skills_reject_session_bound_ids_paths_and_secrets() {
+    assert!(validate_custom_skill_text("# Safe\nUse a restrained visual direction.").is_ok());
+    assert!(validate_custom_skill_text("# Unsafe\nasset-1234567890abcdef").is_err());
+    assert!(validate_custom_skill_text("# Unsafe\n123e4567-e89b-12d3-a456-426614174000").is_err());
+    assert!(validate_custom_skill_text("# Unsafe\nC:\\Users\\creator\\clip.mp4").is_err());
+    assert!(validate_custom_skill_text("# Unsafe\napi_key = secret-value-123").is_err());
+  }
+
+  #[test]
+  fn assembly_sources_accept_only_declared_generated_roots() {
+    let root = std::env::temp_dir().join(format!(
+      "open-gen-ui-assembly-test-{}-{}",
+      std::process::id(),
+      std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+    ));
+    let generated = root.join("generated");
+    let outside = root.join("outside");
+    std::fs::create_dir_all(&generated).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let allowed = generated.join("clip.mp4");
+    let rejected = outside.join("clip.mp4");
+    std::fs::write(&allowed, b"video").unwrap();
+    std::fs::write(&rejected, b"video").unwrap();
+    let mut bytes = 0;
+    assert!(write_assembly_source(
+      allowed.to_str().unwrap(),
+      &root.join("staged.mp4"),
+      std::slice::from_ref(&generated),
+      &mut bytes,
+    ).is_ok());
+    assert!(write_assembly_source(
+      rejected.to_str().unwrap(),
+      &root.join("staged.mp4"),
+      &[generated],
+      &mut bytes,
+    ).is_err());
+    let _ = std::fs::remove_dir_all(root);
+  }
+
+  #[test]
+  fn legacy_asset_bytes_are_materialized_outside_session_json() {
+    let root = std::env::temp_dir().join(format!(
+      "open-gen-ui-shared-asset-test-{}-{}",
+      std::process::id(),
+      std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+    ));
+    let png = b"\x89PNG\r\n\x1a\nlegacy";
+    let input = super::SharedAssetInput {
+      asset_id: "asset_123".into(),
+      name: "reference.png".into(),
+      mime_type: "image/png".into(),
+      origin: Some("upload".into()),
+    };
+    append_shared_asset_chunk_to_root(&root, "upload_123", &png[..8]).unwrap();
+    append_shared_asset_chunk_to_root(&root, "upload_123", &png[8..]).unwrap();
+    let result = finish_shared_asset_to_root(&root, "upload_123", &input).unwrap();
+    assert!(std::path::Path::new(&result.path).exists());
+    assert_eq!(std::fs::read(&result.path).unwrap(), png);
+    let _ = std::fs::remove_dir_all(root);
+  }
+
+  #[test]
+  fn imported_media_is_copied_and_only_managed_roots_are_readable() {
+    let root = std::env::temp_dir().join(format!(
+      "open-gen-ui-managed-media-test-{}-{}",
+      std::process::id(),
+      std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+    ));
+    let source_directory = root.join("source");
+    let assets = root.join("assets");
+    let outside = root.join("outside");
+    std::fs::create_dir_all(&source_directory).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let source = source_directory.join("reference.png");
+    let outside_file = outside.join("private.png");
+    let png = b"\x89PNG\r\n\x1a\nmanaged";
+    std::fs::write(&source, png).unwrap();
+    std::fs::write(&outside_file, png).unwrap();
+
+    let imported = import_media_file(&source, &assets).unwrap();
+    let imported_path = std::path::PathBuf::from(imported.local_path);
+    assert_eq!(std::fs::read(&imported_path).unwrap(), png);
+    assert!(validate_media_path_in_roots(&imported_path, std::slice::from_ref(&assets)).is_ok());
+    assert!(validate_media_path_in_roots(&outside_file, &[assets]).is_err());
+
+    let disguised = source_directory.join("disguised.png");
+    std::fs::write(&disguised, b"not an image").unwrap();
+    assert!(import_media_file(&disguised, &root.join("assets")).is_err());
+    let _ = std::fs::remove_dir_all(root);
   }
 }

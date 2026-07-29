@@ -8,13 +8,14 @@ import {
   promptEnhancerInstruction,
   validateEnhancedPrompt,
   modelInputSignature,
+  prettyRequest,
   supportsVideoInput,
   type ImageModel,
   type ReferenceAsset,
   type VideoModel,
 } from "./openrouter.ts";
 
-const asset = (role: ReferenceAsset["role"], name = role, mediaType = "image/png", slot = 1): ReferenceAsset => ({
+const asset = (role: ReferenceAsset["role"], name: string = role, mediaType = "image/png", slot = 1): ReferenceAsset => ({
   id: name,
   name: `${name}.${mediaType.startsWith("video/") ? "mp4" : "png"}`,
   mediaType,
@@ -145,4 +146,14 @@ test("default options come directly from capability values", () => {
     aspect_ratio: "9:16",
     generate_audio: undefined,
   });
+});
+
+test("request previews never expose Base64 media", () => {
+  const preview = prettyRequest({
+    input: `data:image/png;base64,${"A".repeat(500)}`,
+    managed: "open-gen-ui-local:/Users/test/.open-gen-ui/assets/reference.png",
+  });
+  assert.doesNotMatch(preview, /;base64,/i);
+  assert.doesNotMatch(preview, /A{20}/);
+  assert.match(preview, /media payload omitted/);
 });
