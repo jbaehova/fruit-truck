@@ -1,0 +1,30 @@
+{
+  "name": "@open-gen-ui/agent-kit",
+  "version": "1.0.0",
+  "description": "Standalone MCP server and Agent Skills for OpenGen UI",
+  "type": "module",
+  "bin": {
+    "open-gen-ui-mcp": "dist/scripts/mcp-server.js",
+    "open-gen-ui-agent-kit": "bin/install.mjs"
+  },
+  "files": [
+    "bin",
+    "compatibility.json",
+    "dist",
+    "mcp.example.json",
+    "skills",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "node scripts/build-package.mjs",
+    "check": "node scripts/check-compatibility.mjs",
+    "prepack": "npm run build && npm run check"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "devDependencies": {
+    "typescript": "~6.0.2"
+  },
+  "license": "UNLICENSED"
+}

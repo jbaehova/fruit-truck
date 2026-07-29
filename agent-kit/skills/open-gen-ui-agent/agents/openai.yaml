@@ -1,0 +1,4 @@
+interface:
+  display_name: "OpenGen UI Agent"
+  short_description: "Direct complete image and video production"
+  default_prompt: "Use $open-gen-ui-agent to plan and run this creative production through OpenGen UI."

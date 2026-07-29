@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "open-gen-ui": {
+      "command": "open-gen-ui-mcp",
+      "args": ["--agent-host", "codex"]
+    }
+  }
+}

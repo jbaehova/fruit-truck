@@ -1,0 +1,4 @@
+interface:
+  display_name: "Story-driven Short-form"
+  short_description: "Plan consistent multi-shot short videos"
+  default_prompt: "Use $story-driven-short-form with $open-gen-ui-agent to produce this short video."
