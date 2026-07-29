@@ -5,6 +5,9 @@ node_modules/
 dist/
 target/
 output/
+apps/desktop/test-results/
+apps/desktop/playwright-report/
+agent-kit/dist/
 .playwright-cli/
 *.log
 apps/desktop/src-tauri/gen/
