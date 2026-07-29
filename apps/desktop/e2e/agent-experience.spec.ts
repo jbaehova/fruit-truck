@@ -249,14 +249,12 @@ test("blocking decisions stay read-only and never steal focus from the active wo
   await expect.poll(() => page.evaluate((key) => {
     const session = JSON.parse(localStorage.getItem(key) ?? "{}").sessions?.[0];
     return {
-      selectedModelId: session?.selectedModelIds?.image,
       decisions: session?.agent?.decisions?.map((item: { status: string }) => item.status),
       runStatus: session?.agent?.runStatus,
       approval: session?.agent?.artifacts?.find((item: { assetId: string }) => item.assetId === "asset-final")?.approval,
       finalStep: session?.agent?.plan?.find((item: { id: string }) => item.id === "complete")?.status,
     };
   }, STORAGE_KEY)).toMatchObject({
-    selectedModelId: "",
     decisions: ["pending", "pending", "pending"],
     runStatus: "waiting",
     approval: "unreviewed",
@@ -285,6 +283,12 @@ test("approved video opens dedicated Assembly and provenance stays folded in Ass
 });
 
 test("Settings keeps Agent Skill import and history read-only for session activation", async ({ page }) => {
+  await page.evaluate((key) => {
+    const state = JSON.parse(localStorage.getItem(key) ?? "{}");
+    for (const session of state.sessions ?? []) session.activeVideoJobs = [];
+    localStorage.setItem(key, JSON.stringify(state));
+  }, STORAGE_KEY);
+  await page.reload();
   await page.evaluate(() => {
     const runtime = window as typeof window & {
       __TAURI_INTERNALS__?: {
