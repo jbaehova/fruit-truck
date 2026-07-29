@@ -3,14 +3,14 @@ import { Dialog } from "@base-ui/react/dialog";
 import { Progress } from "@base-ui/react/progress";
 import { Toggle } from "@base-ui/react/toggle";
 import { ToggleGroup } from "@base-ui/react/toggle-group";
-import { Check, Download, Eye, ImageIcon, Plus, Trash2, Video, X } from "lucide-react";
-import { useRef, useState } from "react";
+import { Check, Download, Eye, Film, ImageIcon, Plus, Trash2, Video, X } from "lucide-react";
+import { useState } from "react";
 import { AssetPreview } from "@/components/AssetPreview";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useI18n, type MessageKey } from "@/i18n";
 import { resolveAssetSource, type SessionAsset, type SessionVideoJob } from "@/studio";
+import type { ArtifactNode } from "@/agent";
 
 const ORIGIN_KEYS: Record<SessionAsset["origin"], MessageKey> = {
   upload: "originUpload",
@@ -30,20 +30,27 @@ export function AssetLibrary({
   selectedIds,
   onSelectedIdsChange,
   onImport,
+  onPick,
   onUse,
   onDelete,
   jobs,
+  artifacts,
+  approvedVideoCount,
+  onOpenAssembly,
 }: {
   assets: SessionAsset[];
   selectedIds: Set<string>;
   onSelectedIdsChange: (ids: Set<string>) => void;
   onImport: (files: FileList | File[]) => Promise<void>;
+  onPick: () => Promise<void>;
   onUse: (assetId: string) => void;
   onDelete: (ids: string[]) => void;
   jobs: SessionVideoJob[];
+  artifacts: ArtifactNode[];
+  approvedVideoCount: number;
+  onOpenAssembly: () => void;
 }) {
   const { t } = useI18n();
-  const inputRef = useRef<HTMLInputElement>(null);
   const [preview, setPreview] = useState<SessionAsset | null>(null);
   const [filter, setFilter] = useState<"all" | "image" | "video">("all");
   const [draggingFiles, setDraggingFiles] = useState(false);
@@ -96,7 +103,10 @@ export function AssetLibrary({
           <strong>{t("assetLibrary")} <small>{assets.length}</small></strong>
           <p>{t("assetLibraryHint")}</p>
         </div>
-        <Button size="icon-sm" variant="outline" aria-label={t("importAssets")} onClick={() => inputRef.current?.click()}><Plus /></Button>
+        <div className="asset-library-actions">
+          {approvedVideoCount > 0 ? <Button size="xs" variant="outline" onClick={onOpenAssembly}><Film /> {t("makeFinalVideo")}</Button> : null}
+          <Button size="icon-sm" variant="outline" aria-label={t("importAssets")} onClick={() => void onPick()}><Plus /></Button>
+        </div>
       </header>
 
       <div className="asset-toolbar">
@@ -126,14 +136,9 @@ export function AssetLibrary({
         ) : null}
       </div>
 
-      <Input ref={inputRef} className="sr-only" type="file" accept="image/*,video/*" multiple onChange={(event) => {
-        if (event.target.files) void onImport(event.target.files);
-        event.target.value = "";
-      }} />
-
       <ScrollArea className="asset-grid" contentClassName="asset-grid-content">
         {!assets.length ? (
-          <Button variant="ghost" className="asset-empty" onClick={() => inputRef.current?.click()}>
+          <Button variant="ghost" className="asset-empty" onClick={() => void onPick()}>
             <Plus />
             <span>{t("importMedia")}</span>
             <small>{t("dropFilesHint")}</small>
@@ -153,7 +158,7 @@ export function AssetLibrary({
             className={`asset-tile ${selectedIds.has(asset.id) ? "selected" : ""}`}
             draggable
             onDragStart={(event) => {
-              event.dataTransfer.setData("application/x-open-gen-asset", asset.id);
+              event.dataTransfer.setData("application/x-oppa-gen-asset", asset.id);
               event.dataTransfer.effectAllowed = "copy";
             }}
           >
@@ -187,7 +192,6 @@ export function AssetLibrary({
             {selectedIds.size === visibleAssets.length ? t("clearSelection") : t("selectVisible")}
           </Button>
         ) : <span>{t("noAssets", { kind: filter === "all" ? "" : `${t(filter)} ` })}</span>}
-        <Button size="xs" variant="outline" onClick={() => inputRef.current?.click()}><Plus /> {t("import")}</Button>
       </footer>
       {draggingFiles ? <div className="asset-library-drop-overlay"><Plus /> <strong>{t("releaseToImport")}</strong><small>{t("dropFilesHint")}</small></div> : null}
 
@@ -207,6 +211,23 @@ export function AssetLibrary({
                 </div>
               </header>
               {preview ? <AssetPreview asset={preview} controls /> : null}
+              {preview ? (() => {
+                const artifact = artifacts.find((item) => item.assetId === preview.id);
+                return artifact ? (
+                  <details className="asset-provenance">
+                    <summary>{t("provenanceDetails")}</summary>
+                    <dl>
+                      <div><dt>{t("role")}</dt><dd>{artifact.role}</dd></div>
+                      <div><dt>{t("approval")}</dt><dd>{artifact.approval}</dd></div>
+                      {artifact.generationBackend ? <div><dt>{t("generationBackend")}</dt><dd>{artifact.generationBackend === "codex_builtin" ? t("codexBuiltIn") : "OpenRouter"}</dd></div> : null}
+                      {artifact.modelId ? <div><dt>{t("model")}</dt><dd>{artifact.modelId}</dd></div> : null}
+                      {artifact.planStepId ? <div><dt>{t("sourceStep")}</dt><dd>{artifact.planStepId}</dd></div> : null}
+                      <div><dt>{t("parentAssets")}</dt><dd>{artifact.parentAssetIds.length || t("none")}</dd></div>
+                    </dl>
+                    {artifact.evaluation ? <div className="asset-evaluation"><strong>{t("agentEvaluation")}</strong><p>{artifact.evaluation.technical}</p><p>{artifact.evaluation.aesthetic}</p><small>{artifact.evaluation.recommendation}</small></div> : null}
+                  </details>
+                ) : null;
+              })() : null}
             </Dialog.Popup>
           </Dialog.Viewport>
         </Dialog.Portal>

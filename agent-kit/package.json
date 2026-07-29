@@ -1,0 +1,30 @@
+{
+  "name": "@oppa-gen/agent-kit",
+  "version": "1.0.0",
+  "description": "Standalone MCP server and Agent Skills for Oppa Gen",
+  "type": "module",
+  "bin": {
+    "oppa-gen-mcp": "dist/scripts/mcp-server.js",
+    "oppa-gen-agent-kit": "bin/install.mjs"
+  },
+  "files": [
+    "bin",
+    "compatibility.json",
+    "dist",
+    "mcp.example.json",
+    "skills",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "node scripts/build-package.mjs",
+    "check": "node scripts/check-compatibility.mjs",
+    "prepack": "npm run build && npm run check"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "devDependencies": {
+    "typescript": "~6.0.2"
+  },
+  "license": "UNLICENSED"
+}

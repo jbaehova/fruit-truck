@@ -13,6 +13,7 @@ type Props = {
   models: GenerationModel[];
   selectedId: string;
   loading: boolean;
+  disabled?: boolean;
   onSelect: (id: string) => void;
 };
 
@@ -35,7 +36,7 @@ function localizedInputSignature(mode: GenerationMode, model: GenerationModel, l
     .replaceAll("video", t("inputVideo"));
 }
 
-export function ModelSelector({ mode, models, selectedId, loading, onSelect }: Props) {
+export function ModelSelector({ mode, models, selectedId, loading, disabled, onSelect }: Props) {
   const { language, t } = useI18n();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -53,10 +54,11 @@ export function ModelSelector({ mode, models, selectedId, loading, onSelect }: P
 
   return (
     <Popover.Root open={open} onOpenChange={(next) => {
+      if (disabled) return;
       setOpen(next);
       if (!next) setQuery("");
     }}>
-      <Popover.Trigger className="model-selector-trigger" aria-label={t("chooseModel")}>
+      <Popover.Trigger className="model-selector-trigger" aria-label={t("chooseModel")} disabled={disabled}>
         <span className="model-selector-icon">{mode === "image" ? <ImageIcon /> : <Video />}</span>
         <span className="model-selector-copy">
           <small>{t("models")}</small>

@@ -219,6 +219,7 @@ export function EditMediaPanel({
   onMaskInstructionsChange,
   onDropAsset,
   onImport,
+  onPick,
 }: {
   asset: SessionAsset | null;
   targetLabel: string;
@@ -230,9 +231,9 @@ export function EditMediaPanel({
   onMaskInstructionsChange?: (instructions: string) => void;
   onDropAsset: (assetId: string) => void;
   onImport: (files: FileList | File[]) => Promise<void>;
+  onPick: () => Promise<void>;
 }) {
   const { t } = useI18n();
-  const inputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
   const [editingMask, setEditingMask] = useState(false);
   const [maskTool, setMaskTool] = useState<"paint" | "erase">("paint");
@@ -243,7 +244,7 @@ export function EditMediaPanel({
   const supportsMask = kind === "image" && Boolean(asset) && onMaskStrokesChange && onMaskInstructionsChange;
 
   const acceptDrop = (event: ReactDragEvent) =>
-    hasType(event, "application/x-open-gen-asset") || hasType(event, "Files");
+    hasType(event, "application/x-oppa-gen-asset") || hasType(event, "Files");
 
   return (
     <section
@@ -264,21 +265,11 @@ export function EditMediaPanel({
       onDrop={(event) => {
         event.preventDefault();
         setDragging(false);
-        const assetId = event.dataTransfer.getData("application/x-open-gen-asset");
+        const assetId = event.dataTransfer.getData("application/x-oppa-gen-asset");
         if (assetId) onDropAsset(assetId);
         else if (event.dataTransfer.files.length) void onImport(event.dataTransfer.files);
       }}
     >
-      <input
-        ref={inputRef}
-        className="sr-only"
-        type="file"
-        accept={kind === "image" ? "image/*" : "video/*"}
-        onChange={(event) => {
-          if (event.target.files) void onImport(event.target.files);
-          event.target.value = "";
-        }}
-      />
       <header className="edit-media-header">
         <div>
           <span className="panel-eyebrow">{t("editCanvas")}</span>
@@ -314,7 +305,7 @@ export function EditMediaPanel({
               <Brush /> {editingMask ? t("finishMask") : t("drawMask")}
             </Button>
           ) : null}
-          <Button type="button" size="sm" variant="outline" onClick={() => inputRef.current?.click()}>
+          <Button type="button" size="sm" variant="outline" onClick={() => void onPick()}>
             <Upload /> {asset ? t("replace") : t("chooseFiles")}
           </Button>
         </div>
@@ -336,7 +327,7 @@ export function EditMediaPanel({
           <div className={`edit-media-preview ${viewMode}`}><AssetPreview asset={asset} controls={asset.kind === "video"} /></div>
         )
       ) : (
-        <Button type="button" variant="ghost" className="edit-media-empty" onClick={() => inputRef.current?.click()}>
+        <Button type="button" variant="ghost" className="edit-media-empty" onClick={() => void onPick()}>
           {kind === "image" ? <ImagePlus /> : <Video />}
           <strong>{t(kind === "image" ? "dropEditImage" : "dropEditVideo")}</strong>
           <small>{t("editCanvasDropHint")}</small>

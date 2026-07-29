@@ -4,8 +4,8 @@ set -euo pipefail
 npm run tauri -- build --bundles dmg --target universal-apple-darwin
 
 bundle_dir="src-tauri/target/universal-apple-darwin/release/bundle/dmg"
-raw_dmg="$(find "$bundle_dir" -name 'OpenGen UI_*_universal.dmg' -print -quit)"
-final_dmg="$bundle_dir/OpenGen-UI-macOS-universal.dmg"
+raw_dmg="$(find "$bundle_dir" -name 'Oppa Gen_*_universal.dmg' -print -quit)"
+final_dmg="$bundle_dir/Oppa-Gen-macOS-universal.dmg"
 
 if [[ -z "$raw_dmg" ]]; then
   echo "Universal DMG was not created." >&2

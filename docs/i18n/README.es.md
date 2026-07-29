@@ -1,6 +1,6 @@
 <div align="center">
 
-# OpenGen UI
+# Oppa Gen
 
 ### Un espacio limpio para generar imágenes y vídeo
 
@@ -16,23 +16,23 @@ Elige un modelo de OpenRouter, consulta solo los controles compatibles y revisa 
 
 <br />
 
-<img src="../../assets/readme/open-gen-ui-hero.png" alt="Banner vibrante de OpenGen UI en papel recortado con motivos abstractos de imagen y película" width="1200" />
+<img src="../../assets/readme/oppa-gen-hero.png" alt="Banner vibrante de Oppa Gen en papel recortado con motivos abstractos de imagen y película" width="1200" />
 
 <br />
 
-[¿Por qué OpenGen UI?](#por-qué-open-gen-ui) · [Funciones](#funciones) · [Cómo funciona](#cómo-funciona) · [Inicio rápido](#inicio-rápido) · [Seguridad](#seguridad) · [Desarrollo](#desarrollo)
+[¿Por qué Oppa Gen?](#por-qué-oppa-gen) · [Funciones](#funciones) · [Cómo funciona](#cómo-funciona) · [Inicio rápido](#inicio-rápido) · [Seguridad](#seguridad) · [Desarrollo](#desarrollo)
 
 </div>
 
 ---
 
-> **OpenGen UI** convierte los metadatos de modelos en vivo de OpenRouter en un espacio de escritorio enfocado. Elige un modelo, crea una solicitud válida, revisa el JSON y genera sin reconstruir el formulario para cada proveedor.
+> **Oppa Gen** convierte los metadatos de modelos en vivo de OpenRouter en un espacio de escritorio enfocado. Elige un modelo, crea una solicitud válida, revisa el JSON y genera sin reconstruir el formulario para cada proveedor.
 
-## ¿Por qué OpenGen UI?
+## ¿Por qué Oppa Gen?
 
-Los modelos generativos rara vez coinciden en sus entradas. Uno admite semilla y relación de aspecto; otro necesita fotogramas inicial y final; un tercero acepta varias imágenes de referencia. OpenGen UI lee estas capacidades en tiempo de ejecución y adapta el espacio al modelo elegido.
+Los modelos generativos rara vez coinciden en sus entradas. Uno admite semilla y relación de aspecto; otro necesita fotogramas inicial y final; un tercero acepta varias imágenes de referencia. Oppa Gen lee estas capacidades en tiempo de ejecución y adapta el espacio al modelo elegido.
 
-| Sin OpenGen UI | Con OpenGen UI |
+| Sin Oppa Gen | Con Oppa Gen |
 | --- | --- |
 | Consultar la documentación de cada modelo | Controles derivados del catálogo de modelos en vivo |
 | Adivinar qué campos son válidos | Las opciones no compatibles quedan fuera de la solicitud |
@@ -62,7 +62,7 @@ flowchart LR
     E --> G[Sondeo de tarea de vídeo]
 ```
 
-1. OpenGen UI obtiene los catálogos en vivo de modelos de imagen y vídeo.
+1. Oppa Gen obtiene los catálogos en vivo de modelos de imagen y vídeo.
 2. Los metadatos del modelo elegido determinan qué entradas, referencias y opciones aparecen.
 3. El prompt y los ajustes se convierten en una solicitud válida para el proveedor.
 4. Puedes inspeccionar el JSON saneado antes de generar.
@@ -82,8 +82,8 @@ flowchart LR
 ### Ejecutar la aplicación de escritorio
 
 ```bash
-git clone https://github.com/jbaehova/open-gen-ui.git
-cd open-gen-ui/apps/desktop
+git clone https://github.com/jbaehova/oppa-gen.git
+cd oppa-gen/apps/desktop
 npm install
 npm run tauri:dev
 ```
@@ -95,7 +95,7 @@ Cuando se abra la aplicación, añade tu clave de OpenRouter en **Settings**. Lo
 En la aplicación Tauri, la clave de OpenRouter se guarda en:
 
 ```text
-~/.open-gen-ui/credentials.json
+~/.oppa-gen/credentials.json
 ```
 
 - En macOS y Linux, el directorio se restringe a `0700` y el archivo de credenciales a `0600`.
@@ -120,7 +120,7 @@ cd src-tauri && cargo test
 ### Estructura del proyecto
 
 ```text
-open-gen-ui/
+oppa-gen/
 ├── apps/desktop/
 │   ├── src/                 # Espacio React y constructor de solicitudes
 │   └── src-tauri/           # Credenciales y proxy de OpenRouter
@@ -131,12 +131,12 @@ La lógica de solicitudes está en `apps/desktop/src/openrouter.ts`; el límite 
 
 ## Estado del proyecto
 
-OpenGen UI es actualmente **software beta**. La capa de solicitudes y el flujo de escritorio principal ya funcionan, mientras que el empaquetado, la automatización de versiones y una cobertura más amplia de proveedores siguen evolucionando.
+Oppa Gen es actualmente **software beta**. La capa de solicitudes y el flujo de escritorio principal ya funcionan, mientras que el empaquetado, la automatización de versiones y una cobertura más amplia de proveedores siguen evolucionando.
 
 <div align="center">
 
 Creado para quienes buscan flexibilidad de modelos sin ocuparse de cada formato de solicitud.
 
-[Volver arriba](#open-gen-ui)
+[Volver arriba](#oppa-gen)
 
 </div>

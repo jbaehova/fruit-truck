@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "oppa-gen": {
+      "command": "oppa-gen-mcp",
+      "args": ["--agent-host", "codex"]
+    }
+  }
+}

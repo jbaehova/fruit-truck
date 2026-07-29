@@ -1,0 +1,37 @@
+{
+  "productName": "Oppa Gen E2E",
+  "mainBinaryName": "Oppa Gen E2E",
+  "identifier": "ui.oppagen.desktop.e2e",
+  "app": {
+    "windows": [
+      {
+        "title": "Oppa Gen E2E",
+        "width": 1440,
+        "height": 920,
+        "minWidth": 980,
+        "minHeight": 680,
+        "resizable": true,
+        "maximized": true,
+        "fullscreen": false,
+        "dragDropEnabled": true
+      }
+    ],
+    "security": {
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "$APPCACHE/generated/**",
+          "$HOME/.oppa-gen/assets/**",
+          "$HOME/.oppa-gen/generated/**",
+          "$HOME/.oppa-gen-e2e/assets/**",
+          "$HOME/.oppa-gen-e2e/generated/**"
+        ]
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app"],
+    "createUpdaterArtifacts": false
+  }
+}

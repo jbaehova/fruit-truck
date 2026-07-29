@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "agentKitVersion": "1.0.0",
+  "desktop": {
+    "minimum": "0.3.0",
+    "maximumExclusive": "0.4.0",
+    "bridgeSchemaVersion": 1
+  },
+  "mcpProtocolVersion": "2025-06-18"
+}
