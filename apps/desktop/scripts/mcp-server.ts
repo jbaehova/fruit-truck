@@ -54,14 +54,14 @@ type BridgeSession = {
 type Envelope = { schemaVersion: 1; revision: number; sessions: BridgeSession[] };
 type ToolResult = Record<string, unknown> | Array<unknown> | string | number | boolean | null;
 
-const dataDirectory = process.env.OPEN_GEN_UI_HOME
-  ? resolve(process.env.OPEN_GEN_UI_HOME)
-  : join(homedir(), ".open-gen-ui");
+const dataDirectory = process.env.OPPA_GEN_HOME
+  ? resolve(process.env.OPPA_GEN_HOME)
+  : join(homedir(), ".oppa-gen");
 const sessionsPath = join(dataDirectory, "agent-sessions.json");
 const sessionsLockPath = join(dataDirectory, ".agent-sessions.lock");
 const credentialsPath = join(dataDirectory, "credentials.json");
 const skillsDirectory = join(dataDirectory, "skills");
-const openRouterBase = process.env.OPEN_GEN_UI_OPENROUTER_BASE ?? "https://openrouter.ai/api/v1";
+const openRouterBase = process.env.OPPA_GEN_OPENROUTER_BASE ?? "https://openrouter.ai/api/v1";
 const MAX_AGENT_STORE_BYTES = 10 * 1024 * 1024;
 const MAX_ACTIVITY_ITEMS = 500;
 const configuredAgentHost = (() => {
@@ -98,7 +98,7 @@ const BASE_TOOLS = [
     intent: { type: "string", minLength: 1, maxLength: 20_000 },
     workflowSkills: { type: "array", items: { type: "string", minLength: 1, maxLength: 100 }, maxItems: 12 },
   }, ["intent"]),
-  tool("list_sessions", "List resumable OpenGen UI agent sessions and their current checkpoint.", {}),
+  tool("list_sessions", "List resumable Oppa Gen agent sessions and their current checkpoint.", {}),
   tool("get_session", "Read the complete structured production state for one session.", {
     sessionId: { type: "string" },
   }, ["sessionId"]),
@@ -212,7 +212,7 @@ const CODEX_TOOLS = [
     sessionId: { type: "string" },
     reselect: { type: "boolean" },
   }, ["sessionId"]),
-  tool("register_host_image", "Copy a Codex built-in image-generation result into managed OpenGen UI storage and register complete provenance.", {
+  tool("register_host_image", "Copy a Codex built-in image-generation result into managed Oppa Gen storage and register complete provenance.", {
     sessionId: { type: "string" }, sourcePath: { type: "string" },
     name: { type: "string" }, mimeType: { type: "string" },
     origin: { enum: ["generated", "edited"] }, role: { type: "string" },
@@ -365,16 +365,16 @@ function assertExecutionAllowed(session: BridgeSession, action: string) {
 }
 
 async function openRouter(path: string, method: "GET" | "POST" = "GET", body?: unknown) {
-  if (!existsSync(credentialsPath)) throw new Error("Add an OpenRouter API key in OpenGen UI Settings first.");
+  if (!existsSync(credentialsPath)) throw new Error("Add an OpenRouter API key in Oppa Gen Settings first.");
   const credential = JSON.parse(await readFile(credentialsPath, "utf8")) as { openrouter_api_key?: string };
-  if (!credential.openrouter_api_key) throw new Error("The OpenGen UI credentials file has no API key.");
+  if (!credential.openrouter_api_key) throw new Error("The Oppa Gen credentials file has no API key.");
   const response = await fetch(`${openRouterBase}${path}`, {
     method,
     headers: {
       Authorization: `Bearer ${credential.openrouter_api_key}`,
       "Content-Type": "application/json",
-      "HTTP-Referer": "https://open-gen-ui.local",
-      "X-Title": "OpenGen UI Agent Kit",
+      "HTTP-Referer": "https://oppa-gen.local",
+      "X-Title": "Oppa Gen Agent Kit",
     },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
@@ -577,7 +577,7 @@ function bridgeAsset(session: BridgeSession, input: Record<string, unknown>) {
 }
 
 function configuredLocalAssetRoots() {
-  const explicit = (process.env.OPEN_GEN_UI_ALLOWED_ASSET_DIRS ?? "")
+  const explicit = (process.env.OPPA_GEN_ALLOWED_ASSET_DIRS ?? "")
     .split(delimiter)
     .map((value) => value.trim())
     .filter(Boolean)
@@ -602,7 +602,7 @@ async function validateLocalAssetSource(source: string) {
   ));
   if (!roots.some((root) => isInsideDirectory(canonical, root))) {
     throw new Error(
-      "Local assets must be inside OpenGen UI's assets/generated directories or a directory explicitly allowed with OPEN_GEN_UI_ALLOWED_ASSET_DIRS.",
+      "Local assets must be inside Oppa Gen's assets/generated directories or a directory explicitly allowed with OPPA_GEN_ALLOWED_ASSET_DIRS.",
     );
   }
   const metadata = await stat(canonical);
@@ -624,7 +624,7 @@ async function validateCodexImageSource(source: string, mimeType: string) {
   const allowedRoots = [join(codexDirectory, "generated_images"), join(dataDirectory, "generated")];
   const canonicalRoots = await Promise.all(allowedRoots.map(async (root) => realpath(root).catch(() => resolve(root))));
   if (!canonicalRoots.some((root) => isInsideDirectory(canonical, root))) {
-    throw new Error("Codex image outputs must come from the Codex generated_images directory or OpenGen UI managed generated storage.");
+    throw new Error("Codex image outputs must come from the Codex generated_images directory or Oppa Gen managed generated storage.");
   }
   const metadata = await stat(canonical);
   if (!metadata.isFile()) throw new Error("The Codex image output must be a regular file.");
@@ -675,7 +675,7 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
     throw new Error(`${name} is not agent-accessible. Record an explicit chat decision for supported session actions.`);
   }
   if (name === "await_decision") {
-    throw new Error("Decision input moved to agent chat. Update the OpenGen UI Agent Skill, ask the user in chat, then call resolve_decision with their reply.");
+    throw new Error("Decision input moved to agent chat. Update the Oppa Gen Agent Skill, ask the user in chat, then call resolve_decision with their reply.");
   }
   if (name === "create_session") {
     const intent = requiredString(args, "intent");
@@ -828,7 +828,7 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
         }, {
           id: "openrouter",
           label: "OpenRouter image generation",
-          description: "Choose an OpenRouter image model and use the API key configured in OpenGen UI.",
+          description: "Choose an OpenRouter image model and use the API key configured in Oppa Gen.",
         }],
         createdAt: new Date().toISOString(),
       };
@@ -1338,7 +1338,7 @@ input.on("line", (line) => {
       response(id, {
         protocolVersion: "2025-06-18",
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: "open-gen-ui", version: "1.0.0" },
+        serverInfo: { name: "oppa-gen", version: "1.0.0" },
         instructions: `This server is connected as ${detectedAgentHost()}. Claim a session before work. Queue every user-owned choice, present it in agent chat, and call resolve_decision only after the user explicitly replies. Codex sessions must choose one image backend per session before their first image task.`,
       });
       return;

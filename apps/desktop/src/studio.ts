@@ -98,13 +98,13 @@ export type StudioState = {
   sessions: StudioSession[];
 };
 
-const STORAGE_KEY = "open-gen-ui.studio.v1";
-const LEGACY_ACTIVE_VIDEO_KEY = "open-gen-ui.active-video-job";
-const DB_NAME = "open-gen-ui-assets";
+const STORAGE_KEY = "oppa-gen.studio.v1";
+const LEGACY_ACTIVE_VIDEO_KEY = "oppa-gen.active-video-job";
+const DB_NAME = "oppa-gen-assets";
 const DB_VERSION = 1;
 const BLOB_STORE = "blobs";
 const memoryBlobs = new Map<string, Blob>();
-const LOCAL_MEDIA_MARKER = "open-gen-ui-local:";
+const LOCAL_MEDIA_MARKER = "oppa-gen-local:";
 
 export type NativeManagedAsset = {
   name: string;
@@ -393,8 +393,8 @@ async function materializeBlob(
       const chunk = new Uint8Array(await blob.slice(offset, offset + SHARED_ASSET_CHUNK_BYTES).arrayBuffer());
       await invoke("append_shared_asset_chunk", chunk, {
         headers: {
-          "x-open-gen-upload-id": uploadId,
-          "x-open-gen-origin": input.origin,
+          "x-oppa-gen-upload-id": uploadId,
+          "x-oppa-gen-origin": input.origin,
         },
       });
     }

@@ -118,8 +118,8 @@ function errorMessage(error: unknown) {
   return raw.replace(/^Error:\s*/, "").slice(0, 800);
 }
 
-function OpenGenMark() {
-  return <img src="/open-gen-ui-icon.png" alt="" aria-hidden="true" />;
+function OppaGenMark() {
+  return <img src="/oppa-gen-icon.png" alt="" aria-hidden="true" />;
 }
 
 function draftKey(session: StudioSession) {
@@ -138,8 +138,8 @@ const JOB_STATUS_KEYS: Record<string, MessageKey> = {
   completed: "statusCompleted",
 };
 
-const SESSION_SIDEBAR_OPEN_KEY = "open-gen-ui.session-sidebar.open";
-const SESSION_SIDEBAR_WIDTH_KEY = "open-gen-ui.session-sidebar.width";
+const SESSION_SIDEBAR_OPEN_KEY = "oppa-gen.session-sidebar.open";
+const SESSION_SIDEBAR_WIDTH_KEY = "oppa-gen.session-sidebar.width";
 
 export default function App() {
   const { language, t } = useI18n();
@@ -1460,7 +1460,7 @@ export default function App() {
     <Tooltip.Provider>
     <div className="app-shell">
       <header className="topbar" data-tauri-drag-region>
-        <div className="brand" data-tauri-drag-region><span className="brand-mark"><OpenGenMark /></span><strong>OpenGen UI</strong><button type="button" className={`brand-badge ${session.agent.controlMode}`} onClick={() => {
+        <div className="brand" data-tauri-drag-region><span className="brand-mark"><OppaGenMark /></span><strong>Oppa Gen</strong><button type="button" className={`brand-badge ${session.agent.controlMode}`} onClick={() => {
           setRightPanelTab("agent");
         }}>{session.agent.controlMode === "agent" ? t("agent") : t("humanDriven")}</button></div>
         <ModelSelector mode={mode} models={models} selectedId={selectedId} loading={catalogLoading} disabled={session.agent.controlMode === "agent"} onSelect={selectModel} />

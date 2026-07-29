@@ -22,7 +22,7 @@ test("studio metadata rejects Base64 media and keeps managed paths", () => {
       mimeType: "image/png",
       origin: "generated",
       createdAt: new Date().toISOString(),
-      localPath: "/Users/test/.open-gen-ui/generated/result.png",
+      localPath: "/Users/test/.oppa-gen/generated/result.png",
     });
     const state: StudioState = {
       schemaVersion: 1,

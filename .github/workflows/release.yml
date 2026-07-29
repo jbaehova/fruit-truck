@@ -62,9 +62,9 @@ jobs:
         with:
           projectPath: apps/desktop
           tagName: ${{ github.ref_name }}
-          releaseName: OpenGen UI ${{ github.ref_name }}
+          releaseName: Oppa Gen ${{ github.ref_name }}
           releaseBody: |
-            Download `OpenGen-UI-macOS-universal.dmg` for Apple Silicon or Intel Macs.
+            Download `Oppa-Gen-macOS-universal.dmg` for Apple Silicon or Intel Macs.
 
             Signed in-app updates are supported for users on 0.2.0 or newer. Users upgrading from 0.1.x must install this DMG once; later releases can be installed from inside the app.
 
@@ -73,7 +73,7 @@ jobs:
           prerelease: false
           generateReleaseNotes: true
           args: --target universal-apple-darwin --bundles app,dmg
-          releaseAssetNamePattern: OpenGen-UI-macOS-universal[ext]
+          releaseAssetNamePattern: Oppa-Gen-macOS-universal[ext]
 
       - name: Create and upload checksum
         env:
@@ -82,11 +82,11 @@ jobs:
         run: |
           DMG_PATH=$(find apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/dmg -name '*.dmg' -print -quit)
           test -n "$DMG_PATH"
-          bash apps/desktop/scripts/clean-dmg-volume-icon.sh "$DMG_PATH" OpenGen-UI-macOS-universal.dmg
-          gh release upload "$RELEASE_TAG" OpenGen-UI-macOS-universal.dmg --clobber
-          DMG_HASH=$(shasum -a 256 OpenGen-UI-macOS-universal.dmg | cut -d ' ' -f 1)
-          printf '%s  %s\n' "$DMG_HASH" "OpenGen-UI-macOS-universal.dmg" > OpenGen-UI-macOS-universal.dmg.sha256
-          gh release upload "$RELEASE_TAG" OpenGen-UI-macOS-universal.dmg.sha256 --clobber
+          bash apps/desktop/scripts/clean-dmg-volume-icon.sh "$DMG_PATH" Oppa-Gen-macOS-universal.dmg
+          gh release upload "$RELEASE_TAG" Oppa-Gen-macOS-universal.dmg --clobber
+          DMG_HASH=$(shasum -a 256 Oppa-Gen-macOS-universal.dmg | cut -d ' ' -f 1)
+          printf '%s  %s\n' "$DMG_HASH" "Oppa-Gen-macOS-universal.dmg" > Oppa-Gen-macOS-universal.dmg.sha256
+          gh release upload "$RELEASE_TAG" Oppa-Gen-macOS-universal.dmg.sha256 --clobber
 
       - name: Publish release
         env:

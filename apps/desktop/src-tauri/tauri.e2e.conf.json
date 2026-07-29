@@ -1,11 +1,11 @@
 {
-  "productName": "OpenGen UI E2E",
-  "mainBinaryName": "OpenGen UI E2E",
-  "identifier": "ui.opengen.desktop.e2e",
+  "productName": "Oppa Gen E2E",
+  "mainBinaryName": "Oppa Gen E2E",
+  "identifier": "ui.oppagen.desktop.e2e",
   "app": {
     "windows": [
       {
-        "title": "OpenGen UI E2E",
+        "title": "Oppa Gen E2E",
         "width": 1440,
         "height": 920,
         "minWidth": 980,
@@ -21,10 +21,10 @@
         "enable": true,
         "scope": [
           "$APPCACHE/generated/**",
-          "$HOME/.open-gen-ui/assets/**",
-          "$HOME/.open-gen-ui/generated/**",
-          "$HOME/.open-gen-ui-e2e/assets/**",
-          "$HOME/.open-gen-ui-e2e/generated/**"
+          "$HOME/.oppa-gen/assets/**",
+          "$HOME/.oppa-gen/generated/**",
+          "$HOME/.oppa-gen-e2e/assets/**",
+          "$HOME/.oppa-gen-e2e/generated/**"
         ]
       }
     }

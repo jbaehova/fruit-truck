@@ -1,0 +1,4 @@
+interface:
+  display_name: "Oppa Gen Agent"
+  short_description: "Direct complete image and video production"
+  default_prompt: "Use $oppa-gen-agent to plan and run this creative production through Oppa Gen."

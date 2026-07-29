@@ -65,14 +65,14 @@ export function InputTray({
       invalid={Boolean(error)}
       onDragEnter={(event) => {
         if (!enabled) return;
-        if (Array.from(event.dataTransfer.types).some((type) => type === "application/x-open-gen-asset" || type === "Files")) {
+        if (Array.from(event.dataTransfer.types).some((type) => type === "application/x-oppa-gen-asset" || type === "Files")) {
           event.preventDefault();
           setDragging(true);
         }
       }}
       onDragOver={(event) => {
         if (!enabled) return;
-        if (Array.from(event.dataTransfer.types).some((type) => type === "application/x-open-gen-asset" || type === "Files")) {
+        if (Array.from(event.dataTransfer.types).some((type) => type === "application/x-oppa-gen-asset" || type === "Files")) {
           event.preventDefault();
           event.dataTransfer.dropEffect = "copy";
           setDragging(true);
@@ -84,7 +84,7 @@ export function InputTray({
       onDrop={(event) => {
         event.preventDefault();
         setDragging(false);
-        const assetId = event.dataTransfer.getData("application/x-open-gen-asset");
+        const assetId = event.dataTransfer.getData("application/x-oppa-gen-asset");
         if (assetId) {
           const asset = assetMap.get(assetId);
           if (asset) addAssets([asset]);

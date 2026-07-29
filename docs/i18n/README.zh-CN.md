@@ -1,6 +1,6 @@
 <div align="center">
 
-# OpenGen UI
+# Oppa Gen
 
 ### 一个简洁的图像与视频生成工作区
 
@@ -16,23 +16,23 @@
 
 <br />
 
-<img src="../../assets/readme/open-gen-ui-hero.png" alt="以抽象图像和胶片元素构成的鲜明剪纸风 OpenGen UI 横幅" width="1200" />
+<img src="../../assets/readme/oppa-gen-hero.png" alt="以抽象图像和胶片元素构成的鲜明剪纸风 Oppa Gen 横幅" width="1200" />
 
 <br />
 
-[为什么选择 OpenGen UI？](#为什么选择-open-gen-ui) · [功能](#功能) · [工作原理](#工作原理) · [快速开始](#快速开始) · [安全性](#安全性) · [开发](#开发)
+[为什么选择 Oppa Gen？](#为什么选择-oppa-gen) · [功能](#功能) · [工作原理](#工作原理) · [快速开始](#快速开始) · [安全性](#安全性) · [开发](#开发)
 
 </div>
 
 ---
 
-> **OpenGen UI** 将 OpenRouter 的实时模型元数据转化为专注的桌面工作区。选择模型、构建有效请求、预览 JSON，然后直接生成内容。
+> **Oppa Gen** 将 OpenRouter 的实时模型元数据转化为专注的桌面工作区。选择模型、构建有效请求、预览 JSON，然后直接生成内容。
 
-## 为什么选择 OpenGen UI？
+## 为什么选择 Oppa Gen？
 
-不同生成模型的输入方式往往并不一致：有些支持种子和宽高比，有些需要首帧与尾帧，还有些可以接收多张参考图。OpenGen UI 会在运行时读取这些能力，并根据所选模型自动调整工作区。
+不同生成模型的输入方式往往并不一致：有些支持种子和宽高比，有些需要首帧与尾帧，还有些可以接收多张参考图。Oppa Gen 会在运行时读取这些能力，并根据所选模型自动调整工作区。
 
-| 不使用 OpenGen UI | 使用 OpenGen UI |
+| 不使用 Oppa Gen | 使用 Oppa Gen |
 | --- | --- |
 | 为每个模型反复查阅提供商文档 | 根据实时模型目录自动生成控件 |
 | 猜测哪些字段有效 | 不支持的选项不会进入请求 |
@@ -62,7 +62,7 @@ flowchart LR
     E --> G[视频任务轮询]
 ```
 
-1. OpenGen UI 获取实时图像与视频模型目录。
+1. Oppa Gen 获取实时图像与视频模型目录。
 2. 所选模型的元数据决定显示哪些输入、参考素材和选项。
 3. 提示词与设置会被转换为提供商可接受的请求。
 4. 生成前可以检查经过清理的请求 JSON。
@@ -82,8 +82,8 @@ flowchart LR
 ### 运行桌面应用
 
 ```bash
-git clone https://github.com/jbaehova/open-gen-ui.git
-cd open-gen-ui/apps/desktop
+git clone https://github.com/jbaehova/oppa-gen.git
+cd oppa-gen/apps/desktop
 npm install
 npm run tauri:dev
 ```
@@ -95,7 +95,7 @@ npm run tauri:dev
 在 Tauri 桌面应用中，OpenRouter 密钥存储于：
 
 ```text
-~/.open-gen-ui/credentials.json
+~/.oppa-gen/credentials.json
 ```
 
 - 在 macOS 和 Linux 上，目录权限限制为 `0700`，凭据文件权限限制为 `0600`。
@@ -120,7 +120,7 @@ cd src-tauri && cargo test
 ### 项目结构
 
 ```text
-open-gen-ui/
+oppa-gen/
 ├── apps/desktop/
 │   ├── src/                 # React 工作区与请求构建器
 │   └── src-tauri/           # 凭据存储与 OpenRouter 代理
@@ -131,12 +131,12 @@ open-gen-ui/
 
 ## 项目状态
 
-OpenGen UI 目前是 **Beta 软件**。请求层与核心桌面工作流已经就绪，打包、发布自动化和更广泛的提供商支持仍在持续完善。
+Oppa Gen 目前是 **Beta 软件**。请求层与核心桌面工作流已经就绪，打包、发布自动化和更广泛的提供商支持仍在持续完善。
 
 <div align="center">
 
 为希望灵活切换模型、又不想反复处理请求格式的创作者而打造。
 
-[返回顶部](#open-gen-ui)
+[返回顶部](#oppa-gen)
 
 </div>

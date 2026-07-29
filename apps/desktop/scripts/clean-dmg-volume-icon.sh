@@ -9,7 +9,7 @@ if [[ ! -f "$input_dmg" ]]; then
   exit 1
 fi
 
-work_dir="$(mktemp -d /tmp/opengen-dmg-clean.XXXXXX)"
+work_dir="$(mktemp -d /tmp/oppa-gen-dmg-clean.XXXXXX)"
 mount_dir="$work_dir/mount"
 readwrite_dmg="$work_dir/readwrite.dmg"
 processed_dmg="$work_dir/processed.dmg"

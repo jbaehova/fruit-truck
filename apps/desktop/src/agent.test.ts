@@ -332,7 +332,7 @@ test("custom skills are text-only and gated until video production", () => {
     plan: state.plan.map((step) => step.id === "production" ? { ...step, status: "in_progress" as const } : step),
   };
   const draft = createCustomSkillDraft(progressed, "Perfume Film");
-  assert.match(draft.markdown, /open-gen-ui-custom/);
+  assert.match(draft.markdown, /oppa-gen-custom/);
   assert.doesNotMatch(draft.markdown, /assetId|blob:|file:\/\//);
 });
 

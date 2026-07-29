@@ -1,6 +1,6 @@
 <div align="center">
 
-# OpenGen UI
+# Oppa Gen
 
 ### 이미지와 영상 생성을 위한 하나의 깔끔한 작업 공간
 
@@ -16,23 +16,23 @@ OpenRouter 모델을 고르면 지원되는 옵션만 보여 주고, 생성 전�
 
 <br />
 
-<img src="../../assets/readme/open-gen-ui-hero.png" alt="이미지와 필름 모티프를 추상적으로 표현한 선명한 컷페이퍼 OpenGen UI 배너" width="1200" />
+<img src="../../assets/readme/oppa-gen-hero.png" alt="이미지와 필름 모티프를 추상적으로 표현한 선명한 컷페이퍼 Oppa Gen 배너" width="1200" />
 
 <br />
 
-[왜 OpenGen UI인가요?](#왜-open-gen-ui인가요) · [주요 기능](#주요-기능) · [작동 방식](#작동-방식) · [빠른 시작](#빠른-시작) · [보안](#보안) · [개발](#개발)
+[왜 Oppa Gen인가요?](#왜-oppa-gen인가요) · [주요 기능](#주요-기능) · [작동 방식](#작동-방식) · [빠른 시작](#빠른-시작) · [보안](#보안) · [개발](#개발)
 
 </div>
 
 ---
 
-> **OpenGen UI**는 OpenRouter의 실시간 모델 메타데이터를 집중도 높은 데스크톱 작업 공간으로 바꿉니다. 모델을 선택하고, 올바른 요청을 구성하고, JSON을 미리 확인한 뒤 바로 생성하세요.
+> **Oppa Gen**는 OpenRouter의 실시간 모델 메타데이터를 집중도 높은 데스크톱 작업 공간으로 바꿉니다. 모델을 선택하고, 올바른 요청을 구성하고, JSON을 미리 확인한 뒤 바로 생성하세요.
 
-## 왜 OpenGen UI인가요?
+## 왜 Oppa Gen인가요?
 
-생성 모델마다 입력 형식은 제각각입니다. 어떤 모델은 시드와 화면비를 지원하고, 다른 모델은 시작·종료 프레임을 요구하며, 또 다른 모델은 여러 참조 이미지를 받습니다. OpenGen UI는 실행 중에 이런 기능 정보를 읽어 선택한 모델에 맞게 작업 공간을 자동으로 조정합니다.
+생성 모델마다 입력 형식은 제각각입니다. 어떤 모델은 시드와 화면비를 지원하고, 다른 모델은 시작·종료 프레임을 요구하며, 또 다른 모델은 여러 참조 이미지를 받습니다. Oppa Gen은 실행 중에 이런 기능 정보를 읽어 선택한 모델에 맞게 작업 공간을 자동으로 조정합니다.
 
-| OpenGen UI 없이 | OpenGen UI와 함께 |
+| Oppa Gen 없이 | Oppa Gen과 함께 |
 | --- | --- |
 | 모델마다 제공자 문서를 다시 확인 | 실시간 모델 카탈로그에서 옵션 자동 구성 |
 | 어떤 필드가 유효한지 추측 | 미지원 옵션은 요청에서 자동 제외 |
@@ -62,7 +62,7 @@ flowchart LR
     E --> G[영상 작업 폴링]
 ```
 
-1. OpenGen UI가 실시간 이미지·영상 모델 카탈로그를 가져옵니다.
+1. Oppa Gen이 실시간 이미지·영상 모델 카탈로그를 가져옵니다.
 2. 선택한 모델의 메타데이터에 따라 입력, 참조 파일, 옵션이 결정됩니다.
 3. 프롬프트와 설정을 제공자에 유효한 요청으로 변환합니다.
 4. 생성 전에 정리된 요청 JSON을 확인할 수 있습니다.
@@ -82,8 +82,8 @@ flowchart LR
 ### 데스크톱 앱 실행
 
 ```bash
-git clone https://github.com/jbaehova/open-gen-ui.git
-cd open-gen-ui/apps/desktop
+git clone https://github.com/jbaehova/oppa-gen.git
+cd oppa-gen/apps/desktop
 npm ci
 npm run tauri:dev
 ```
@@ -97,7 +97,7 @@ npm run tauri:dev
 Tauri 데스크톱 앱에서 OpenRouter 키는 다음 위치에 저장됩니다.
 
 ```text
-~/.open-gen-ui/credentials.json
+~/.oppa-gen/credentials.json
 ```
 
 - macOS와 Linux에서는 디렉터리 권한을 `0700`, 자격 증명 파일 권한을 `0600`으로 제한합니다.
@@ -122,7 +122,7 @@ cd src-tauri && cargo test
 ### 프로젝트 구조
 
 ```text
-open-gen-ui/
+oppa-gen/
 ├── apps/desktop/
 │   ├── src/                 # React 작업 공간 및 요청 빌더
 │   └── src-tauri/           # 자격 증명 저장소 및 OpenRouter 프록시
@@ -133,12 +133,12 @@ open-gen-ui/
 
 ## 프로젝트 상태
 
-OpenGen UI는 현재 **베타 소프트웨어**입니다. 요청 계층과 핵심 데스크톱 흐름은 구현되어 있으며, 패키징·릴리스 자동화·더 넓은 제공자 지원은 계속 발전하고 있습니다.
+Oppa Gen은 현재 **베타 소프트웨어**입니다. 요청 계층과 핵심 데스크톱 흐름은 구현되어 있으며, 패키징·릴리스 자동화·더 넓은 제공자 지원은 계속 발전하고 있습니다.
 
 <div align="center">
 
 요청 형식의 번거로움 없이 다양한 모델을 쓰고 싶은 크리에이터를 위해 만들었습니다.
 
-[맨 위로](#open-gen-ui)
+[맨 위로](#oppa-gen)
 
 </div>

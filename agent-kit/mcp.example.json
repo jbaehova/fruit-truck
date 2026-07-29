@@ -1,7 +1,7 @@
 {
   "mcpServers": {
-    "open-gen-ui": {
-      "command": "open-gen-ui-mcp",
+    "oppa-gen": {
+      "command": "oppa-gen-mcp",
       "args": ["--agent-host", "codex"]
     }
   }

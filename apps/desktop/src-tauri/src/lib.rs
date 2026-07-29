@@ -16,7 +16,7 @@ const MAX_ERROR_BYTES: usize = 2_000;
 const MAX_IMAGE_BYTES: u64 = 30 * 1024 * 1024;
 const MAX_VIDEO_BYTES: u64 = 700 * 1024 * 1024;
 const MAX_OPENROUTER_JSON_BYTES: u64 = 48 * 1024 * 1024;
-const LOCAL_MEDIA_MARKER: &str = "open-gen-ui-local:";
+const LOCAL_MEDIA_MARKER: &str = "oppa-gen-local:";
 static MEDIA_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Serialize)]
@@ -93,10 +93,10 @@ struct CustomSkillSummary {
 }
 
 fn credentials_directory(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-  if let Some(path) = std::env::var_os("OPEN_GEN_UI_HOME") {
+  if let Some(path) = std::env::var_os("OPPA_GEN_HOME") {
     let path = PathBuf::from(path);
     if !path.is_absolute() {
-      return Err("OPEN_GEN_UI_HOME must be an absolute path.".into());
+      return Err("OPPA_GEN_HOME must be an absolute path.".into());
     }
     return Ok(path);
   }
@@ -104,7 +104,7 @@ fn credentials_directory(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     .path()
     .home_dir()
     .map_err(|error| error.to_string())?
-    .join(".open-gen-ui"))
+    .join(".oppa-gen"))
 }
 
 fn credentials_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -173,7 +173,7 @@ fn validate_media_path_in_roots(path: &Path, roots: &[PathBuf]) -> Result<PathBu
     root.canonicalize().is_ok_and(|canonical_root| canonical.starts_with(canonical_root))
   });
   if !allowed {
-    return Err("The media path is outside OpenGen UI managed storage.".into());
+    return Err("The media path is outside Oppa Gen managed storage.".into());
   }
   Ok(canonical)
 }
@@ -375,12 +375,12 @@ fn append_shared_asset_chunk(
 ) -> Result<(), String> {
   let upload_id = request
     .headers()
-    .get("x-open-gen-upload-id")
+    .get("x-oppa-gen-upload-id")
     .and_then(|value| value.to_str().ok())
     .ok_or("Shared upload ID header is required.")?;
   let origin = request
     .headers()
-    .get("x-open-gen-origin")
+    .get("x-oppa-gen-origin")
     .and_then(|value| value.to_str().ok());
   let bytes = match request.body() {
     tauri::ipc::InvokeBody::Raw(bytes) => bytes,
@@ -500,10 +500,10 @@ fn read_api_key(app: &tauri::AppHandle) -> Result<Option<String>, String> {
   }
   let raw = std::fs::read_to_string(&path).map_err(|error| error.to_string())?;
   let credentials: Credentials = serde_json::from_str(&raw)
-    .map_err(|_| "The OpenGen UI credentials file is not valid JSON.".to_string())?;
+    .map_err(|_| "The Oppa Gen credentials file is not valid JSON.".to_string())?;
   let key = credentials.openrouter_api_key.trim().to_string();
   if credentials.schema_version != 1 || key.is_empty() {
-    return Err("The OpenGen UI credentials file is invalid.".into());
+    return Err("The Oppa Gen credentials file is invalid.".into());
   }
   Ok(Some(key))
 }
@@ -1156,8 +1156,8 @@ async fn openrouter_request(
   }
   .bearer_auth(api_key)
   .header("Content-Type", "application/json")
-  .header("HTTP-Referer", "https://open-gen-ui.local")
-  .header("X-Title", "OpenGen UI");
+  .header("HTTP-Referer", "https://oppa-gen.local")
+  .header("X-Title", "Oppa Gen");
   let response = if let Some(mut payload) = body {
     hydrate_local_media_references(&app, &mut payload)?;
     request.json(&payload).send().await
@@ -1337,7 +1337,7 @@ fn write_assembly_source(
     root.canonicalize().is_ok_and(|safe_root| canonical.starts_with(safe_root))
   });
   if !allowed {
-    return Err("Only videos in OpenGen UI managed storage may be assembled.".into());
+    return Err("Only videos in Oppa Gen managed storage may be assembled.".into());
   }
   let size = std::fs::metadata(&canonical).map_err(|error| error.to_string())?.len() as usize;
   *total_bytes = total_bytes.saturating_add(size);
@@ -1508,7 +1508,7 @@ pub fn run() {
       rollback_custom_skill
     ])
     .run(tauri::generate_context!())
-    .expect("error while running OpenGen UI");
+    .expect("error while running Oppa Gen");
 }
 
 #[cfg(test)]
@@ -1563,13 +1563,13 @@ mod tests {
 
   #[test]
   fn command_probe_never_panics() {
-    assert!(!command_available("open-gen-ui-command-that-does-not-exist"));
+    assert!(!command_available("oppa-gen-command-that-does-not-exist"));
   }
 
   #[test]
   fn custom_skill_approval_writes_and_versions_skill_markdown() {
     let root = std::env::temp_dir().join(format!(
-      "open-gen-ui-skill-test-{}-{}",
+      "oppa-gen-skill-test-{}-{}",
       std::process::id(),
       std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
     ));
@@ -1600,7 +1600,7 @@ mod tests {
   #[test]
   fn assembly_sources_accept_only_declared_generated_roots() {
     let root = std::env::temp_dir().join(format!(
-      "open-gen-ui-assembly-test-{}-{}",
+      "oppa-gen-assembly-test-{}-{}",
       std::process::id(),
       std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
     ));
@@ -1631,7 +1631,7 @@ mod tests {
   #[test]
   fn legacy_asset_bytes_are_materialized_outside_session_json() {
     let root = std::env::temp_dir().join(format!(
-      "open-gen-ui-shared-asset-test-{}-{}",
+      "oppa-gen-shared-asset-test-{}-{}",
       std::process::id(),
       std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
     ));
@@ -1653,7 +1653,7 @@ mod tests {
   #[test]
   fn imported_media_is_copied_and_only_managed_roots_are_readable() {
     let root = std::env::temp_dir().join(format!(
-      "open-gen-ui-managed-media-test-{}-{}",
+      "oppa-gen-managed-media-test-{}-{}",
       std::process::id(),
       std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
     ));

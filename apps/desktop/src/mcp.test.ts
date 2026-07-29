@@ -41,7 +41,7 @@ function spawnMcp(dataDirectory: string, host: AgentHost, codexHome?: string) {
       cwd: process.cwd(),
       env: {
         ...process.env,
-        OPEN_GEN_UI_HOME: dataDirectory,
+        OPPA_GEN_HOME: dataDirectory,
         ...(codexHome ? { CODEX_HOME: codexHome } : {}),
       },
       stdio: ["pipe", "pipe", "pipe"],
@@ -80,7 +80,7 @@ function stopMcp(child: ChildProcessWithoutNullStreams) {
 }
 
 test("MCP resolves user choices in agent chat and resumes them durably", async (context) => {
-  const dataDirectory = mkdtempSync(join(tmpdir(), "open-gen-ui-mcp-"));
+  const dataDirectory = mkdtempSync(join(tmpdir(), "oppa-gen-mcp-"));
   const generatedDirectory = join(dataDirectory, "generated");
   const generatedImage = join(generatedDirectory, "registered.png");
   mkdirSync(generatedDirectory, { recursive: true, mode: 0o700 });
@@ -93,7 +93,7 @@ test("MCP resolves user choices in agent chat and resumes them durably", async (
   });
 
   const initialized = await server.request("initialize", {});
-  assert.equal((initialized.result as { serverInfo: { name: string } }).serverInfo.name, "open-gen-ui");
+  assert.equal((initialized.result as { serverInfo: { name: string } }).serverInfo.name, "oppa-gen");
   const listed = await server.request("tools/list", {});
   const toolNames = (listed.result as { tools: Array<{ name: string }> }).tools.map((item) => item.name);
   assert.ok(toolNames.includes("claim_session"));
@@ -234,7 +234,7 @@ test("MCP resolves user choices in agent chat and resumes them durably", async (
   assert.equal(asset?.localPath, realpathSync(generatedImage));
   assert.equal(asset?.externalUrl, undefined);
 
-  const outside = join(tmpdir(), `open-gen-ui-outside-${process.pid}-${Date.now()}.png`);
+  const outside = join(tmpdir(), `oppa-gen-outside-${process.pid}-${Date.now()}.png`);
   writeFileSync(outside, Buffer.from("\x89PNG\r\n\x1a\noutside", "binary"));
   const outsideRejected = await server.call("register_asset", {
     sessionId: createdSession.id,
@@ -315,8 +315,8 @@ test("MCP resolves user choices in agent chat and resumes them durably", async (
 });
 
 test("Codex selects an image backend per session and registers built-in outputs", async (context) => {
-  const dataDirectory = mkdtempSync(join(tmpdir(), "open-gen-ui-codex-mcp-"));
-  const codexHome = mkdtempSync(join(tmpdir(), "open-gen-ui-codex-home-"));
+  const dataDirectory = mkdtempSync(join(tmpdir(), "oppa-gen-codex-mcp-"));
+  const codexHome = mkdtempSync(join(tmpdir(), "oppa-gen-codex-home-"));
   const codexGeneratedDirectory = join(codexHome, "generated_images");
   const codexImage = join(codexGeneratedDirectory, "codex-result.png");
   mkdirSync(codexGeneratedDirectory, { recursive: true, mode: 0o700 });

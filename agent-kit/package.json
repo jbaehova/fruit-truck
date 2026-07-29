@@ -1,11 +1,11 @@
 {
-  "name": "@open-gen-ui/agent-kit",
+  "name": "@oppa-gen/agent-kit",
   "version": "1.0.0",
-  "description": "Standalone MCP server and Agent Skills for OpenGen UI",
+  "description": "Standalone MCP server and Agent Skills for Oppa Gen",
   "type": "module",
   "bin": {
-    "open-gen-ui-mcp": "dist/scripts/mcp-server.js",
-    "open-gen-ui-agent-kit": "bin/install.mjs"
+    "oppa-gen-mcp": "dist/scripts/mcp-server.js",
+    "oppa-gen-agent-kit": "bin/install.mjs"
   },
   "files": [
     "bin",

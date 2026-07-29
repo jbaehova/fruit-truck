@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 import type { StudioState } from "../src/studio";
 
-const STORAGE_KEY = "open-gen-ui.studio.v1";
+const STORAGE_KEY = "oppa-gen.studio.v1";
 
 function studioFixture() {
   const createdAt = new Date().toISOString();
@@ -33,12 +33,12 @@ function studioFixture() {
       drafts: { image: emptyDraft, videoGenerate: emptyDraft, videoEdit: emptyDraft },
       assets: [{
         id: "asset-final",
-        name: "open-gen-ui-icon.png",
+        name: "oppa-gen-icon.png",
         kind: "image",
         mimeType: "image/png",
         origin: "generated",
         createdAt,
-        externalUrl: "http://127.0.0.1:4179/open-gen-ui-icon.png",
+        externalUrl: "http://127.0.0.1:4179/oppa-gen-icon.png",
       }, {
         id: "asset-video",
         name: "approved-shot.mp4",
@@ -143,7 +143,7 @@ function studioFixture() {
           approval: "approved",
         }],
         appliedSkills: [
-          { name: "open-gen-ui-agent", version: "1.0.0", source: "core" },
+          { name: "oppa-gen-agent", version: "1.0.0", source: "core" },
           { name: "Installed Skill", version: "2", source: "custom" },
         ],
         imageGeneration: { status: "selected", backend: "openrouter", selectedBy: "policy", selectedAt: createdAt },
@@ -191,8 +191,8 @@ function studioFixture() {
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(([key, value]) => {
     if (!localStorage.getItem(key)) localStorage.setItem(key, JSON.stringify(value));
-    localStorage.setItem("open-gen-ui.language", "en");
-    localStorage.setItem("open-gen-ui.dev-key", "test-key-for-e2e");
+    localStorage.setItem("oppa-gen.language", "en");
+    localStorage.setItem("oppa-gen.dev-key", "test-key-for-e2e");
   }, [STORAGE_KEY, studioFixture()] as const);
   await page.goto("/");
 });
@@ -275,7 +275,7 @@ test("approved video opens dedicated Assembly and provenance stays folded in Ass
   await expect(page.getByRole("alert")).toContainText("Tauri desktop runtime");
   await page.getByRole("button", { name: "Close final video editor" }).click();
 
-  await page.getByRole("button", { name: "open-gen-ui-icon.png" }).click();
+  await page.getByRole("button", { name: "oppa-gen-icon.png" }).click();
   const provenance = page.locator("details.asset-provenance");
   await expect(provenance).not.toHaveAttribute("open", "");
   await provenance.locator("summary").click();
@@ -297,7 +297,7 @@ test("Settings keeps Agent Skill import and history read-only for session activa
           return [{
             name: "Installed Skill",
             version: 2,
-            path: "/tmp/open-gen-ui-e2e/installed-skill/SKILL.md",
+            path: "/tmp/oppa-gen-e2e/installed-skill/SKILL.md",
             versions: [2, 1],
           }];
         }

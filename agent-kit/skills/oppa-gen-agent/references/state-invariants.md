@@ -29,7 +29,7 @@
 - CAS conflict: reread, merge, and retry without overwriting newer state.
 - Provider error: record it and retry only with changed conditions or explicit rationale.
 - Codex imagegen failure: ask whether to reselect OpenRouter; never switch silently.
-- Missing asset: ask the user in chat to import it through OpenGen UI.
+- Missing asset: ask the user in chat to import it through Oppa Gen.
 - Incompatible model: queue a new model choice and ask in chat.
 - Rejected candidate: preserve it, apply feedback, and create a derivative.
 - Agent interrupted: re-present the durable pending decision on resume.

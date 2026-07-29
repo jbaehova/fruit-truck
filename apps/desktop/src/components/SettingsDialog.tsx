@@ -111,7 +111,7 @@ export function SettingsDialog({
                 <ShieldCheck />
                 <span>
                   <strong>{t("localPlaintextStorage")}</strong>
-                  <small>{status?.path ?? "~/.open-gen-ui/credentials.json"}<br />{t("storagePermissions")}</small>
+                  <small>{status?.path ?? "~/.oppa-gen/credentials.json"}<br />{t("storagePermissions")}</small>
                 </span>
               </div>
               <Field.Root className="settings-key-field">
