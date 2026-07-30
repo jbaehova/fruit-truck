@@ -244,7 +244,7 @@ export function EditMediaPanel({
   const supportsMask = kind === "image" && Boolean(asset) && onMaskStrokesChange && onMaskInstructionsChange;
 
   const acceptDrop = (event: ReactDragEvent) =>
-    hasType(event, "application/x-oppa-gen-asset") || hasType(event, "Files");
+    hasType(event, "application/x-fruit-truck-asset") || hasType(event, "Files");
 
   return (
     <section
@@ -265,7 +265,7 @@ export function EditMediaPanel({
       onDrop={(event) => {
         event.preventDefault();
         setDragging(false);
-        const assetId = event.dataTransfer.getData("application/x-oppa-gen-asset");
+        const assetId = event.dataTransfer.getData("application/x-fruit-truck-asset");
         if (assetId) onDropAsset(assetId);
         else if (event.dataTransfer.files.length) void onImport(event.dataTransfer.files);
       }}

@@ -98,13 +98,13 @@ export type StudioState = {
   sessions: StudioSession[];
 };
 
-const STORAGE_KEY = "oppa-gen.studio.v1";
-const LEGACY_ACTIVE_VIDEO_KEY = "oppa-gen.active-video-job";
-const DB_NAME = "oppa-gen-assets";
+const STORAGE_KEY = "fruit-truck.studio.v1";
+const LEGACY_ACTIVE_VIDEO_KEY = "fruit-truck.active-video-job";
+const DB_NAME = "fruit-truck-assets";
 const DB_VERSION = 1;
 const BLOB_STORE = "blobs";
 const memoryBlobs = new Map<string, Blob>();
-const LOCAL_MEDIA_MARKER = "oppa-gen-local:";
+const LOCAL_MEDIA_MARKER = "fruit-truck-local:";
 
 export type NativeManagedAsset = {
   name: string;
@@ -393,8 +393,8 @@ async function materializeBlob(
       const chunk = new Uint8Array(await blob.slice(offset, offset + SHARED_ASSET_CHUNK_BYTES).arrayBuffer());
       await invoke("append_shared_asset_chunk", chunk, {
         headers: {
-          "x-oppa-gen-upload-id": uploadId,
-          "x-oppa-gen-origin": input.origin,
+          "x-fruit-truck-upload-id": uploadId,
+          "x-fruit-truck-origin": input.origin,
         },
       });
     }

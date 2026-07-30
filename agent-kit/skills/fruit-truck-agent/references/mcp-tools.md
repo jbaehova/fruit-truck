@@ -15,7 +15,7 @@ There is no `await_decision`. Ask in the current chat, end the turn, and resolve
 ## Image backend
 
 - `request_image_backend_selection(sessionId, reselect?)`: Codex-only, session-scoped choice between `codex_builtin` and `openrouter`.
-- `register_host_image(...)`: Codex-only import for a built-in imagegen result. The session must have selected `codex_builtin`; the source must be in Codex generated-images or Oppa Gen managed storage.
+- `register_host_image(...)`: Codex-only import for a built-in imagegen result. The session must have selected `codex_builtin`; the source must be in Codex generated-images or Fruit Truck managed storage.
 - Non-Codex hosts are fixed to OpenRouter and do not receive these tools.
 
 ## Models and generation

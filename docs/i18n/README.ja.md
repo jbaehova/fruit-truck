@@ -1,6 +1,6 @@
 <div align="center">
 
-# Oppa Gen
+# Fruit Truck
 
 ### 画像・動画生成のための、ひとつの洗練されたワークスペース
 
@@ -16,23 +16,23 @@ OpenRouter のモデルを選ぶと、対応する項目だけを表示し、生
 
 <br />
 
-<img src="../../assets/readme/oppa-gen-hero.png" alt="画像とフィルムのモチーフを抽象的に描いた鮮やかな切り絵風 Oppa Gen バナー" width="1200" />
+<img src="../../assets/readme/fruit-truck-hero.png" alt="画像とフィルムのモチーフを抽象的に描いた鮮やかな切り絵風 Fruit Truck バナー" width="1200" />
 
 <br />
 
-[Oppa Gen を選ぶ理由](#oppa-gen-を選ぶ理由) · [機能](#機能) · [仕組み](#仕組み) · [クイックスタート](#クイックスタート) · [セキュリティ](#セキュリティ) · [開発](#開発)
+[Fruit Truck を選ぶ理由](#fruit-truck-を選ぶ理由) · [機能](#機能) · [仕組み](#仕組み) · [クイックスタート](#クイックスタート) · [セキュリティ](#セキュリティ) · [開発](#開発)
 
 </div>
 
 ---
 
-> **Oppa Gen** は、OpenRouter のライブモデルメタデータを集中しやすいデスクトップワークスペースへ変換します。モデルを選び、有効なリクエストを組み立て、JSON を確認してから生成できます。
+> **Fruit Truck** は、OpenRouter のライブモデルメタデータを集中しやすいデスクトップワークスペースへ変換します。モデルを選び、有効なリクエストを組み立て、JSON を確認してから生成できます。
 
-## Oppa Gen を選ぶ理由
+## Fruit Truck を選ぶ理由
 
-生成モデルの入力仕様は統一されていません。シードやアスペクト比に対応するモデルもあれば、開始・終了フレームを必要とするモデル、複数の参照画像を受け取るモデルもあります。Oppa Gen は実行時に各モデルの機能を読み取り、選択したモデルに合わせてワークスペースを調整します。
+生成モデルの入力仕様は統一されていません。シードやアスペクト比に対応するモデルもあれば、開始・終了フレームを必要とするモデル、複数の参照画像を受け取るモデルもあります。Fruit Truck は実行時に各モデルの機能を読み取り、選択したモデルに合わせてワークスペースを調整します。
 
-| Oppa Gen なし | Oppa Gen あり |
+| Fruit Truck なし | Fruit Truck あり |
 | --- | --- |
 | モデルごとにプロバイダーのドキュメントを確認 | ライブモデルカタログから項目を自動構成 |
 | 有効なフィールドを推測 | 非対応のオプションはリクエストから除外 |
@@ -62,7 +62,7 @@ flowchart LR
     E --> G[動画ジョブのポーリング]
 ```
 
-1. Oppa Gen が画像・動画モデルのライブカタログを取得します。
+1. Fruit Truck が画像・動画モデルのライブカタログを取得します。
 2. 選択したモデルのメタデータに応じて、入力・参照素材・オプションを決定します。
 3. プロンプトと設定をプロバイダーで有効なリクエストに変換します。
 4. 生成前に整理されたリクエスト JSON を確認できます。
@@ -82,8 +82,8 @@ flowchart LR
 ### デスクトップアプリを実行
 
 ```bash
-git clone https://github.com/jbaehova/oppa-gen.git
-cd oppa-gen/apps/desktop
+git clone https://github.com/jbaehova/fruit-truck.git
+cd fruit-truck/apps/desktop
 npm install
 npm run tauri:dev
 ```
@@ -95,7 +95,7 @@ npm run tauri:dev
 Tauri デスクトップアプリでは、OpenRouter キーを次の場所に保存します。
 
 ```text
-~/.oppa-gen/credentials.json
+~/.fruit-truck/credentials.json
 ```
 
 - macOS と Linux では、ディレクトリを `0700`、認証情報ファイルを `0600` に制限します。
@@ -120,7 +120,7 @@ cd src-tauri && cargo test
 ### プロジェクト構成
 
 ```text
-oppa-gen/
+fruit-truck/
 ├── apps/desktop/
 │   ├── src/                 # React ワークスペースとリクエストビルダー
 │   └── src-tauri/           # 認証情報ストレージと OpenRouter プロキシ
@@ -131,12 +131,12 @@ oppa-gen/
 
 ## プロジェクトの状態
 
-Oppa Gen は現在 **ベータ版**です。リクエスト層と主要なデスクトップワークフローは実装済みで、パッケージング、リリース自動化、より広いプロバイダー対応は引き続き改善しています。
+Fruit Truck は現在 **ベータ版**です。リクエスト層と主要なデスクトップワークフローは実装済みで、パッケージング、リリース自動化、より広いプロバイダー対応は引き続き改善しています。
 
 <div align="center">
 
 リクエスト形式の煩雑さを減らし、モデルを自由に選びたいクリエイターのために。
 
-[トップへ戻る](#oppa-gen)
+[トップへ戻る](#fruit-truck)
 
 </div>

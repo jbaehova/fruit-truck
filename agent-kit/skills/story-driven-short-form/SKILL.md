@@ -1,11 +1,11 @@
 ---
 name: story-driven-short-form
-description: Add story-driven short-form video expertise to an Oppa Gen Agent production, including beats, continuity sheets, keyframes, short shot generation, and final crop/merge. Use with oppa-gen-agent for reels, shorts, social films, micro-narratives, or any multi-shot video whose story must land in a brief total duration.
+description: Add story-driven short-form video expertise to an Fruit Truck Agent production, including beats, continuity sheets, keyframes, short shot generation, and final crop/merge. Use with fruit-truck-agent for reels, shorts, social films, micro-narratives, or any multi-shot video whose story must land in a brief total duration.
 ---
 
 # Story-driven Short-form
 
-Compose this Workflow Skill with `oppa-gen-agent`; follow the Core Skill for state, model choice, approvals, safety, lineage, and execution.
+Compose this Workflow Skill with `fruit-truck-agent`; follow the Core Skill for state, model choice, approvals, safety, lineage, and execution.
 
 ## Plan the story
 

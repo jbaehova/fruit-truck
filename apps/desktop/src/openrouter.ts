@@ -117,23 +117,23 @@ async function invokeTauri<T>(command: string, args?: Record<string, unknown>): 
 
 export async function getCredentialStatus(): Promise<CredentialStatus> {
   if (isTauriRuntime()) return invokeTauri<CredentialStatus>("credential_status");
-  const key = window.localStorage.getItem("oppa-gen.dev-key");
+  const key = window.localStorage.getItem("fruit-truck.dev-key");
   return {
     configured: Boolean(key),
     maskedKey: key ? `${key.slice(0, 7)}…${key.slice(-4)}` : null,
-    path: "~/.oppa-gen/credentials.json",
+    path: "~/.fruit-truck/credentials.json",
   };
 }
 
 export async function saveApiKey(apiKey: string): Promise<CredentialStatus> {
   if (isTauriRuntime()) return invokeTauri<CredentialStatus>("save_api_key", { apiKey });
-  window.localStorage.setItem("oppa-gen.dev-key", apiKey.trim());
+  window.localStorage.setItem("fruit-truck.dev-key", apiKey.trim());
   return getCredentialStatus();
 }
 
 export async function removeApiKey(): Promise<CredentialStatus> {
   if (isTauriRuntime()) return invokeTauri<CredentialStatus>("remove_api_key");
-  window.localStorage.removeItem("oppa-gen.dev-key");
+  window.localStorage.removeItem("fruit-truck.dev-key");
   return getCredentialStatus();
 }
 
@@ -141,7 +141,7 @@ async function request<T>(method: "GET" | "POST", path: string, body?: unknown):
   if (isTauriRuntime()) {
     return invokeTauri<T>("openrouter_request", { method, path, body: body ?? null });
   }
-  const key = window.localStorage.getItem("oppa-gen.dev-key");
+  const key = window.localStorage.getItem("fruit-truck.dev-key");
   const response = await fetch(`https://openrouter.ai/api/v1${path}`, {
     method,
     headers: {
@@ -359,7 +359,7 @@ export function productSystemInstruction(input: Omit<PromptEnhancementInput, "pr
       ? "Treat the numbered video reference as the source footage to transform."
       : "";
   return [
-    `The active Oppa Gen task is ${task}.`,
+    `The active Fruit Truck task is ${task}.`,
     "Numbered references are immutable input identities.",
     "Do not invent inputs or options outside the selected model's declared capabilities.",
     editRule,
@@ -368,7 +368,7 @@ export function productSystemInstruction(input: Omit<PromptEnhancementInput, "pr
 
 export function promptEnhancerInstruction(): string {
   return [
-    "You are Oppa Gen's prompt enhancer.",
+    "You are Fruit Truck's prompt enhancer.",
     "Rewrite the user's request into one production-ready media prompt.",
     "Infer the best structure for this request instead of forcing a fixed schema.",
     "Preserve intent, names, constraints, ambiguity that should remain creative, and every #number reference.",

@@ -151,7 +151,7 @@ test("default options come directly from capability values", () => {
 test("request previews never expose Base64 media", () => {
   const preview = prettyRequest({
     input: `data:image/png;base64,${"A".repeat(500)}`,
-    managed: "oppa-gen-local:/Users/test/.oppa-gen/assets/reference.png",
+    managed: "fruit-truck-local:/Users/test/.fruit-truck/assets/reference.png",
   });
   assert.doesNotMatch(preview, /;base64,/i);
   assert.doesNotMatch(preview, /A{20}/);

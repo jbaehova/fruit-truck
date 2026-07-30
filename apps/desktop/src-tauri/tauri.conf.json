@@ -1,9 +1,9 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "Oppa Gen",
-  "mainBinaryName": "Oppa Gen",
-  "version": "0.3.0",
-  "identifier": "ui.oppagen.desktop",
+  "productName": "Fruit Truck",
+  "mainBinaryName": "Fruit Truck",
+  "version": "0.4.0",
+  "identifier": "ui.fruittruck.desktop",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
@@ -13,7 +13,7 @@
   "app": {
     "windows": [
       {
-        "title": "Oppa Gen",
+        "title": "Fruit Truck",
         "width": 1440,
         "height": 920,
         "minWidth": 980,
@@ -30,8 +30,8 @@
         "enable": true,
         "scope": [
           "$APPCACHE/generated/**",
-          "$HOME/.oppa-gen/assets/**",
-          "$HOME/.oppa-gen/generated/**"
+          "$HOME/.fruit-truck/assets/**",
+          "$HOME/.fruit-truck/generated/**"
         ]
       }
     }
@@ -42,7 +42,7 @@
     "createUpdaterArtifacts": true,
     "icon": ["icons/icon.icns"],
     "macOS": {
-      "bundleName": "Oppa Gen",
+      "bundleName": "Fruit Truck",
       "signingIdentity": "-"
     }
   },
@@ -50,7 +50,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEIzRUY3OTU5M0U3OEZFMgpSV1RpaitlVGxmYytDd1Z2d0oybVNRT1lWa3FkUkt1VnZCNmtzdWt2UDdpbDU1S0lBMlhMcFp5cgo=",
       "endpoints": [
-        "https://github.com/jbaehova/oppa-gen/releases/latest/download/latest.json"
+        "https://github.com/jbaehova/fruit-truck/releases/latest/download/latest.json"
       ]
     }
   }

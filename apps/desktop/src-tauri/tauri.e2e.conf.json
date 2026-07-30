@@ -1,11 +1,11 @@
 {
-  "productName": "Oppa Gen E2E",
-  "mainBinaryName": "Oppa Gen E2E",
-  "identifier": "ui.oppagen.desktop.e2e",
+  "productName": "Fruit Truck E2E",
+  "mainBinaryName": "Fruit Truck E2E",
+  "identifier": "ui.fruittruck.desktop.e2e",
   "app": {
     "windows": [
       {
-        "title": "Oppa Gen E2E",
+        "title": "Fruit Truck E2E",
         "width": 1440,
         "height": 920,
         "minWidth": 980,
@@ -21,10 +21,10 @@
         "enable": true,
         "scope": [
           "$APPCACHE/generated/**",
-          "$HOME/.oppa-gen/assets/**",
-          "$HOME/.oppa-gen/generated/**",
-          "$HOME/.oppa-gen-e2e/assets/**",
-          "$HOME/.oppa-gen-e2e/generated/**"
+          "$HOME/.fruit-truck/assets/**",
+          "$HOME/.fruit-truck/generated/**",
+          "$HOME/.fruit-truck-e2e/assets/**",
+          "$HOME/.fruit-truck-e2e/generated/**"
         ]
       }
     }
