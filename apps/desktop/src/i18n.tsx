@@ -2,7 +2,7 @@ import { createContext, useContext, useEffect, useMemo, useState, type ReactNode
 
 export type Language = "en" | "ko";
 
-const STORAGE_KEY = "oppa-gen.language";
+const STORAGE_KEY = "fruit-truck.language";
 
 const messages = {
   en: {
@@ -295,7 +295,7 @@ const messages = {
     continue: "Continue",
     updateAvailable: "UPDATE AVAILABLE",
     updateReady: "A sharper build is ready.",
-    installVersion: "Install version {version} of Oppa Gen.",
+    installVersion: "Install version {version} of Fruit Truck.",
     updateFallback: "Install the latest fixes and improvements, then return to your workspace.",
     downloading: "Downloading and verifying…",
     updateFailed: "Update failed. {message}",
@@ -601,7 +601,7 @@ const messages = {
     continue: "계속",
     updateAvailable: "업데이트 가능",
     updateReady: "더 나은 새 버전을 사용할 수 있습니다.",
-    installVersion: "Oppa Gen {version} 버전을 설치합니다.",
+    installVersion: "Fruit Truck {version} 버전을 설치합니다.",
     updateFallback: "최신 수정 사항과 개선 사항을 설치한 뒤 작업 공간으로 돌아오세요.",
     downloading: "다운로드 및 확인 중…",
     updateFailed: "업데이트 실패. {message}",

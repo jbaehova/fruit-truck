@@ -158,7 +158,7 @@ export function AssetLibrary({
             className={`asset-tile ${selectedIds.has(asset.id) ? "selected" : ""}`}
             draggable
             onDragStart={(event) => {
-              event.dataTransfer.setData("application/x-oppa-gen-asset", asset.id);
+              event.dataTransfer.setData("application/x-fruit-truck-asset", asset.id);
               event.dataTransfer.effectAllowed = "copy";
             }}
           >

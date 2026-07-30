@@ -18,19 +18,19 @@ const destinations = {
   hermes: join(homedir(), ".hermes", "skills"),
 };
 const configurationCommands = {
-  codex: ["codex", ["mcp", "add", "oppa-gen", "--", "oppa-gen-mcp", "--agent-host", "codex"]],
-  claude: ["claude", ["mcp", "add", "oppa-gen", "--scope", "user", "--", "oppa-gen-mcp", "--agent-host", "claude"]],
-  hermes: ["hermes", ["mcp", "add", "oppa-gen", "--command", "oppa-gen-mcp", "--args", "--agent-host", "hermes"]],
+  codex: ["codex", ["mcp", "add", "fruit-truck", "--", "fruit-truck-mcp", "--agent-host", "codex"]],
+  claude: ["claude", ["mcp", "add", "fruit-truck", "--scope", "user", "--", "fruit-truck-mcp", "--agent-host", "claude"]],
+  hermes: ["hermes", ["mcp", "add", "fruit-truck", "--command", "fruit-truck-mcp", "--args", "--agent-host", "hermes"]],
 };
 
 function usage() {
   process.stdout.write([
-    "Oppa Gen Agent Kit",
+    "Fruit Truck Agent Kit",
     "",
-    "  oppa-gen-agent-kit install <codex|claude|hermes> [--configure] [--force] [--skills-dir=/absolute/path]",
-    "  oppa-gen-agent-kit print-config <codex|claude|hermes>",
+    "  fruit-truck-agent-kit install <codex|claude|hermes> [--configure] [--force] [--skills-dir=/absolute/path]",
+    "  fruit-truck-agent-kit print-config <codex|claude|hermes>",
     "",
-    "--configure also registers the oppa-gen-mcp stdio server through the target CLI.",
+    "--configure also registers the fruit-truck-mcp stdio server through the target CLI.",
     "--force replaces an existing installed copy of the bundled Skills.",
     "--skills-dir overrides the target's default personal Skills directory.",
     "",
@@ -53,19 +53,19 @@ if (!target || !(target in destinations)) {
   }
   const destination = skillsDirectoryOverride ?? destinations[target];
   await mkdir(destination, { recursive: true });
-  for (const skill of ["oppa-gen-agent", "story-driven-short-form"]) {
+  for (const skill of ["fruit-truck-agent", "story-driven-short-form"]) {
     const output = join(destination, skill);
     if (force) await rm(output, { recursive: true, force: true });
     await cp(join(root, "skills", skill), output, { recursive: true, force });
   }
-  process.stdout.write(`Installed Oppa Gen Skills in ${destination}.\n`);
+  process.stdout.write(`Installed Fruit Truck Skills in ${destination}.\n`);
   if (configure) {
     const [program, programArgs] = configurationCommands[target];
     const result = spawnSync(program, programArgs, { stdio: "inherit" });
     if (result.error) throw new Error(`Could not run ${program}: ${result.error.message}`);
     if (result.status !== 0) throw new Error(`${program} MCP configuration exited with status ${result.status}.`);
   } else {
-    process.stdout.write(`Register MCP with: oppa-gen-agent-kit print-config ${target}\n`);
+    process.stdout.write(`Register MCP with: fruit-truck-agent-kit print-config ${target}\n`);
   }
 } else {
   usage();

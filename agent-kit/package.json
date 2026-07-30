@@ -1,11 +1,11 @@
 {
-  "name": "@oppa-gen/agent-kit",
+  "name": "@fruit-truck/agent-kit",
   "version": "1.0.0",
-  "description": "Standalone MCP server and Agent Skills for Oppa Gen",
+  "description": "Standalone MCP server and Agent Skills for Fruit Truck",
   "type": "module",
   "bin": {
-    "oppa-gen-mcp": "dist/scripts/mcp-server.js",
-    "oppa-gen-agent-kit": "bin/install.mjs"
+    "fruit-truck-mcp": "dist/scripts/mcp-server.js",
+    "fruit-truck-agent-kit": "bin/install.mjs"
   },
   "files": [
     "bin",

@@ -215,7 +215,7 @@ export function createAgentState(intent = ""): AgentSessionState {
     decisions: [],
     activity: [],
     artifacts: [],
-    appliedSkills: [{ name: "oppa-gen-agent", version: "1.0.0", source: "core" }],
+    appliedSkills: [{ name: "fruit-truck-agent", version: "1.0.0", source: "core" }],
     imageGeneration: { status: "unselected" },
     modelSelections: {
       image: { status: "unselected" },
@@ -678,7 +678,7 @@ export function createCustomSkillDraft(state: AgentSessionState, name: string): 
     "---",
     `name: ${name}`,
     "version: 1",
-    "type: oppa-gen-custom",
+    "type: fruit-truck-custom",
     "---",
     "",
     `# ${name}`,

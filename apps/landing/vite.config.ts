@@ -1,6 +1,6 @@
 import { defineConfig } from "vite";
 
 export default defineConfig({
-  base: "/oppa-gen/",
+  base: "/fruit-truck/",
   publicDir: "../../assets",
 });

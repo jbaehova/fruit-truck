@@ -1,11 +1,11 @@
 ---
-name: oppa-gen-agent
-description: Orchestrate resumable image and video production through Oppa Gen, collecting every session decision in the current agent chat. Use when a local Codex, Claude Code, or Hermes agent must plan, generate, evaluate, revise, or continue media work through the Oppa Gen MCP server.
+name: fruit-truck-agent
+description: Orchestrate resumable image and video production through Fruit Truck, collecting every session decision in the current agent chat. Use when a local Codex, Claude Code, or Hermes agent must plan, generate, evaluate, revise, or continue media work through the Fruit Truck MCP server.
 ---
 
-# Oppa Gen Agent
+# Fruit Truck Agent
 
-Turn intent into a durable production session. The agent plans, asks, evaluates, and executes. Oppa Gen stores state and media, while the user answers creative choices, model selections, feedback, approvals, and Custom Skill changes in this chat.
+Turn intent into a durable production session. The agent plans, asks, evaluates, and executes. Fruit Truck stores state and media, while the user answers creative choices, model selections, feedback, approvals, and Custom Skill changes in this chat.
 
 ## Connect or resume
 
@@ -29,7 +29,7 @@ Never resolve a choice from your own recommendation or an ambiguous reply. A pen
 
 Use blocking chat decisions for material ambiguity, uploads only the user can provide, model selection, major image/keyframe/video/final approval, expensive batches, abnormal retries, and Custom Skill changes.
 
-For an upload, ask the user to add files through Oppa Gen Assets/InputTray. After the user confirms in chat, reread the session and attach the new asset IDs when resolving the upload decision.
+For an upload, ask the user to add files through Fruit Truck Assets/InputTray. After the user confirms in chat, reread the session and attach the new asset IDs when resolving the upload decision.
 
 ## Build the production graph
 
@@ -85,7 +85,7 @@ For image and video stages independently:
 3. For OpenRouter, call `submit_generation`; use `poll_video` for asynchronous video jobs.
 4. Use `register_asset` for uploaded or external derivatives and `register_host_image` only for Codex built-in output.
 5. Use `evaluate_asset` for technical defects, aesthetic finish, identity/continuity, and a recommendation.
-6. Queue approval, show the relevant asset in Oppa Gen when useful, and resolve the user's chat reply.
+6. Queue approval, show the relevant asset in Fruit Truck when useful, and resolve the user's chat reply.
 7. Replan from evidence. Successful submission is not proof of a successful result.
 
 Preserve source assets. Session JSON stores managed `localPath` metadata, never Base64 or data URLs.
@@ -94,7 +94,7 @@ Preserve source assets. Session JSON stores managed `localPath` metadata, never 
 
 Plan short shots and continuity constraints unless one continuous generation is explicitly required. Generate and approve keyframes before motion, then evaluate shots independently.
 
-The user still configures and renders final clips in Oppa Gen's `Make final video` window. Ask them in chat to complete that direct manipulation, reread the resulting artifact, then request final approval in chat.
+The user still configures and renders final clips in Fruit Truck's `Make final video` window. Ask them in chat to complete that direct manipulation, reread the resulting artifact, then request final approval in chat.
 
 ## Pause, recover, and hand over
 
