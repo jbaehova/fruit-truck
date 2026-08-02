@@ -28,6 +28,9 @@ export type SessionAsset = {
   byteSize?: number;
   fingerprint?: string;
   bridgeAvailability?: "available" | "desktop_only";
+  sourceUrl?: string;
+  sourcePageUrl?: string;
+  license?: string;
 };
 
 export type DraftReference = {
@@ -62,13 +65,118 @@ export type GenerationDraftState = {
 };
 
 export type SessionVideoJob = VideoResult & {
+  threadId?: string;
+  attemptId?: string;
   workflow: VideoWorkflow;
   model: string;
   submittedAt: string;
   pollAttempts?: number;
   lastPolledAt?: string;
+  nextPollAt?: string;
   request: Record<string, unknown>;
   inputAssetIds?: string[];
+};
+
+export type GenerationAttemptStatus =
+  | "queued"
+  | "enhancing"
+  | "awaiting_host"
+  | "submitting"
+  | "in_progress"
+  | "completed"
+  | "failed"
+  | "uncertain"
+  | "canceled";
+
+export type GenerationAttemptSnapshot = {
+  mode: GenerationMode;
+  videoWorkflow: VideoWorkflow;
+  modelId: string;
+  outputRole: string;
+  prompt: string;
+  enhancePrompt: boolean;
+  enhancedPrompt: string;
+  options: DraftOptions;
+  providerJson: string;
+  assetBindings: DraftReference[];
+  imageEditMode: boolean;
+  imageEditTarget: string;
+  maskInstructions: string;
+  maskStrokes: MaskStroke[];
+};
+
+export type PromptEnhancementAttempt = {
+  id: string;
+  requestKey: string;
+  status: "in_progress" | "completed" | "failed" | "uncertain";
+  threadRevision: number;
+  originalPrompt: string;
+  enhancedPrompt?: string;
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type GenerationAttempt = {
+  id: string;
+  requestKey?: string;
+  status: GenerationAttemptStatus;
+  backend: "openrouter" | "codex_builtin";
+  draftRevision: number;
+  requestedBy: "human" | "agent";
+  createdAt: string;
+  updatedAt: string;
+  submittedAt?: string;
+  completedAt?: string;
+  modelId?: string;
+  snapshot?: GenerationAttemptSnapshot;
+  enhancedPrompt?: string;
+  request?: Record<string, unknown>;
+  inputAssetIds: string[];
+  assetIds: string[];
+  jobId?: string;
+  progress?: number;
+  pollAttempts?: number;
+  lastPolledAt?: string;
+  nextPollAt?: string;
+  estimatedCostUsd?: number;
+  actualCostUsd?: number;
+  costRecordedAt?: string;
+  cancelRequestedAt?: string;
+  error?: string;
+};
+
+export type GenerationThread = {
+  id: string;
+  requestKey?: string;
+  name: string;
+  mode: GenerationMode;
+  videoWorkflow: VideoWorkflow;
+  createdAt: string;
+  updatedAt: string;
+  archivedAt?: string;
+  revision: number;
+  outputRole: string;
+  modelOverrideId?: string;
+  optionOverrides: DraftOptions;
+  providerJsonOverride?: string;
+  draft: GenerationDraftState;
+  attempts: GenerationAttempt[];
+  enhancementAttempts: PromptEnhancementAttempt[];
+};
+
+export type GenerationDefaults = {
+  modelIds: Record<GenerationMode, string>;
+  options: {
+    image: DraftOptions;
+    videoGenerate: DraftOptions;
+    videoEdit: DraftOptions;
+  };
+  providerJson: {
+    image: string;
+    videoGenerate: string;
+    videoEdit: string;
+  };
 };
 
 export type StudioSession = {
@@ -77,22 +185,16 @@ export type StudioSession = {
   createdAt: string;
   updatedAt: string;
   mode: GenerationMode;
-  videoWorkflow: VideoWorkflow;
-  selectedModelIds: Record<GenerationMode, string>;
-  drafts: {
-    image: GenerationDraftState;
-    videoGenerate: GenerationDraftState;
-    videoEdit: GenerationDraftState;
-  };
   assets: SessionAsset[];
-  activeVideoJobs: SessionVideoJob[];
-  lastResultAssetIds: Record<"image" | "video", string[]>;
+  generationDefaults: GenerationDefaults;
+  threads: Record<GenerationMode, GenerationThread[]>;
+  activeThreadIds: Record<GenerationMode, string>;
   agent: AgentSessionState;
   agentBridge?: boolean;
 };
 
 export type StudioState = {
-  schemaVersion: 1;
+  schemaVersion: 3;
   activeSessionId: string;
   promptModel: PromptModel;
   sessions: StudioSession[];
@@ -123,7 +225,7 @@ export const PROMPT_MODELS: Array<{
   { id: "openai/gpt-5.6-terra", label: "GPT-5.6 Terra", effort: "high" },
 ];
 
-function emptyDraft(): GenerationDraftState {
+export function emptyDraft(): GenerationDraftState {
   return {
     prompt: "",
     references: [],
@@ -139,24 +241,110 @@ function emptyDraft(): GenerationDraftState {
   };
 }
 
+function threadName(mode: GenerationMode, index = 1) {
+  return `${mode === "image" ? "Image" : "Video"} ${index}`;
+}
+
+export function createGenerationThread(
+  mode: GenerationMode,
+  index = 1,
+  workflow: VideoWorkflow = "generate",
+  draft: GenerationDraftState = emptyDraft(),
+): GenerationThread {
+  const createdAt = new Date().toISOString();
+  return {
+    id: crypto.randomUUID(),
+    name: threadName(mode, index),
+    mode,
+    videoWorkflow: workflow,
+    createdAt,
+    updatedAt: createdAt,
+    revision: 0,
+    outputRole: mode === "image" ? "generated_image" : "generated_video",
+    optionOverrides: { ...draft.options },
+    providerJsonOverride: draft.providerJson || undefined,
+    draft: { ...draft, options: {}, providerJson: "" },
+    attempts: [],
+    enhancementAttempts: [],
+  };
+}
+
+export function generationDefaultKey(thread: Pick<GenerationThread, "mode" | "videoWorkflow">) {
+  if (thread.mode === "image") return "image" as const;
+  return thread.videoWorkflow === "generate" ? "videoGenerate" as const : "videoEdit" as const;
+}
+
+export function effectiveThreadDraft(session: StudioSession, thread: GenerationThread): GenerationDraftState {
+  const key = generationDefaultKey(thread);
+  return {
+    ...thread.draft,
+    options: { ...session.generationDefaults.options[key], ...thread.optionOverrides },
+    providerJson: thread.providerJsonOverride ?? session.generationDefaults.providerJson[key],
+  };
+}
+
+export function effectiveThreadModelId(session: StudioSession, thread: GenerationThread) {
+  return thread.modelOverrideId ?? session.generationDefaults.modelIds[thread.mode];
+}
+
+export function optionOverridesFromDefaults(defaults: DraftOptions, effective: DraftOptions): DraftOptions {
+  return Object.fromEntries(Object.entries(effective).filter(([key, value]) => value !== defaults[key]));
+}
+
+export function activeGenerationAttempt(thread: GenerationThread) {
+  return thread.attempts.findLast((attempt) => !["completed", "failed", "uncertain", "canceled"].includes(attempt.status));
+}
+
+export function latestGenerationAttempt(thread: GenerationThread) {
+  return thread.attempts.at(-1);
+}
+
+export function allGenerationThreads(session: Pick<StudioSession, "threads">) {
+  return [...session.threads.image, ...session.threads.video];
+}
+
+export function activeVideoJobsFromAttempts(session: Pick<StudioSession, "threads">): SessionVideoJob[] {
+  return session.threads.video.flatMap((thread) => thread.attempts.flatMap((attempt) => {
+    if (!attempt.jobId || !["submitting", "in_progress"].includes(attempt.status)) return [];
+    const snapshot = attempt.snapshot;
+    return [{
+      kind: "video" as const,
+      jobId: attempt.jobId,
+      status: "in_progress" as const,
+      progress: attempt.progress,
+      error: attempt.error,
+      threadId: thread.id,
+      attemptId: attempt.id,
+      workflow: snapshot?.videoWorkflow ?? thread.videoWorkflow,
+      model: snapshot?.modelId ?? attempt.modelId ?? "",
+      submittedAt: attempt.submittedAt ?? attempt.createdAt,
+      pollAttempts: attempt.pollAttempts,
+      lastPolledAt: attempt.lastPolledAt,
+      nextPollAt: attempt.nextPollAt,
+      request: attempt.request ?? {},
+      inputAssetIds: attempt.inputAssetIds,
+    }];
+  }));
+}
+
 export function createSession(name = "Untitled session"): StudioSession {
   const now = new Date().toISOString();
+  const imageThread = createGenerationThread("image");
+  const videoThread = createGenerationThread("video");
   return {
     id: crypto.randomUUID(),
     name,
     createdAt: now,
     updatedAt: now,
     mode: "image",
-    videoWorkflow: "generate",
-    selectedModelIds: { image: "", video: "" },
-    drafts: {
-      image: emptyDraft(),
-      videoGenerate: emptyDraft(),
-      videoEdit: emptyDraft(),
-    },
     assets: [],
-    activeVideoJobs: [],
-    lastResultAssetIds: { image: [], video: [] },
+    generationDefaults: {
+      modelIds: { image: "", video: "" },
+      options: { image: {}, videoGenerate: {}, videoEdit: {} },
+      providerJson: { image: "", videoGenerate: "", videoEdit: "" },
+    },
+    threads: { image: [imageThread], video: [videoThread] },
+    activeThreadIds: { image: imageThread.id, video: videoThread.id },
     agent: createAgentState(),
   };
 }
@@ -164,20 +352,120 @@ export function createSession(name = "Untitled session"): StudioSession {
 function createInitialStudioState(): StudioState {
   const session = createSession("First session");
   return {
-    schemaVersion: 1,
+    schemaVersion: 3,
     activeSessionId: session.id,
     promptModel: "openai/gpt-5.6-luna",
     sessions: [session],
   };
 }
 
-function validState(value: unknown): value is StudioState {
+function validState(value: unknown): value is StudioState | (Omit<StudioState, "schemaVersion"> & { schemaVersion: 1 | 2 }) {
   if (!value || typeof value !== "object") return false;
-  const state = value as Partial<StudioState>;
-  return state.schemaVersion === 1
+  const state = value as { schemaVersion?: number; activeSessionId?: unknown; sessions?: unknown };
+  return (state.schemaVersion === 1 || state.schemaVersion === 2 || state.schemaVersion === 3)
     && typeof state.activeSessionId === "string"
     && Array.isArray(state.sessions)
     && state.sessions.length > 0;
+}
+
+function normalizeDraft(draft: GenerationDraftState | undefined): GenerationDraftState {
+  const value = draft ?? emptyDraft();
+  return {
+    ...emptyDraft(),
+    ...value,
+    maskInstructions: value.maskInstructions ?? "",
+    maskStrokes: Array.isArray(value.maskStrokes)
+      ? value.maskStrokes.map((stroke) => ({ ...stroke, operation: stroke.operation === "erase" ? "erase" as const : "paint" as const }))
+      : [],
+  };
+}
+
+function hasDraftContent(draft: GenerationDraftState | undefined) {
+  if (!draft) return false;
+  return Boolean(draft.prompt.trim() || draft.references.length || Object.keys(draft.options).length || draft.providerJson.trim());
+}
+
+function normalizeSession(session: StudioSession): StudioSession {
+  const legacy = session as StudioSession & Partial<{
+    videoWorkflow: VideoWorkflow;
+    selectedModelIds: Record<GenerationMode, string>;
+    drafts: { image: GenerationDraftState; videoGenerate: GenerationDraftState; videoEdit: GenerationDraftState };
+    activeVideoJobs: SessionVideoJob[];
+    lastResultAssetIds: Record<GenerationMode, string[]>;
+  }>;
+  const legacyDrafts = legacy.drafts ?? { image: emptyDraft(), videoGenerate: emptyDraft(), videoEdit: emptyDraft() };
+  const imageDraft = normalizeDraft(legacyDrafts.image);
+  const videoGenerateDraft = normalizeDraft(legacyDrafts.videoGenerate);
+  const videoEditDraft = normalizeDraft(legacyDrafts.videoEdit);
+  const legacyWorkflow = legacy.videoWorkflow === "edit" ? "edit" : "generate";
+  const existingThreads = session.threads;
+  const imageThreads = existingThreads?.image?.length
+    ? existingThreads.image.map((thread) => ({ ...thread, draft: normalizeDraft(thread.draft), optionOverrides: thread.optionOverrides ?? thread.draft.options ?? {}, attempts: thread.attempts ?? [], enhancementAttempts: thread.enhancementAttempts ?? [], revision: thread.revision ?? 0 }))
+    : [createGenerationThread("image", 1, "generate", imageDraft)];
+  let videoThreads = existingThreads?.video?.length
+    ? existingThreads.video.map((thread) => ({ ...thread, draft: normalizeDraft(thread.draft), optionOverrides: thread.optionOverrides ?? thread.draft.options ?? {}, attempts: thread.attempts ?? [], enhancementAttempts: thread.enhancementAttempts ?? [], revision: thread.revision ?? 0 }))
+    : [createGenerationThread("video", 1, legacyWorkflow, legacyWorkflow === "edit" ? videoEditDraft : videoGenerateDraft)];
+  if (!existingThreads?.video?.length) {
+    const inactiveDraft = legacyWorkflow === "edit" ? videoGenerateDraft : videoEditDraft;
+    if (hasDraftContent(inactiveDraft)) {
+      videoThreads.push(createGenerationThread("video", 2, legacyWorkflow === "edit" ? "generate" : "edit", inactiveDraft));
+    }
+  }
+  for (const job of legacy.activeVideoJobs ?? []) {
+      if (videoThreads.some((thread) => thread.attempts.some((attempt) => attempt.jobId === job.jobId))) continue;
+      let target = job.threadId ? videoThreads.find((thread) => thread.id === job.threadId) : undefined;
+      if (!target) {
+        target = !activeGenerationAttempt(videoThreads[0]) ? videoThreads[0] : createGenerationThread("video", videoThreads.length + 1, job.workflow);
+      }
+      const attempt: GenerationAttempt = {
+        id: job.attemptId ?? crypto.randomUUID(),
+        status: job.status === "completed" || job.status === "failed" ? job.status : "in_progress",
+        backend: "openrouter",
+        draftRevision: target.revision,
+        requestedBy: "human",
+        createdAt: job.submittedAt,
+        updatedAt: job.lastPolledAt ?? job.submittedAt,
+        submittedAt: job.submittedAt,
+        modelId: job.model,
+        request: job.request,
+        inputAssetIds: job.inputAssetIds ?? [],
+        assetIds: [],
+        jobId: job.jobId,
+        progress: job.progress,
+        error: job.error,
+      };
+      target.attempts = [...target.attempts, attempt];
+      if (!videoThreads.includes(target)) videoThreads.push(target);
+  }
+  const generationDefaults = session.generationDefaults ?? {
+    modelIds: { image: legacy.selectedModelIds?.image ?? "", video: legacy.selectedModelIds?.video ?? "" },
+    options: { image: {}, videoGenerate: {}, videoEdit: {} },
+    providerJson: { image: "", videoGenerate: "", videoEdit: "" },
+  };
+  const activeThreadIds = {
+    image: imageThreads.some((thread) => thread.id === session.activeThreadIds?.image) ? session.activeThreadIds.image : imageThreads[0].id,
+    video: videoThreads.some((thread) => thread.id === session.activeThreadIds?.video) ? session.activeThreadIds.video : videoThreads[0].id,
+  };
+  const { videoWorkflow: _videoWorkflow, selectedModelIds: _selectedModelIds, drafts: _drafts, activeVideoJobs: _activeVideoJobs, lastResultAssetIds: legacyResults, ...canonical } = legacy;
+  for (const [mode, threads] of [["image", imageThreads], ["video", videoThreads]] as const) {
+    const resultIds = legacyResults?.[mode]?.filter((id) => (session.assets ?? []).some((asset) => asset.id === id)) ?? [];
+    if (resultIds.length && !threads.some((thread) => thread.attempts.some((attempt) => attempt.assetIds.length))) {
+      const target = threads.find((thread) => thread.id === activeThreadIds[mode]) ?? threads[0];
+      const now = target.updatedAt;
+      target.attempts.push({ id: crypto.randomUUID(), status: "completed", backend: "openrouter", draftRevision: target.revision, requestedBy: "human", createdAt: now, updatedAt: now, completedAt: now, inputAssetIds: [], assetIds: resultIds });
+    }
+  }
+  return {
+    ...canonical,
+    assets: (session.assets ?? []).map((asset) => {
+      const legacyLocalPath = asset.externalUrl && /^(?:\/|[A-Za-z]:[\\/])/.test(asset.externalUrl) ? asset.externalUrl : undefined;
+      return { ...asset, localPath: asset.localPath ?? legacyLocalPath, externalUrl: legacyLocalPath ? undefined : asset.externalUrl };
+    }),
+    generationDefaults,
+    threads: { image: imageThreads, video: videoThreads },
+    activeThreadIds,
+    agent: session.agent ? normalizeAgentState(session.agent) : createAgentState(),
+  };
 }
 
 export function loadStudioState(): StudioState {
@@ -188,35 +476,10 @@ export function loadStudioState(): StudioState {
   try {
     const parsed = JSON.parse(raw) as unknown;
     if (!validState(parsed)) return createInitialStudioState();
-    const state = {
+    const state: StudioState = {
       ...parsed,
-      sessions: parsed.sessions.map((session) => ({
-        ...session,
-        assets: session.assets.map((asset) => {
-          const legacyLocalPath = asset.externalUrl && /^(?:\/|[A-Za-z]:[\\/])/.test(asset.externalUrl)
-            ? asset.externalUrl
-            : undefined;
-          return {
-            ...asset,
-            localPath: asset.localPath ?? legacyLocalPath,
-            externalUrl: legacyLocalPath ? undefined : asset.externalUrl,
-          };
-        }),
-        agent: session.agent ? normalizeAgentState(session.agent) : createAgentState(),
-        drafts: Object.fromEntries(Object.entries(session.drafts).map(([key, draft]) => [
-          key,
-          {
-            ...draft,
-            maskInstructions: draft.maskInstructions ?? "",
-            maskStrokes: Array.isArray(draft.maskStrokes)
-              ? draft.maskStrokes.map((stroke) => ({
-                ...stroke,
-                operation: stroke.operation === "erase" ? "erase" as const : "paint" as const,
-              }))
-              : [],
-          },
-        ])) as StudioSession["drafts"],
-      })),
+      schemaVersion: 3,
+      sessions: parsed.sessions.map((session) => normalizeSession(session as StudioSession)),
     };
     if (!state.sessions.some((session) => session.id === state.activeSessionId)) {
       state.activeSessionId = state.sessions[0].id;
@@ -236,6 +499,15 @@ export function saveStudioState(state: StudioState) {
     ...state,
     sessions: state.sessions.map((session) => ({
       ...session,
+      threads: Object.fromEntries(Object.entries(session.threads).map(([mode, threads]) => [mode, threads.map((thread) => ({
+        ...thread,
+        attempts: thread.attempts.filter((attempt) => !["completed", "failed", "uncertain", "canceled"].includes(attempt.status)).concat(
+          thread.attempts.filter((attempt) => ["completed", "failed", "uncertain", "canceled"].includes(attempt.status)).slice(-100),
+        ),
+        enhancementAttempts: thread.enhancementAttempts.filter((attempt) => attempt.status === "in_progress").concat(
+          thread.enhancementAttempts.filter((attempt) => attempt.status !== "in_progress").slice(-100),
+        ),
+      }))])) as StudioSession["threads"],
       agent: {
         ...session.agent,
         activity: session.agent.activity.slice(-500),

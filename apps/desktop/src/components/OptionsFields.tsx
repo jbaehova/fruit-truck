@@ -5,7 +5,6 @@ import { useState } from "react";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import { Textarea } from "@/components/ui/textarea";
 import { useI18n, type MessageKey } from "@/i18n";
 import type { DraftOptions, GenerationMode, GenerationModel, ImageModel, VideoModel } from "@/openrouter";
 
@@ -50,7 +49,7 @@ function EnumField({ name, values, value, onChange }: { name: string; values: Ar
   );
 }
 
-export function OptionsFields({ mode, model, options, providerJson, providerError, onOptionsChange, onProviderJsonChange }: Props) {
+export function OptionsFields({ mode, model, options, onOptionsChange }: Props) {
   const { t } = useI18n();
   const [advanced, setAdvanced] = useState(false);
   if (!model) return null;
@@ -100,30 +99,18 @@ export function OptionsFields({ mode, model, options, providerJson, providerErro
     <div className="options-section">
       <div className="section-label-row"><span className="section-label">{t("outputOptions")}</span><small>{t("supportedFieldsOnly")}</small></div>
       {basic.length ? <div className="options-grid">{basic}</div> : <p className="empty-options">{t("noOutputControls")}</p>}
-      <Collapsible.Root open={advanced} onOpenChange={setAdvanced}>
-        <Collapsible.Trigger className={`advanced-toggle ${advanced ? "open" : ""}`}>
-          <span><SlidersHorizontal /> {t("advanced")}</span><ChevronDown />
-        </Collapsible.Trigger>
-        <Collapsible.Panel className="advanced-panel">
-          <div className="advanced-content">
-          {advancedFields.length ? <div className="options-grid">{advancedFields}</div> : null}
-          <Field.Root className="provider-json" invalid={Boolean(providerError)}>
-            <Field.Label>{t("providerOptions")}</Field.Label>
-            <Textarea
-              rows={5}
-              spellCheck={false}
-              value={providerJson}
-              placeholder={'{\n  "order": ["provider-slug"],\n  "options": {}\n}'}
-              onChange={(event) => onProviderJsonChange(event.target.value)}
-              aria-invalid={Boolean(providerError)}
-            />
-            {providerError
-              ? <Field.Error className="field-error" match>{providerError}</Field.Error>
-              : <Field.Description>{t("providerOptionsHint")}</Field.Description>}
-          </Field.Root>
-          </div>
-        </Collapsible.Panel>
-      </Collapsible.Root>
+      {advancedFields.length ? (
+        <Collapsible.Root open={advanced} onOpenChange={setAdvanced}>
+          <Collapsible.Trigger className={`advanced-toggle ${advanced ? "open" : ""}`}>
+            <span><SlidersHorizontal /> {t("advanced")}</span><ChevronDown />
+          </Collapsible.Trigger>
+          <Collapsible.Panel className="advanced-panel">
+            <div className="advanced-content">
+              <div className="options-grid">{advancedFields}</div>
+            </div>
+          </Collapsible.Panel>
+        </Collapsible.Root>
+      ) : null}
     </div>
   );
 }

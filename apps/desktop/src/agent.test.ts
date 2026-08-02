@@ -6,6 +6,7 @@ import {
   createCustomSkillDraft,
   normalizeAgentState,
   resolveAgentDecision,
+  resolveAgentDecisionFromDesktop,
   resolveAgentDecisionFromChat,
   resolveAgentDecisionWithModelSelection,
   exposeAgentSession,
@@ -103,6 +104,32 @@ test("resolving a model decision records the user selection atomically", () => {
   });
 });
 
+test("resolving a thread-scoped model decision leaves mode-global modelSelections unchanged", () => {
+  const state = productionState();
+  const priorSelection = state.modelSelections.image;
+  const withScopedDecision = {
+    ...state,
+    decisions: [...state.decisions, {
+      id: "decision-model-scoped",
+      semanticKey: "model_selection_image" as const,
+      title: "Choose image model",
+      prompt: "Choose the model for these threads.",
+      kind: "choice" as const,
+      status: "pending" as const,
+      blocking: true,
+      relatedAssetIds: [],
+      relatedThreadIds: ["thread-a", "thread-b"],
+      options: [{ id: "test/image", label: "Test image model" }],
+      createdAt: new Date().toISOString(),
+    }],
+  };
+  const resolved = resolveAgentDecisionWithModelSelection(withScopedDecision, "decision-model-scoped", "test/image");
+  const decision = resolved.decisions.find((item) => item.id === "decision-model-scoped");
+  assert.equal(decision?.status, "resolved");
+  assert.equal(decision?.resolution?.optionId, "test/image");
+  assert.deepEqual(resolved.modelSelections.image, priorSelection);
+});
+
 test("agent-chat decisions preserve the exact user reply and reject invalid choices", () => {
   const state = productionState();
   assert.throws(
@@ -119,6 +146,46 @@ test("agent-chat decisions preserve the exact user reply and reject invalid choi
   assert.equal(resolution?.optionId, "live-action");
   assert.equal(resolution?.userResponse, "추천한 라이브 액션으로 진행해 주세요.");
   assert.equal(resolution?.channel, "agent_chat");
+});
+
+test("Fruit Truck UI decisions record selected media and cannot resolve chat checkpoints", () => {
+  const base = productionState();
+  const state: AgentSessionState = {
+    ...base,
+    artifacts: [{
+      assetId: "asset-a",
+      role: "keyframe_candidate",
+      parentAssetIds: [],
+      approval: "unreviewed",
+    }],
+    decisions: [{
+      id: "decision-keyframe",
+      title: "Choose a keyframe",
+      prompt: "Choose visually in Fruit Truck.",
+      kind: "approval",
+      channel: "fruit_truck_ui",
+      presentation: "media_grid",
+      selectionMode: "single",
+      minSelections: 1,
+      maxSelections: 1,
+      status: "pending",
+      blocking: true,
+      relatedAssetIds: ["asset-a"],
+      options: [
+        { id: "approve", label: "Approve" },
+        { id: "revise", label: "Revise" },
+      ],
+      createdAt: new Date().toISOString(),
+    }],
+  };
+  assert.throws(
+    () => resolveAgentDecisionFromChat(state, "decision-keyframe", "Approve", "approve"),
+    /Fruit Truck/i,
+  );
+  const resolved = resolveAgentDecisionFromDesktop(state, "decision-keyframe", ["approve"], ["asset-a"]);
+  assert.equal(resolved.decisions[0]?.resolution?.channel, "fruit_truck_ui");
+  assert.deepEqual(resolved.decisions[0]?.resolution?.selectedAssetIds, ["asset-a"]);
+  assert.equal(resolved.artifacts[0]?.approval, "approved");
 });
 
 test("Codex image backend selection is session-scoped and user-owned", () => {
@@ -329,14 +396,14 @@ test("custom skills are text-only and gated until video production", () => {
   assert.throws(() => createCustomSkillDraft(state, "Perfume Film"));
   const progressed = {
     ...state,
-    plan: state.plan.map((step) => step.id === "production" ? { ...step, status: "in_progress" as const } : step),
+    activity: [...state.activity, { id: "assembly-activity", createdAt: new Date().toISOString(), actor: "runtime" as const, kind: "assembly" as const, title: "Prepared video work" }],
   };
   const draft = createCustomSkillDraft(progressed, "Perfume Film");
   assert.match(draft.markdown, /fruit-truck-custom/);
   assert.doesNotMatch(draft.markdown, /assetId|blob:|file:\/\//);
 });
 
-test("plan invariants reject cycles, parallel active steps, and skipped dependencies", () => {
+test("plan invariants reject cycles and skipped dependencies while allowing parallel active steps", () => {
   const base = createAgentState();
   const cycle = {
     ...base,
@@ -350,12 +417,13 @@ test("plan invariants reject cycles, parallel active steps, and skipped dependen
   const parallel = {
     ...base,
     currentStepId: "a",
+    currentStepIds: ["a", "b"],
     plan: [
       { id: "a", title: "A", description: "A", status: "in_progress" as const, dependsOn: [] },
       { id: "b", title: "B", description: "B", status: "waiting" as const, dependsOn: [] },
     ],
   };
-  assert.match(validateAgentState(parallel).join(" "), /Only one/i);
+  assert.deepEqual(validateAgentState(parallel), []);
   const dependency = {
     ...base,
     plan: [

@@ -15,6 +15,9 @@ type Props = {
   loading: boolean;
   disabled?: boolean;
   onSelect: (id: string) => void;
+  inherited?: boolean;
+  onUseDefault?: () => void;
+  onSetDefault?: () => void;
 };
 
 function providerName(model: GenerationModel) {
@@ -36,7 +39,7 @@ function localizedInputSignature(mode: GenerationMode, model: GenerationModel, l
     .replaceAll("video", t("inputVideo"));
 }
 
-export function ModelSelector({ mode, models, selectedId, loading, disabled, onSelect }: Props) {
+export function ModelSelector({ mode, models, selectedId, loading, disabled, onSelect, inherited, onUseDefault, onSetDefault }: Props) {
   const { language, t } = useI18n();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -81,6 +84,10 @@ export function ModelSelector({ mode, models, selectedId, loading, disabled, onS
                 <small>{loading ? t("loadingModels") : t("availableModels", { count: models.length })}</small>
               </div>
             </header>
+            <div className="model-default-actions">
+              <Button type="button" size="xs" variant={inherited ? "outline" : "ghost"} disabled={inherited} onClick={() => onUseDefault?.()}>{t("useModeDefault")}</Button>
+              <Button type="button" size="xs" variant="ghost" onClick={() => onSetDefault?.()}>{t("setModeDefault")}</Button>
+            </div>
             <Field.Root className="model-dropdown-search">
               <Field.Label className="sr-only">{t("searchModels")}</Field.Label>
               <Search aria-hidden="true" />

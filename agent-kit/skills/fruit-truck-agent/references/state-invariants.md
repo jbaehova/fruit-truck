@@ -2,34 +2,38 @@
 
 ## Invariants
 
-- A new published session is connection-waiting; only `claim_session` begins work.
-- The claimed host is `codex`, `claude`, `hermes`, or `unknown`; cross-host mutation is rejected.
-- Codex chooses one image backend per session before its first image task. Other hosts use OpenRouter by policy.
-- A resolved user decision contains a timestamp, `agent_chat` channel, and the explicit user reply.
-- Decision request keys are unique within a session; retrying a request reuses its original key and decision.
-- Blocking pending decisions stop execution.
-- Model selections and approvals are never inferred from an agent recommendation.
-- Major artifacts remain unapproved until the user's chat reply is resolved.
-- A result approval updates the decision, artifact, related plan step, and revision together.
-- Every derivative records parents, role, prompt, model/backend, and plan step when available.
-- Managed media paths stay inside approved generated or asset roots; session JSON contains no Base64.
-- Generation counters, retries, jobs, cost, and limits remain non-negative and durable.
+- A session begins in connection-waiting state and is claimed by one agent host.
+- `ensure_desktop` may background-launch Fruit Truck but never requests foreground focus.
+- Chat decisions are resolved only from explicit chat replies.
+- Fruit Truck UI decisions are resolved only by the desktop and observed through `await_decision`.
+- Request keys are session-unique and retries reuse the original decision.
+- A thread-scoped blocking decision stops only overlapping threads; an unscoped blocking decision stops session execution.
+- Model selections and artifact approvals are never inferred from recommendations.
+- Workflow Skills own plan and stage semantics. Fruit Truck stores generic plan text and generic image/video generation threads.
+- Several plan steps may be active. Plan activity and generation-thread activity are independent.
+- A session starts with one image and one video thread. Each thread has at most one active attempt; a batch may run any number of distinct threads.
+- Mode defaults flow into non-overridden threads. A thread override remains stable until explicitly reset.
+- Every batch is preflighted before any attempt is created. Reusing a generation request key returns the original attempts.
+- Every derivative records parents, role, prompt, backend/model, and plan step when available.
+- Managed paths stay within approved roots; metadata contains no Base64.
+- Paid submissions are exactly-once across waits, restarts, and conflicts.
 
 ## Resume audit
 
-1. Read the session and claim it if waiting.
-2. Confirm the current MCP host matches the claimed host.
-3. Validate the graph and current step.
-4. If a blocking decision is pending, use the current user message only when it clearly answers it; otherwise ask the question again.
-5. Check the stored image backend, model compatibility, referenced parents, and durable jobs.
+1. Read the session and claim it only if it is still waiting.
+2. Verify host ownership and Agent control.
+3. Inspect pending decisions before creating new ones.
+4. Await Fruit Truck UI checkpoints or re-present chat checkpoints through their original channel.
+5. Check durable thread attempts and jobs, selected backend/model, parents, and every active plan step.
 6. Continue from the exact next action.
 
 ## Failure recovery
 
-- CAS conflict: reread, merge, and retry without overwriting newer state.
-- Provider error: record it and retry only with changed conditions or explicit rationale.
-- Codex imagegen failure: ask whether to reselect OpenRouter; never switch silently.
-- Missing asset: ask the user in chat to import it through Fruit Truck.
-- Incompatible model: queue a new model choice and ask in chat.
-- Rejected candidate: preserve it, apply feedback, and create a derivative.
-- Agent interrupted: re-present the durable pending decision on resume.
+- Persistence: `agent-sessions.json` is the revision index and each session snapshot lives under `agent-sessions/`. Never edit only one side outside the bridge lock.
+
+- App unavailable: ask the user to open it, then call `ensure_desktop` again.
+- Conflict: reread, merge, and retry.
+- Missing asset: queue Fruit Truck upload/selection.
+- Incompatible model: request a new Fruit Truck model choice.
+- Rejected candidate: preserve it and create a derivative.
+- Agent interruption: reuse pending decisions, generation request keys, and attempts (whose video attempts own their job IDs). Await queued work; review `uncertain` submissions before any retry.

@@ -18,7 +18,7 @@ function studioFixture() {
     maskInstructions: "",
     maskStrokes: [],
   };
-  const state: StudioState = {
+  const state = {
     schemaVersion: 1,
     activeSessionId: "e2e-session",
     promptModel: "openai/gpt-5.6-luna",
@@ -88,12 +88,17 @@ function studioFixture() {
           title: "Choose image model",
           prompt: "Choose the image model in agent chat.",
           kind: "choice",
+          channel: "fruit_truck_ui",
+          presentation: "model_picker",
+          selectionMode: "single",
+          minSelections: 1,
+          maxSelections: 1,
           status: "pending",
           blocking: true,
           relatedAssetIds: [],
           options: [
-            { id: "test/image", label: "Test image model", recommended: true, description: "Best fit." },
-            { id: "test/other", label: "Other model" },
+            { id: "test/image", label: "Test image model", recommended: true, description: "Best fit.", price: "$0.04 / image" },
+            { id: "test/other", label: "Other model", price: "$0.08 / image" },
           ],
           createdAt,
         }, {
@@ -102,6 +107,10 @@ function studioFixture() {
           title: "Attach identity reference",
           prompt: "Choose a reference file.",
           kind: "upload",
+          channel: "fruit_truck_ui",
+          presentation: "upload",
+          selectionMode: "multiple",
+          minSelections: 1,
           status: "pending",
           blocking: true,
           relatedAssetIds: [],
@@ -113,6 +122,12 @@ function studioFixture() {
           title: "Final result approval",
           prompt: "Review the final result.",
           kind: "approval",
+          channel: "fruit_truck_ui",
+          presentation: "media_grid",
+          selectionMode: "single",
+          minSelections: 1,
+          maxSelections: 1,
+          allowNote: true,
           status: "pending",
           blocking: true,
           relatedStepId: "complete",
@@ -143,7 +158,7 @@ function studioFixture() {
           approval: "approved",
         }],
         appliedSkills: [
-          { name: "fruit-truck-agent", version: "1.0.0", source: "core" },
+          { name: "fruit-truck-agent", version: "2.0.0", source: "core" },
           { name: "Installed Skill", version: "2", source: "custom" },
         ],
         imageGeneration: { status: "selected", backend: "openrouter", selectedBy: "policy", selectedAt: createdAt },
@@ -169,13 +184,11 @@ function studioFixture() {
         updatedAt: createdAt,
       },
     }],
-  };
+  } as unknown as StudioState;
   const waitingSession = structuredClone(state.sessions[0]);
   waitingSession.id = "waiting-session";
   waitingSession.name = "Waiting connection";
   waitingSession.assets = [];
-  waitingSession.activeVideoJobs = [];
-  waitingSession.lastResultAssetIds = { image: [], video: [] };
   waitingSession.agent.connection = { status: "waiting" };
   waitingSession.agent.controlMode = "agent";
   waitingSession.agent.runStatus = "idle";
@@ -195,6 +208,7 @@ test.beforeEach(async ({ page }) => {
     localStorage.setItem("fruit-truck.dev-key", "test-key-for-e2e");
   }, [STORAGE_KEY, studioFixture()] as const);
   await page.goto("/");
+  await expect.poll(() => page.evaluate((key) => JSON.parse(localStorage.getItem(key) ?? "{}").schemaVersion, STORAGE_KEY)).toBe(3);
 });
 
 test("full-window experience uses Agent/Assets without the removed dashboard", async ({ page }) => {
@@ -209,10 +223,10 @@ test("full-window experience uses Agent/Assets without the removed dashboard", a
   const widthBefore = await page.locator(".composer").evaluate((element) => element.getBoundingClientRect().width);
   await page.getByLabel("Agent and assets panel").getByRole("button", { name: "Agent" }).click();
   await expect(page.getByText("Waiting for your choice")).toBeVisible();
-  await expect(page.getByText("Reply in your agent chat to continue.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open review" })).toBeVisible();
   await expect(page.getByText("Image backend")).toBeVisible();
   await expect(page.getByText("OpenRouter", { exact: true })).toBeVisible();
-  await expect(page.getByText("Generating video")).toBeVisible();
+  await expect(page.getByRole("progressbar", { name: "Video 1" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Pause" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Stop" })).toBeVisible();
   await page.getByLabel("Agent and assets panel").getByRole("button", { name: "Assets" }).click();
@@ -234,16 +248,23 @@ test("a published session stays connection-waiting without an app-authored plan"
   }, STORAGE_KEY)).toEqual({ plan: 0, decisions: 0 });
 });
 
-test("blocking decisions stay read-only and never steal focus from the active workspace", async ({ page }) => {
+test("blocking UI decisions stay passive until the user opens the review", async ({ page }) => {
   await expect(page.locator(".decision-dialog")).toHaveCount(0);
+  await expect(page.locator(".decision-workspace")).toHaveCount(0);
   await page.getByLabel("Agent and assets panel").getByRole("button", { name: "Agent" }).click();
   await expect(page.getByText("Choose image model")).toBeVisible();
-  await expect(page.getByText("Reply in your agent chat to continue.")).toBeVisible();
-  await expect(page.getByRole("button", { name: /Open choice/ })).toHaveCount(0);
-  await expect(page.locator(".decision-dialog")).toHaveCount(0);
+  await page.getByRole("button", { name: "Open review" }).click();
+  await expect(page.getByRole("heading", { name: "Choose image model" })).toBeVisible();
+  await expect(page.getByText("$0.04 / image")).toBeVisible();
+  await page.getByRole("button", { name: /Test image model/ }).click();
+  await page.getByRole("button", { name: "Confirm choice" }).click();
+  await expect(page.locator(".decision-workspace")).toHaveCount(0);
+  await expect.poll(() => page.evaluate((key) =>
+    JSON.parse(localStorage.getItem(key) ?? "{}").sessions?.[0]?.agent?.decisions?.[0]?.status
+  , STORAGE_KEY)).toBe("resolved");
 
   await page.reload();
-  await expect(page.locator(".decision-dialog")).toHaveCount(0);
+  await expect(page.locator(".decision-workspace")).toHaveCount(0);
   await expect(page.locator(".composer")).toBeVisible();
 
   await expect.poll(() => page.evaluate((key) => {
@@ -255,7 +276,7 @@ test("blocking decisions stay read-only and never steal focus from the active wo
       finalStep: session?.agent?.plan?.find((item: { id: string }) => item.id === "complete")?.status,
     };
   }, STORAGE_KEY)).toMatchObject({
-    decisions: ["pending", "pending", "pending"],
+    decisions: ["resolved", "pending", "pending"],
     runStatus: "waiting",
     approval: "unreviewed",
     finalStep: "pending",
@@ -270,7 +291,7 @@ test("approved video opens dedicated Assembly and provenance stays folded in Ass
   await expect(page.getByLabel("Clip preview").locator("video")).toBeVisible();
   await page.getByRole("button", { name: /Render final/ }).click();
   await expect(page.getByRole("heading", { name: "Make final video" })).toBeVisible();
-  await expect(page.getByRole("alert")).toContainText("Tauri desktop runtime");
+  await expect(page.getByRole("alert")).toContainText("Tauri desktop");
   await page.getByRole("button", { name: "Close final video editor" }).click();
 
   await page.getByRole("button", { name: "fruit-truck-icon.png" }).click();
@@ -321,4 +342,166 @@ test("Settings keeps Agent Skill import and history read-only for session activa
   await expect(page.getByRole("button", { name: "Activate", exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Deactivate", exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Approve & save" })).toHaveCount(0);
+});
+
+test("Human mode exposes independent generation threads and enables checked parallel work", async ({ page }) => {
+  await page.evaluate((key) => {
+    const state = JSON.parse(localStorage.getItem(key) ?? "{}") as StudioState;
+    const session = state.sessions.find((item) => item.id === state.activeSessionId);
+    if (!session) throw new Error("Missing E2E session");
+    session.agent.controlMode = "human";
+    session.agent.runStatus = "paused";
+    localStorage.setItem(key, JSON.stringify(state));
+  }, STORAGE_KEY);
+  await page.reload();
+
+  await expect(page.getByLabel("Generation threads").locator(".thread-tab")).toHaveCount(1);
+  await page.getByRole("button", { name: "New thread" }).click();
+  await expect(page.getByLabel("Generation threads").locator(".thread-tab")).toHaveCount(2);
+  await expect(page.getByText("Image 2", { exact: true })).toBeVisible();
+  await expect.poll(() => page.evaluate((key) => {
+    const state = JSON.parse(localStorage.getItem(key) ?? "{}") as StudioState;
+    const session = state.sessions.find((item) => item.id === state.activeSessionId)!;
+    const active = session.threads.image.find((item) => item.id === session.activeThreadIds.image);
+    return { name: active?.name, prompt: active?.draft.prompt };
+  }, STORAGE_KEY)).toEqual({ name: "Image 2", prompt: "" });
+
+  const second = page.locator(".thread-tab").filter({ hasText: "Image 2" });
+  await second.hover();
+  page.once("dialog", (dialog) => dialog.accept("Keyframe wide"));
+  await page.getByRole("button", { name: "Rename Image 2" }).click();
+  await expect(page.getByText("Keyframe wide", { exact: true })).toBeVisible();
+
+  await page.getByLabel("Select Image 1").click();
+  await page.getByLabel("Select Keyframe wide").click();
+  await expect(page.getByRole("button", { name: "Run parallel (2)" })).toBeEnabled();
+});
+
+test("asset-library image drags set the edit target through the pointer drop path", async ({ page }) => {
+  await page.evaluate((key) => {
+    const state = JSON.parse(localStorage.getItem(key) ?? "{}") as StudioState;
+    const session = state.sessions.find((item) => item.id === state.activeSessionId);
+    if (!session) throw new Error("Missing E2E session");
+    const thread = session.threads.image.find((item) => item.id === session.activeThreadIds.image);
+    if (!thread) throw new Error("Missing active image thread");
+    thread.draft = {
+      ...thread.draft,
+      imageEditMode: true,
+      imageEditTarget: "",
+      references: [],
+    };
+    localStorage.setItem(key, JSON.stringify(state));
+  }, STORAGE_KEY);
+  await page.reload();
+
+  const assetTile = page.locator(".asset-tile").filter({ hasText: "fruit-truck-icon.png" });
+  const editPanel = page.locator(".edit-media-panel");
+  await editPanel.scrollIntoViewIfNeeded();
+  const sourceBox = await assetTile.locator(".asset-visual img").boundingBox();
+  const targetBox = await editPanel.boundingBox();
+  if (!sourceBox || !targetBox) throw new Error("Missing asset drag coordinates");
+  await page.mouse.move(sourceBox.x + sourceBox.width / 2, sourceBox.y + sourceBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(targetBox.x + targetBox.width / 2, targetBox.y + targetBox.height / 2, { steps: 8 });
+  await page.mouse.up();
+
+  await expect(page.locator(".edit-media-panel").getByText("fruit-truck-icon.png")).toBeVisible();
+  await expect.poll(() => page.evaluate((key) => {
+    const state = JSON.parse(localStorage.getItem(key) ?? "{}") as StudioState;
+    const session = state.sessions.find((item) => item.id === state.activeSessionId);
+    const draft = session?.threads.image.find((item) => item.id === session.activeThreadIds.image)?.draft;
+    return {
+      target: draft?.imageEditTarget,
+      assetId: draft?.references[0]?.assetId,
+    };
+  }, STORAGE_KEY)).toEqual({ target: "#1", assetId: "asset-final" });
+});
+
+test("asset export downloads without navigating the workspace into the image", async ({ page }) => {
+  const assetTile = page.locator(".asset-tile").filter({ hasText: "fruit-truck-icon.png" });
+  const downloadStarted = page.waitForEvent("download");
+  await assetTile.getByRole("button", { name: "Export" }).click();
+  await expect(page.locator(".base-toast")).toContainText("fruit-truck-icon.png downloaded");
+  const download = await downloadStarted;
+
+  expect(download.suggestedFilename()).toBe("fruit-truck-icon.png");
+  await expect(page.locator(".app-shell")).toBeVisible();
+});
+
+test("project overview routes failures and archived threads can be restored with history intact", async ({ page }) => {
+  await page.evaluate((key) => {
+    const state = JSON.parse(localStorage.getItem(key) ?? "{}") as StudioState;
+    const session = state.sessions.find((item) => item.id === state.activeSessionId)!;
+    session.agent.controlMode = "human";
+    const thread = session.threads.image[0];
+    const now = new Date().toISOString();
+    const failedAttempt = {
+      id: "attempt-e2e-failed",
+      requestKey: "batch-e2e-overview",
+      status: "failed" as const,
+      backend: "openrouter" as const,
+      draftRevision: thread.revision,
+      requestedBy: "human" as const,
+      createdAt: now,
+      updatedAt: now,
+      completedAt: now,
+      modelId: "test/image",
+      estimatedCostUsd: 0.04,
+      actualCostUsd: 0.02,
+      inputAssetIds: [],
+      assetIds: [],
+      error: "KF-02 failed independently",
+    };
+    session.threads.image.push({
+      ...structuredClone(thread),
+      id: "failed-e2e-thread",
+      name: "KF-02",
+      attempts: [failedAttempt],
+      enhancementAttempts: [],
+    });
+    session.threads.image.push({
+      ...structuredClone(thread),
+      id: "running-e2e-thread",
+      name: "KF-03",
+      attempts: [{ ...failedAttempt, id: "attempt-e2e-running", status: "in_progress" as const, error: undefined, completedAt: undefined, actualCostUsd: undefined }],
+      enhancementAttempts: [],
+    });
+    session.threads.image.push({
+      ...structuredClone(thread),
+      id: "completed-e2e-thread",
+      name: "KF-04",
+      attempts: [{ ...failedAttempt, id: "attempt-e2e-completed", status: "completed" as const, error: undefined, actualCostUsd: 0.05 }],
+      enhancementAttempts: [],
+    });
+    session.threads.image.push({
+      ...structuredClone(thread),
+      id: "archived-e2e-thread",
+      name: "Archived alternate",
+      attempts: [],
+      enhancementAttempts: [],
+      archivedAt: now,
+    });
+    localStorage.setItem(key, JSON.stringify(state));
+  }, STORAGE_KEY);
+  await page.reload();
+
+  await page.getByLabel("Agent and assets panel").getByRole("button", { name: "Agent" }).click();
+  await expect(page.getByText("Project overview")).toBeVisible();
+  await expect(page.locator(".project-overview dl")).toContainText("Running2");
+  await expect(page.locator(".project-overview dl")).toContainText("Failed1");
+  await expect(page.locator(".project-overview dl")).toContainText("Uncertain0");
+  await expect(page.locator(".project-overview dl")).toContainText("Completed2");
+  await expect(page.locator(".batch-summary")).toContainText("1/3 completed · 1 active · 1 need attention");
+  await expect(page.locator(".batch-summary")).toContainText("$0.07 actual · $0.12 estimated");
+  await expect(page.locator(".generation-error")).toHaveCount(0);
+  const failedLink = page.locator(".project-overview").getByRole("button", { name: "KF-02" });
+  await expect(failedLink).toBeVisible();
+  await failedLink.click();
+  await expect(page.getByText("KF-02 failed independently")).toBeVisible();
+  await page.getByText("Attempt history").click();
+  await expect(page.locator(".attempt-history").getByText("failed", { exact: true })).toBeVisible();
+
+  await page.getByText("Archived (1)").click();
+  await page.getByRole("button", { name: "Restore Archived alternate" }).click();
+  await expect(page.getByText("Archived alternate", { exact: true })).toBeVisible();
 });

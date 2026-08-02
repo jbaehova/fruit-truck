@@ -1,8 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createSession, saveStudioState, type StudioState } from "./studio.ts";
+import {
+  activeGenerationAttempt,
+  createSession,
+  effectiveThreadDraft,
+  effectiveThreadModelId,
+  emptyDraft,
+  loadStudioState,
+  optionOverridesFromDefaults,
+  saveStudioState,
+  type StudioState,
+} from "./studio.ts";
 
-test("studio metadata rejects Base64 media and keeps managed paths", () => {
+function withLocalStorage(run: (writes: Map<string, string>) => void) {
   const writes = new Map<string, string>();
   const previous = globalThis.localStorage;
   Object.defineProperty(globalThis, "localStorage", {
@@ -14,6 +24,14 @@ test("studio metadata rejects Base64 media and keeps managed paths", () => {
     },
   });
   try {
+    run(writes);
+  } finally {
+    Object.defineProperty(globalThis, "localStorage", { configurable: true, value: previous });
+  }
+}
+
+test("studio metadata rejects Base64 media and keeps managed paths", () => {
+  withLocalStorage((writes) => {
     const session = createSession("Managed media");
     session.assets.push({
       id: "asset-managed",
@@ -25,7 +43,7 @@ test("studio metadata rejects Base64 media and keeps managed paths", () => {
       localPath: "/Users/test/.fruit-truck/generated/result.png",
     });
     const state: StudioState = {
-      schemaVersion: 1,
+      schemaVersion: 3,
       activeSessionId: session.id,
       promptModel: "openai/gpt-5.6-luna",
       sessions: [session],
@@ -41,7 +59,136 @@ test("studio metadata rejects Base64 media and keeps managed paths", () => {
       externalUrl: "data:image/png;base64,AAAA",
     };
     assert.throws(() => saveStudioState(state), /data URLs cannot be written/);
-  } finally {
-    Object.defineProperty(globalThis, "localStorage", { configurable: true, value: previous });
-  }
+  });
+});
+
+test("new sessions start with one independent thread per mode and inherit live defaults", () => {
+  const session = createSession("Parallel desk");
+  assert.equal(session.threads.image.length, 1);
+  assert.equal(session.threads.video.length, 1);
+  assert.equal(session.activeThreadIds.image, session.threads.image[0].id);
+  assert.equal(session.activeThreadIds.video, session.threads.video[0].id);
+
+  const thread = session.threads.image[0];
+  session.generationDefaults.modelIds.image = "example/default-v1";
+  session.generationDefaults.options.image = { n: 2, quality: "standard" };
+  assert.equal(effectiveThreadModelId(session, thread), "example/default-v1");
+  assert.deepEqual(effectiveThreadDraft(session, thread).options, { n: 2, quality: "standard" });
+
+  session.generationDefaults.modelIds.image = "example/default-v2";
+  session.generationDefaults.options.image = { n: 1, quality: "high" };
+  thread.modelOverrideId = "example/thread-model";
+  thread.optionOverrides = { n: 4 };
+  assert.equal(effectiveThreadModelId(session, thread), "example/thread-model");
+  assert.deepEqual(effectiveThreadDraft(session, thread).options, { n: 4, quality: "high" });
+
+  const now = new Date().toISOString();
+  thread.attempts.push({
+    id: "attempt-active",
+    status: "in_progress",
+    backend: "openrouter",
+    draftRevision: 0,
+    requestedBy: "human",
+    createdAt: now,
+    updatedAt: now,
+    inputAssetIds: [],
+    assetIds: [],
+  });
+  assert.equal(activeGenerationAttempt(thread)?.id, "attempt-active");
+  thread.attempts[0].status = "completed";
+  assert.equal(activeGenerationAttempt(thread), undefined);
+});
+
+test("option overrides retain only fields that differ from live defaults", () => {
+  assert.deepEqual(
+    optionOverridesFromDefaults({ quality: "standard", n: 1, seed: 7 }, { quality: "standard", n: 3, seed: 7 }),
+    { n: 3 },
+  );
+});
+
+test("canceled attempts are terminal and persisted history is bounded", () => {
+  withLocalStorage((writes) => {
+    const session = createSession("Bounded history");
+    const thread = session.threads.image[0];
+    const now = new Date().toISOString();
+    thread.attempts = Array.from({ length: 130 }, (_, index) => ({
+      id: `attempt-${index}`,
+      status: index === 129 ? "canceled" as const : "completed" as const,
+      backend: "openrouter" as const,
+      draftRevision: 0,
+      requestedBy: "human" as const,
+      createdAt: now,
+      updatedAt: now,
+      inputAssetIds: [],
+      assetIds: [],
+    }));
+    assert.equal(activeGenerationAttempt(thread), undefined);
+    saveStudioState({ schemaVersion: 3, activeSessionId: session.id, promptModel: "openai/gpt-5.6-luna", sessions: [session] });
+    const persisted = JSON.parse(writes.get("fruit-truck.studio.v1") ?? "{}") as StudioState;
+    assert.equal(persisted.sessions[0].threads.image[0].attempts.length, 100);
+  });
+});
+
+test("schema 1 sessions migrate their drafts and active video job into visible threads", () => {
+  withLocalStorage((writes) => {
+    const base = createSession("Legacy production");
+    const imageDraft = emptyDraft();
+    const videoDraft = emptyDraft();
+    imageDraft.prompt = "A red truck at dusk";
+    videoDraft.prompt = "The truck crosses frame";
+    const legacy = {
+      ...base,
+      drafts: { image: imageDraft, videoGenerate: videoDraft, videoEdit: emptyDraft() },
+      selectedModelIds: { image: "legacy/image", video: "legacy/video" },
+      activeVideoJobs: [{
+      kind: "video",
+      jobId: "job-legacy",
+      status: "in_progress" as const,
+      workflow: "generate" as const,
+      model: "legacy/video",
+      submittedAt: new Date().toISOString(),
+      request: { model: "legacy/video" },
+      }],
+    };
+    const serialized = {
+      schemaVersion: 1,
+      activeSessionId: legacy.id,
+      promptModel: "openai/gpt-5.6-luna",
+      sessions: [{ ...legacy, generationDefaults: undefined, threads: undefined, activeThreadIds: undefined }],
+    };
+    writes.set("fruit-truck.studio.v1", JSON.stringify(serialized));
+
+    const migrated = loadStudioState().sessions[0];
+    assert.equal(migrated.threads.image[0].draft.prompt, "A red truck at dusk");
+    assert.equal(migrated.generationDefaults.modelIds.image, "legacy/image");
+    assert.equal(migrated.threads.video.some((thread) => thread.attempts.some((attempt) => attempt.jobId === "job-legacy")), true);
+    assert.equal("drafts" in migrated, false);
+    assert.equal("activeVideoJobs" in migrated, false);
+  });
+});
+
+test("schema 2 migrates session video jobs even when generation threads already exist", () => {
+  withLocalStorage((writes) => {
+    const session = createSession("Schema two");
+    const videoThread = session.threads.video[0];
+    const submittedAt = new Date().toISOString();
+    const legacy = {
+      ...session,
+      activeVideoJobs: [{
+        kind: "video" as const,
+        jobId: "job-schema-two",
+        status: "in_progress" as const,
+        threadId: videoThread.id,
+        attemptId: "attempt-schema-two",
+        workflow: "generate" as const,
+        model: "legacy/video",
+        submittedAt,
+        request: { model: "legacy/video" },
+      }],
+    };
+    writes.set("fruit-truck.studio.v1", JSON.stringify({ schemaVersion: 2, activeSessionId: session.id, promptModel: "openai/gpt-5.6-luna", sessions: [legacy] }));
+    const migrated = loadStudioState().sessions[0];
+    assert.equal(migrated.threads.video[0].attempts.find((attempt) => attempt.jobId === "job-schema-two")?.id, "attempt-schema-two");
+    assert.equal("activeVideoJobs" in migrated, false);
+  });
 });

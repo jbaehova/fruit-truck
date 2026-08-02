@@ -8,6 +8,9 @@ export type RequirementStatus = "confirmed" | "assumed" | "missing";
 export type DecisionStatus = "pending" | "resolved";
 export type PlanStepStatus = "pending" | "in_progress" | "waiting" | "completed" | "failed" | "skipped";
 export type ArtifactApproval = "unreviewed" | "approved" | "rejected";
+export type DecisionChannel = "agent_chat" | "fruit_truck_ui";
+export type DecisionPresentation = "form" | "media_grid" | "model_picker" | "upload" | "assembly_review";
+export type DecisionSelectionMode = "none" | "single" | "multiple" | "one_per_group";
 export type AgentDecisionSemanticKey =
   | "deliverable_usage"
   | "visual_approach"
@@ -60,6 +63,8 @@ export type AgentDecisionOption = {
   inputStructure?: string;
   price?: string;
   constraints?: string;
+  assetId?: string;
+  groupId?: string;
 };
 
 export type AgentDecision = {
@@ -69,9 +74,16 @@ export type AgentDecision = {
   title: string;
   prompt: string;
   kind: "approval" | "choice" | "upload" | "feedback";
+  channel?: DecisionChannel;
+  presentation?: DecisionPresentation;
+  selectionMode?: DecisionSelectionMode;
+  minSelections?: number;
+  maxSelections?: number;
+  allowNote?: boolean;
   status: DecisionStatus;
   blocking: boolean;
   relatedStepId?: string;
+  relatedThreadIds?: string[];
   relatedAssetIds: string[];
   customSkillAction?: {
     name: string;
@@ -81,9 +93,11 @@ export type AgentDecision = {
   options: AgentDecisionOption[];
   resolution?: {
     optionId?: string;
+    selectedOptionIds?: string[];
+    selectedAssetIds?: string[];
     note?: string;
     userResponse?: string;
-    channel?: "agent_chat" | "legacy_desktop";
+    channel?: DecisionChannel | "legacy_desktop";
     resolvedAt: string;
   };
   createdAt: string;
@@ -107,6 +121,8 @@ export type ArtifactNode = {
   role: string;
   parentAssetIds: string[];
   planStepId?: string;
+  threadId?: string;
+  attemptId?: string;
   prompt?: string;
   modelId?: string;
   generationBackend?: ImageGenerationBackend;
@@ -149,7 +165,7 @@ export type CustomSkillDraft = {
 };
 
 export type AgentSessionState = {
-  schemaVersion: 1;
+  schemaVersion: 1 | 2 | 3;
   connection: {
     status: "disconnected" | "waiting" | "claimed";
     claimedAt?: string;
@@ -168,21 +184,24 @@ export type AgentSessionState = {
   imageGeneration: {
     status: "unselected" | "selected";
     backend?: ImageGenerationBackend;
-    selectedBy?: "user_chat" | "policy";
+    selectedBy?: "user_chat" | "user_ui" | "policy";
     selectedAt?: string;
     decisionId?: string;
   };
   modelSelections: Record<GenerationMode, ModelSelection>;
   currentStepId?: string;
+  currentStepIds: string[];
+  uiAttention?: {
+    requestedAt: string;
+    decisionId?: string;
+  };
   pausedReason?: string;
   assembly: VideoAssembly;
   customSkill?: CustomSkillDraft;
   execution: {
     currentJobIds: string[];
     generationCount: number;
-    generationLimit?: number;
     spentUsd: number;
-    budgetUsd?: number;
     retryCount: number;
     lastError?: string;
   };
@@ -195,7 +214,7 @@ const uid = (prefix: string) => `${prefix}-${crypto.randomUUID()}`;
 
 export function createAgentState(intent = ""): AgentSessionState {
   return {
-    schemaVersion: 1,
+    schemaVersion: 3,
     connection: { status: "disconnected" },
     controlMode: "human",
     runStatus: "idle",
@@ -215,12 +234,13 @@ export function createAgentState(intent = ""): AgentSessionState {
     decisions: [],
     activity: [],
     artifacts: [],
-    appliedSkills: [{ name: "fruit-truck-agent", version: "1.0.0", source: "core" }],
+    appliedSkills: [{ name: "fruit-truck-agent", version: "2.0.0", source: "core" }],
     imageGeneration: { status: "unselected" },
     modelSelections: {
       image: { status: "unselected" },
       video: { status: "unselected" },
     },
+    currentStepIds: [],
     assembly: { clips: [], status: "draft" },
     execution: {
       currentJobIds: [],
@@ -254,6 +274,15 @@ export function normalizeAgentState(value: AgentSessionState): AgentSessionState
     modelSelections: { ...fallback.modelSelections, ...value.modelSelections },
     decisions: (value.decisions ?? []).map((item) => ({
       ...item,
+      channel: item.channel ?? (item.resolution?.channel === "legacy_desktop" ? "fruit_truck_ui" : "agent_chat"),
+      presentation: item.presentation ?? (
+        item.kind === "upload" ? "upload"
+          : item.relatedAssetIds.length ? "media_grid"
+            : item.semanticKey?.startsWith("model_selection") ? "model_picker"
+              : "form"
+      ),
+      selectionMode: item.selectionMode ?? (item.kind === "approval" ? "none" : "single"),
+      allowNote: item.allowNote ?? item.kind === "feedback",
       semanticKey: item.semanticKey ?? legacyDecisionSemanticKey(item.title),
       resolution: item.resolution ? {
         channel: "legacy_desktop",
@@ -261,7 +290,17 @@ export function normalizeAgentState(value: AgentSessionState): AgentSessionState
       } : undefined,
     })),
     assembly: { ...fallback.assembly, ...value.assembly, clips: value.assembly?.clips ?? [] },
-    execution: { ...fallback.execution, ...value.execution },
+    execution: {
+      currentJobIds: value.execution?.currentJobIds ?? [],
+      generationCount: value.execution?.generationCount ?? 0,
+      spentUsd: value.execution?.spentUsd ?? 0,
+      retryCount: value.execution?.retryCount ?? 0,
+      lastError: value.execution?.lastError,
+    },
+    currentStepIds: Array.isArray(value.currentStepIds)
+      ? value.currentStepIds
+      : value.currentStepId ? [value.currentStepId] : [],
+    schemaVersion: 3,
   };
 }
 
@@ -279,15 +318,19 @@ function legacyDecisionSemanticKey(title: string): AgentDecisionSemanticKey | un
   }
 }
 
+type DecisionResolutionContext = {
+  userResponse?: string;
+  channel?: DecisionChannel | "legacy_desktop";
+  selectedOptionIds?: string[];
+  selectedAssetIds?: string[];
+};
+
 export function resolveAgentDecision(
   state: AgentSessionState,
   decisionId: string,
   optionId?: string,
   note?: string,
-  resolutionContext?: {
-    userResponse?: string;
-    channel?: "agent_chat" | "legacy_desktop";
-  },
+  resolutionContext?: DecisionResolutionContext,
 ): AgentSessionState {
   const target = state.decisions.find((item) => item.id === decisionId);
   if (!target || target.status !== "pending") return state;
@@ -307,6 +350,8 @@ export function resolveAgentDecision(
         status: "resolved" as const,
         resolution: {
           optionId,
+          selectedOptionIds: resolutionContext?.selectedOptionIds ?? (optionId ? [optionId] : []),
+          selectedAssetIds: resolutionContext?.selectedAssetIds ?? [],
           note,
           userResponse: resolutionContext?.userResponse,
           channel: resolutionContext?.channel ?? "legacy_desktop",
@@ -316,7 +361,10 @@ export function resolveAgentDecision(
       : item,
   );
   const pendingBlocking = decisions.some((item) => item.status === "pending" && item.blocking);
-  const approval = target.kind === "approval" && target.relatedAssetIds.length
+  const approvalAssetIds = resolutionContext?.selectedAssetIds?.length
+    ? resolutionContext.selectedAssetIds
+    : target.relatedAssetIds;
+  const approval = target.kind === "approval" && approvalAssetIds.length
     ? optionId === "approve" ? "approved" as const : optionId === "revise" || optionId === "reject" ? "rejected" as const : undefined
     : undefined;
   const finalApproval = target.semanticKey === "final_approval" && optionId === "approve";
@@ -367,7 +415,7 @@ export function resolveAgentDecision(
       ? { ...state.customSkill, status: customSkillStatus }
       : state.customSkill,
     artifacts: approval
-      ? state.artifacts.map((item) => target.relatedAssetIds.includes(item.assetId) ? { ...item, approval } : item)
+      ? state.artifacts.map((item) => approvalAssetIds.includes(item.assetId) ? { ...item, approval } : item)
       : state.artifacts,
     runStatus: completed
       ? "completed"
@@ -392,10 +440,7 @@ export function resolveAgentDecisionWithModelSelection(
   decisionId: string,
   optionId?: string,
   note?: string,
-  resolutionContext?: {
-    userResponse?: string;
-    channel?: "agent_chat" | "legacy_desktop";
-  },
+  resolutionContext?: DecisionResolutionContext,
 ): AgentSessionState {
   const target = state.decisions.find((item) => item.id === decisionId);
   const resolved = resolveAgentDecision(state, decisionId, optionId, note, resolutionContext);
@@ -413,13 +458,16 @@ export function resolveAgentDecisionWithModelSelection(
       imageGeneration: {
         status: "selected",
         backend,
-        selectedBy: resolutionContext?.channel === "agent_chat" ? "user_chat" : "policy",
+        selectedBy: resolutionContext?.channel === "agent_chat"
+          ? "user_chat"
+          : resolutionContext?.channel === "fruit_truck_ui" ? "user_ui" : "policy",
         selectedAt: resolved.updatedAt,
         decisionId,
       },
     };
   }
   if (!mode) return resolved;
+  if ((target?.relatedThreadIds ?? []).length) return resolved;
   return {
     ...resolved,
     modelSelections: {
@@ -432,6 +480,58 @@ export function resolveAgentDecisionWithModelSelection(
       },
     },
   };
+}
+
+export function resolveAgentDecisionFromDesktop(
+  state: AgentSessionState,
+  decisionId: string,
+  selectedOptionIds: string[] = [],
+  selectedAssetIds: string[] = [],
+  note?: string,
+): AgentSessionState {
+  const target = state.decisions.find((item) => item.id === decisionId);
+  if (!target) throw new Error(`Decision ${decisionId} does not exist.`);
+  if (target.status !== "pending") throw new Error(`Decision ${decisionId} is already resolved.`);
+  if ((target.channel ?? "agent_chat") !== "fruit_truck_ui") {
+    throw new Error("This decision must be answered in the agent chat.");
+  }
+  const allowedOptions = new Set(target.options.map((item) => item.id));
+  const invalidOption = selectedOptionIds.find((id) => !allowedOptions.has(id));
+  if (invalidOption) throw new Error(`Option ${invalidOption} is not valid for decision ${decisionId}.`);
+  const allowedAssets = new Set(target.kind === "upload"
+    ? state.artifacts.map((item) => item.assetId)
+    : [
+    ...target.relatedAssetIds,
+    ...target.options.flatMap((item) => item.assetId ? [item.assetId] : []),
+  ]);
+  const invalidAsset = selectedAssetIds.find((id) => !allowedAssets.has(id));
+  if (invalidAsset) throw new Error(`Asset ${invalidAsset} is not valid for decision ${decisionId}.`);
+  const count = selectedAssetIds.length || selectedOptionIds.length;
+  if (target.minSelections != null && count < target.minSelections) {
+    throw new Error(`Choose at least ${target.minSelections} item(s).`);
+  }
+  if (target.maxSelections != null && count > target.maxSelections) {
+    throw new Error(`Choose no more than ${target.maxSelections} item(s).`);
+  }
+  if (target.selectionMode === "one_per_group") {
+    const selected = target.options.filter((item) => selectedOptionIds.includes(item.id) || Boolean(item.assetId && selectedAssetIds.includes(item.assetId)));
+    const expectedGroups = new Set(target.options.flatMap((item) => item.groupId ? [item.groupId] : []));
+    const selectedGroups = new Set(selected.flatMap((item) => item.groupId ? [item.groupId] : []));
+    if (selectedGroups.size !== expectedGroups.size) throw new Error("Choose one item from every group.");
+  }
+  const optionId = selectedOptionIds[0];
+  return resolveAgentDecisionWithModelSelection(
+    state,
+    decisionId,
+    optionId,
+    note,
+    {
+      userResponse: [selectedOptionIds.join(", "), selectedAssetIds.join(", "), note].filter(Boolean).join(" · ") || "Confirmed in Fruit Truck",
+      channel: "fruit_truck_ui",
+      selectedOptionIds,
+      selectedAssetIds,
+    },
+  );
 }
 
 export function resolveAgentDecisionFromChat(
@@ -447,6 +547,7 @@ export function resolveAgentDecisionFromChat(
   const target = state.decisions.find((item) => item.id === decisionId);
   if (!target) throw new Error(`Decision ${decisionId} does not exist.`);
   if (target.status !== "pending") throw new Error(`Decision ${decisionId} is already resolved.`);
+  if (target.channel === "fruit_truck_ui") throw new Error("This decision must be completed in Fruit Truck.");
   if (
     target.semanticKey === "final_approval"
     && optionId === "approve"
@@ -565,10 +666,11 @@ export function validateAgentState(state: AgentSessionState): string[] {
   };
   if (state.plan.some((step) => hasCycle(step.id))) errors.push("Plan dependencies must not contain a cycle.");
   const activeSteps = state.plan.filter((step) => step.status === "in_progress" || step.status === "waiting");
-  if (activeSteps.length > 1) errors.push("Only one plan step may be in progress or waiting.");
   if (state.currentStepId && !planIds.has(state.currentStepId)) errors.push("The current plan step does not exist.");
-  if (activeSteps.length === 1 && state.currentStepId !== activeSteps[0].id) {
-    errors.push("The current plan step must match the active plan step.");
+  if (state.currentStepIds.some((id) => !planIds.has(id))) errors.push("An active plan step does not exist.");
+  const activeIds = new Set(activeSteps.map((step) => step.id));
+  if (state.currentStepIds.some((id) => !activeIds.has(id)) || activeSteps.some((step) => !state.currentStepIds.includes(step.id))) {
+    errors.push("Active plan step IDs must match in-progress and waiting steps.");
   }
   const stepById = new Map(state.plan.map((step) => [step.id, step]));
   for (const step of state.plan) {
@@ -583,6 +685,7 @@ export function validateAgentState(state: AgentSessionState): string[] {
   for (const decision of state.decisions) {
     if (decision.relatedStepId && !planIds.has(decision.relatedStepId)) errors.push(`Decision ${decision.id} points to an unknown step.`);
     if (decision.relatedAssetIds.some((id) => !artifactIds.has(id))) errors.push(`Decision ${decision.id} points to an unknown asset.`);
+    if (decision.options.some((option) => option.assetId && !artifactIds.has(option.assetId))) errors.push(`Decision ${decision.id} has an option for an unknown asset.`);
     if (decision.status === "resolved" && !decision.resolution) errors.push(`Decision ${decision.id} is resolved without a resolution record.`);
     if (decision.customSkillAction && (
       !decision.customSkillAction.name.trim()
@@ -607,12 +710,6 @@ export function validateAgentState(state: AgentSessionState): string[] {
   if (state.execution) {
     if (state.execution.generationCount < 0 || state.execution.retryCount < 0 || state.execution.spentUsd < 0) {
       errors.push("Execution counters and cost must be non-negative.");
-    }
-    if (state.execution.generationLimit != null && state.execution.generationLimit < state.execution.generationCount) {
-      errors.push("The generation count exceeds the configured session limit.");
-    }
-    if (state.execution.budgetUsd != null && state.execution.spentUsd > state.execution.budgetUsd + Number.EPSILON) {
-      errors.push("The recorded session cost exceeds the configured budget.");
     }
   }
   return errors;
@@ -653,18 +750,14 @@ export function validatePlanStepTransition(
     const incomplete = step.dependsOn.find((id) => !["completed", "skipped"].includes(stepById.get(id)?.status ?? ""));
     if (incomplete) return `Plan step ${stepId} cannot run before dependency ${incomplete} is complete.`;
   }
-  if ((status === "in_progress" || status === "waiting")
-    && state.plan.some((item) => item.id !== stepId && (item.status === "in_progress" || item.status === "waiting"))) {
-    return "Only one plan step may be in progress or waiting.";
-  }
   return null;
 }
 
 function canExtractCustomSkill(state: AgentSessionState): boolean {
-  const reachedVideo = state.plan.some((step) =>
-    (step.id === "production" || step.id === "assembly") && ["in_progress", "waiting", "completed"].includes(step.status),
-  );
-  return reachedVideo && state.brief.deliverable.toLocaleLowerCase().includes("video");
+  const hasVideoWork = state.assembly.clips.length > 0
+    || state.assembly.outputAssetId != null
+    || state.activity.some((item) => item.kind === "assembly");
+  return hasVideoWork && state.brief.deliverable.toLocaleLowerCase().includes("video");
 }
 
 export function createCustomSkillDraft(state: AgentSessionState, name: string): CustomSkillDraft {
@@ -689,7 +782,7 @@ export function createCustomSkillDraft(state: AgentSessionState, name: string): 
     ...state.brief.mustAvoid.map((item) => `- Avoid: ${item}`),
     "",
     "## Decision preferences",
-    ...(userDecisions.length ? userDecisions : ["- Ask before major visual, keyframe, video-stage, and final-result checkpoints."]),
+    ...(userDecisions.length ? userDecisions : ["- Ask before major visual, generated-media, and final-result checkpoints."]),
     "",
     "## Quality checks",
     "- Evaluate technical defects, aesthetic finish, requirement coverage, and identity consistency separately.",

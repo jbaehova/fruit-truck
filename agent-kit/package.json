@@ -1,6 +1,6 @@
 {
   "name": "@fruit-truck/agent-kit",
-  "version": "1.0.0",
+  "version": "2.1.0",
   "description": "Standalone MCP server and Agent Skills for Fruit Truck",
   "type": "module",
   "bin": {

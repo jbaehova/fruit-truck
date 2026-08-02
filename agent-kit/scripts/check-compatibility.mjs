@@ -26,7 +26,7 @@ if (compare(desktopManifest.version, compatibility.desktop.minimum) < 0
   || compare(desktopManifest.version, compatibility.desktop.maximumExclusive) >= 0) {
   throw new Error(`Desktop ${desktopManifest.version} is outside the supported Agent Kit range.`);
 }
-if (compatibility.desktop.bridgeSchemaVersion !== 1) {
-  throw new Error("This Agent Kit build supports only bridge schema version 1.");
+if (compatibility.desktop.bridgeSchemaVersion !== 3) {
+  throw new Error("This Agent Kit build supports only bridge schema version 3.");
 }
 process.stdout.write(`Agent Kit ${packageManifest.version} is compatible with desktop ${desktopManifest.version}.\n`);

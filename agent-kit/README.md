@@ -1,6 +1,6 @@
 # Fruit Truck Agent Kit
 
-This package contains the standalone `fruit-truck-mcp` stdio server plus the `fruit-truck-agent` Core Skill and `story-driven-short-form` Workflow Skill. It requires Node.js 24 or newer and Fruit Truck desktop `>=0.4.0 <0.5.0`.
+This package contains the standalone `fruit-truck-mcp` stdio server plus the `fruit-truck-agent` Core Skill and `story-driven-short-form` Workflow Skill. It requires Node.js 24 or newer and Fruit Truck desktop `>=0.6.0 <0.7.0`.
 
 ## Install
 
@@ -33,4 +33,4 @@ Restart Codex if a newly created top-level skill directory is not detected. Clau
 
 Rebuild and reinstall from the updated checkout, then run `fruit-truck-agent-kit install <codex|claude|hermes> --force`.
 
-The package refuses its own release build when its version and desktop compatibility manifest disagree. `create_session` publishes connection-waiting state; use `claim_session`, queue decisions, ask in the current agent chat, and call `resolve_decision` with the explicit reply. Run `fruit-truck-mcp --agent-host <codex|claude|hermes>` directly to verify stdio initialization.
+The package refuses its own release build when its version and desktop compatibility manifest disagree. Start with `create_session`, call `ensure_desktop` for background-safe presence, and then `claim_session`. Resolve prose decisions in agent chat; await media/model/upload/assembly decisions from Fruit Truck. Run `fruit-truck-mcp --agent-host <codex|claude|hermes>` directly to verify stdio initialization.

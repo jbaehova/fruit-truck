@@ -15,11 +15,14 @@ use tauri_plugin_shell::{
 const API_BASE: &str = "https://openrouter.ai/api/v1";
 const CREDENTIALS_FILE: &str = "credentials.json";
 const AGENT_SESSIONS_FILE: &str = "agent-sessions.json";
+const AGENT_SESSIONS_DIRECTORY: &str = "agent-sessions";
+const DESKTOP_RUNTIME_FILE: &str = "desktop-runtime.json";
 const AGENT_SESSIONS_LOCK: &str = ".agent-sessions.lock";
 const MAX_ERROR_BYTES: usize = 2_000;
 const MAX_IMAGE_BYTES: u64 = 30 * 1024 * 1024;
 const MAX_VIDEO_BYTES: u64 = 700 * 1024 * 1024;
 const MAX_OPENROUTER_JSON_BYTES: u64 = 48 * 1024 * 1024;
+const MAX_AGENT_SESSION_BYTES: u64 = 50 * 1024 * 1024;
 const LOCAL_MEDIA_MARKER: &str = "fruit-truck-local:";
 static MEDIA_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -117,6 +120,14 @@ fn credentials_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 
 fn agent_sessions_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
   Ok(credentials_directory(app)?.join(AGENT_SESSIONS_FILE))
+}
+
+fn agent_sessions_directory(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+  Ok(credentials_directory(app)?.join(AGENT_SESSIONS_DIRECTORY))
+}
+
+fn desktop_runtime_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+  Ok(credentials_directory(app)?.join(DESKTOP_RUNTIME_FILE))
 }
 
 fn generated_directory(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -475,7 +486,6 @@ fn delete_managed_asset(app: tauri::AppHandle, path: String) -> Result<(), Strin
   std::fs::remove_file(canonical).map_err(|error| error.to_string())
 }
 
-
 #[tauri::command]
 fn export_managed_asset(app: tauri::AppHandle, path: String, name: String) -> Result<String, String> {
   let source = validate_managed_media_path(&app, Path::new(&path))?;
@@ -485,7 +495,6 @@ fn export_managed_asset(app: tauri::AppHandle, path: String, name: String) -> Re
   std::fs::copy(source, &destination).map_err(|error| error.to_string())?;
   Ok(destination.to_string_lossy().into_owned())
 }
-
 
 fn image_data_url_from_file(path: &Path) -> Result<String, String> {
   let metadata = std::fs::metadata(path).map_err(|error| error.to_string())?;
@@ -503,7 +512,6 @@ fn image_data_url_from_file(path: &Path) -> Result<String, String> {
     base64::engine::general_purpose::STANDARD.encode(bytes),
   ))
 }
-
 
 #[tauri::command]
 fn read_managed_image_data_url(app: tauri::AppHandle, path: String) -> Result<String, String> {
@@ -636,19 +644,73 @@ fn remove_api_key(app: tauri::AppHandle) -> Result<CredentialStatus, String> {
 fn read_agent_sessions_file(app: &tauri::AppHandle) -> Result<Value, String> {
   let path = agent_sessions_path(app)?;
   if !path.exists() {
-    return Ok(serde_json::json!({ "schemaVersion": 1, "revision": 0, "sessions": [] }));
+    return Ok(serde_json::json!({ "schemaVersion": 3, "revision": 0, "sessions": [] }));
   }
   let metadata = std::fs::metadata(&path).map_err(|error| error.to_string())?;
-  if metadata.len() > 10 * 1024 * 1024 {
-    return Err("The agent session bridge file exceeds 10 MB.".into());
+  if metadata.len() > 50 * 1024 * 1024 {
+    return Err("The agent session bridge index exceeds the 50 MB recovery limit.".into());
   }
   let raw = std::fs::read(&path).map_err(|error| error.to_string())?;
   let value: Value = serde_json::from_slice(&raw).map_err(|_| "The agent session bridge file is invalid JSON.")?;
-  if value.get("schemaVersion").and_then(Value::as_u64) != Some(1)
-    || !value.get("sessions").is_some_and(Value::is_array)
-  {
+  if !matches!(value.get("schemaVersion").and_then(Value::as_u64), Some(1) | Some(2) | Some(3)) {
     return Err("The agent session bridge file has an unsupported schema.".into());
   }
+  if value.get("sessions").is_some_and(Value::is_array) {
+    let mut value = value;
+    value["schemaVersion"] = Value::from(3);
+    return Ok(value);
+  }
+  let files = value.get("sessionFiles").and_then(Value::as_array).ok_or("The agent session bridge index has no session files.")?;
+  let root = agent_sessions_directory(app)?;
+  let mut sessions = Vec::with_capacity(files.len());
+  for entry in files {
+    let id = entry.get("id").and_then(Value::as_str).ok_or("Agent session index entry has no ID.")?;
+    let file = entry.get("file").and_then(Value::as_str).ok_or("Agent session index entry has no file.")?;
+    if id.is_empty() || id.len() > 128 || !id.chars().all(|value| value.is_ascii_alphanumeric() || value == '-' || value == '_')
+      || !file.ends_with(".json") || !file.chars().all(|value| value.is_ascii_alphanumeric() || matches!(value, '-' | '_' | '.'))
+    {
+      return Err("Agent session index contains an invalid file reference.".into());
+    }
+    let session_path = root.join(file);
+    let metadata = std::fs::metadata(&session_path).map_err(|error| format!("Agent session {id} is missing: {error}"))?;
+    if metadata.len() > MAX_AGENT_SESSION_BYTES {
+      return Err(format!("Agent session {id} exceeds the 50 MB per-session limit."));
+    }
+    let session: Value = serde_json::from_slice(&std::fs::read(session_path).map_err(|error| error.to_string())?)
+      .map_err(|_| format!("Agent session {id} contains invalid JSON."))?;
+    if session.get("id").and_then(Value::as_str) != Some(id) {
+      return Err(format!("Agent session file {file} does not match index ID {id}."));
+    }
+    sessions.push(session);
+  }
+  Ok(serde_json::json!({
+    "schemaVersion": 3,
+    "revision": value.get("revision").and_then(Value::as_u64).unwrap_or(0),
+    "sessions": sessions,
+  }))
+}
+
+#[tauri::command]
+fn report_desktop_runtime(app: tauri::AppHandle, active_session_id: Option<String>) -> Result<Value, String> {
+  let directory = credentials_directory(&app)?;
+  secure_directory(&directory)?;
+  let path = desktop_runtime_path(&app)?;
+  let temporary = directory.join(format!(".desktop-runtime-{}.tmp", std::process::id()));
+  let heartbeat_at_ms = std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .map_err(|error| error.to_string())?
+    .as_millis() as u64;
+  let value = serde_json::json!({
+    "schemaVersion": 1,
+    "pid": std::process::id(),
+    "version": app.package_info().version.to_string(),
+    "heartbeatAtMs": heartbeat_at_ms,
+    "activeSessionId": active_session_id,
+  });
+  std::fs::write(&temporary, serde_json::to_vec(&value).map_err(|error| error.to_string())?)
+    .map_err(|error| error.to_string())?;
+  set_private_file_permissions(&temporary)?;
+  std::fs::rename(&temporary, &path).map_err(|error| error.to_string())?;
   Ok(value)
 }
 
@@ -656,25 +718,55 @@ fn write_agent_sessions_file(app: &tauri::AppHandle, value: &Value) -> Result<()
   let directory = credentials_directory(app)?;
   secure_directory(&directory)?;
   let path = agent_sessions_path(app)?;
-  let temporary = directory.join(format!(".agent-sessions-{}.tmp", std::process::id()));
-  let bytes = serde_json::to_vec_pretty(value).map_err(|error| error.to_string())?;
-  if bytes.len() > 10 * 1024 * 1024 {
-    return Err("The agent session bridge file exceeds 10 MB.".into());
+  let session_root = agent_sessions_directory(app)?;
+  secure_directory(&session_root)?;
+  let sessions = value.get("sessions").and_then(Value::as_array).ok_or("Agent session list is invalid.")?;
+  let revision = value.get("revision").and_then(Value::as_u64).unwrap_or(0);
+  let mut session_files = Vec::with_capacity(sessions.len());
+  let mut retained = std::collections::HashSet::new();
+  for session in sessions {
+    let id = session.get("id").and_then(Value::as_str).ok_or("Agent session ID is required.")?;
+    if id.is_empty() || id.len() > 128 || !id.chars().all(|value| value.is_ascii_alphanumeric() || value == '-' || value == '_') {
+      return Err("Agent session ID is invalid.".into());
+    }
+    let file = format!("{id}-{revision}.json");
+    let session_path = session_root.join(&file);
+    let temporary = session_root.join(format!(".{file}-{}.tmp", std::process::id()));
+    let bytes = serde_json::to_vec_pretty(session).map_err(|error| error.to_string())?;
+    if bytes.len() as u64 > MAX_AGENT_SESSION_BYTES {
+      return Err(format!("Agent session {id} exceeds the 50 MB per-session limit."));
+    }
+    if contains_embedded_media(&bytes) {
+      return Err("Agent session metadata cannot contain Base64 or data URL media.".into());
+    }
+    std::fs::write(&temporary, bytes).map_err(|error| error.to_string())?;
+    set_private_file_permissions(&temporary)?;
+    std::fs::rename(&temporary, &session_path).map_err(|error| error.to_string())?;
+    retained.insert(file.clone());
+    session_files.push(serde_json::json!({ "id": id, "file": file }));
   }
-  if bytes.windows(b"data:image/".len()).any(|window| window.eq_ignore_ascii_case(b"data:image/"))
+  let index = serde_json::json!({ "schemaVersion": 3, "revision": revision, "sessionFiles": session_files });
+  let bytes = serde_json::to_vec_pretty(&index).map_err(|error| error.to_string())?;
+  if bytes.len() > 10 * 1024 * 1024 { return Err("The agent session index exceeds 10 MB.".into()); }
+  let temporary = directory.join(format!(".agent-sessions-{}.tmp", std::process::id()));
+  std::fs::write(&temporary, bytes).map_err(|error| error.to_string())?;
+  set_private_file_permissions(&temporary)?;
+  std::fs::rename(&temporary, &path).map_err(|error| error.to_string())?;
+  if let Ok(entries) = std::fs::read_dir(&session_root) {
+    for entry in entries.flatten() {
+      let file = entry.file_name().to_string_lossy().into_owned();
+      if file.ends_with(".json") && !retained.contains(&file) {
+        let _ = std::fs::remove_file(entry.path());
+      }
+    }
+  }
+  Ok(())
+}
+
+fn contains_embedded_media(bytes: &[u8]) -> bool {
+  bytes.windows(b"data:image/".len()).any(|window| window.eq_ignore_ascii_case(b"data:image/"))
     || bytes.windows(b"data:video/".len()).any(|window| window.eq_ignore_ascii_case(b"data:video/"))
     || bytes.windows(b";base64,".len()).any(|window| window.eq_ignore_ascii_case(b";base64,"))
-  {
-    return Err("Agent session metadata cannot contain Base64 or data URL media.".into());
-  }
-  std::fs::write(&temporary, bytes).map_err(|error| error.to_string())?;
-  #[cfg(unix)]
-  {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o600))
-      .map_err(|error| error.to_string())?;
-  }
-  std::fs::rename(&temporary, &path).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -817,17 +909,6 @@ fn validate_custom_skill_text(markdown: &str) -> Result<(), String> {
     return Err("Custom Skill text contains a local path or secret-like value.".into());
   }
   Ok(())
-}
-
-#[tauri::command]
-fn save_custom_skill_text(
-  app: tauri::AppHandle,
-  name: String,
-  markdown: String,
-) -> Result<SavedCustomSkill, String> {
-  let skills_root = credentials_directory(&app)?.join("skills");
-  secure_directory(&skills_root)?;
-  save_custom_skill_to_root(&skills_root, &name, &markdown)
 }
 
 fn save_custom_skill_to_root(
@@ -1276,7 +1357,7 @@ fn openrouter_retry_delay(retry_after: Option<&str>, retry: u32) -> std::time::D
   std::time::Duration::from_millis(milliseconds.min(30_000))
 }
 
-fn is_blocked_ip_addressfn is_blocked_ip_address(address: std::net::IpAddr) -> bool {
+fn is_blocked_ip_address(address: std::net::IpAddr) -> bool {
   match address {
     std::net::IpAddr::V4(value) => {
       value.is_private()
@@ -1698,7 +1779,7 @@ pub fn run() {
       read_agent_sessions,
       wait_for_agent_sessions,
       upsert_agent_session,
-      save_custom_skill_text,
+      report_desktop_runtime,
       list_custom_skills,
       read_custom_skill,
       import_custom_skill_text,
@@ -1728,6 +1809,7 @@ mod tests {
     finish_shared_asset_to_root,
     openrouter_url,
     openrouter_retry_delay,
+    contains_embedded_media,
     validate_remote_image_url,
     write_assembly_source,
   };
@@ -1746,8 +1828,6 @@ mod tests {
   }
 
   #[test]
-
-  #[test]
   fn openrouter_retries_honor_seconds_and_bound_backoff() {
     assert_eq!(openrouter_retry_delay(Some("2"), 0), std::time::Duration::from_secs(2));
     assert_eq!(openrouter_retry_delay(None, 0), std::time::Duration::from_millis(500));
@@ -1755,6 +1835,14 @@ mod tests {
     assert_eq!(openrouter_retry_delay(Some("999"), 0), std::time::Duration::from_secs(30));
   }
 
+  #[test]
+  fn agent_session_snapshots_reject_embedded_media() {
+    assert!(contains_embedded_media(br#"{"request":"data:image/png;base64,AAAA"}"#));
+    assert!(contains_embedded_media(br#"{"payload":";base64,AAAA"}"#));
+    assert!(!contains_embedded_media(br#"{"assetId":"asset-1","localPath":"/managed/reference.png"}"#));
+  }
+
+  #[test]
   fn api_keys_are_masked() {
     assert_eq!(mask_key("sk-or-v1-1234567890"), "sk-or-v…7890");
     assert_eq!(mask_key("가나다라마바사아자차카타"), "가나다라마바사…자차카타");
@@ -1810,7 +1898,6 @@ mod tests {
     assert!(filter.contains("[v0][v1]concat=n=2:v=1:a=0[outv]"));
     assert_eq!(filter.matches("concat=").count(), 1);
   }
-
 
   #[test]
   fn custom_skill_approval_writes_and_versions_skill_markdown() {
@@ -1925,7 +2012,7 @@ mod tests {
     assert!(import_media_file(&disguised, &root.join("assets")).is_err());
     let _ = std::fs::remove_dir_all(root);
   }
-}
+
   #[test]
   fn managed_image_bytes_are_exposed_as_a_canvas_safe_data_url() {
     let root = std::env::temp_dir().join(format!(

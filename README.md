@@ -48,7 +48,7 @@ Generation models rarely agree on inputs. One supports seed and aspect ratio; an
 - **Request inspector** — shows sanitized request JSON without embedding media bodies.
 - **Advanced routing** — accepts optional provider routing and passthrough settings as JSON.
 - **Job continuity** — remembers an active video job and resumes polling after a restart.
-- **Chat-owned Agent decisions** — local agents ask every creative choice, model selection, and approval in their own chat while the desktop stays focused on media and status.
+- **Agent-first, visual decisions** — start in Codex, Claude Code, or Hermes; Fruit Truck stays in the background until you open rich media, model, upload, assembly, or approval checkpoints.
 - **Codex-native images** — Codex sessions choose once between built-in image generation/editing and OpenRouter; Claude Code and Hermes remain on OpenRouter.
 - **Shared control** — the right `Agent / Assets` panel keeps status, current action, progress, pause/stop, and handover controls beside the unchanged generation canvas.
 - **Traceable output** — provenance and evaluation stay available in each Asset preview without adding a dashboard to the main workspace.
@@ -77,6 +77,9 @@ flowchart LR
 
 ### Prerequisites
 
+These requirements are for building Fruit Truck from source. People installing
+the DMG do not need Node.js, Rust, Homebrew, FFmpeg, or FFprobe.
+
 | Requirement | Notes |
 | --- | --- |
 | Node.js | Version 24 or newer |
@@ -93,7 +96,15 @@ npm ci
 npm run tauri:dev
 ```
 
-To use the browser-only development view instead, run `npm run dev` from `apps/desktop`.
+You can also run `./run.sh` from the repository root. It requires Node.js 24+
+and can select an installed Node 24+ executable even when an older Node remains
+first on `PATH`. On macOS it launches the development process with the visible
+name **Fruit Truck**. To use the browser-only development view, run
+`./run.sh --web` or `npm run dev` from `apps/desktop`.
+
+Source-tree desktop rendering uses `ffmpeg` and `ffprobe` from the developer's
+`PATH`. Homebrew is one optional way to obtain them, not a project requirement.
+Release DMGs bundle their own Universal executables.
 
 When the app opens, add your OpenRouter API key in **Settings**. The model catalogs will load automatically.
 
@@ -110,11 +121,11 @@ fruit-truck-agent-kit install codex --configure
 # or: fruit-truck-agent-kit install hermes --configure
 ```
 
-The installer copies [`fruit-truck-agent`](./agent-kit/skills/fruit-truck-agent/SKILL.md) and [`story-driven-short-form`](./agent-kit/skills/story-driven-short-form/SKILL.md) to the target's personal Skill directory and can register `fruit-truck-mcp`. See the [Agent Kit guide](./agent-kit/README.md) for installation, manual configuration, and update commands. The package compatibility manifest currently supports desktop `>=0.4.0 <0.5.0`.
+The installer copies [`fruit-truck-agent`](./agent-kit/skills/fruit-truck-agent/SKILL.md) and [`story-driven-short-form`](./agent-kit/skills/story-driven-short-form/SKILL.md) to the target's personal Skill directory and can register `fruit-truck-mcp`. See the [Agent Kit guide](./agent-kit/README.md) for installation, manual configuration, and update commands. The package compatibility manifest currently supports desktop `>=0.6.0 <0.7.0`.
 
-Start from the local agent with a rough intent such as “Make a 15-second reel about discovering a perfume in an old shop on a rainy night.” A published session first appears as **Connection waiting**. The MCP agent calls `claim_session`, records each structured decision, asks in agent chat, and applies the explicit reply with `resolve_decision`. Session writes use revision checks, a shared lock, and a last-synced three-way merge.
+Start from the local agent with a rough intent such as “Make a 15-second reel about discovering a perfume in an old shop on a rainy night.” The agent creates the session and checks Fruit Truck presence before claiming it. On macOS, an installed app may start in the background but never requests foreground focus. Textual story ambiguity stays in agent chat; media, model, upload, assembly, and approval checkpoints wait durably in Fruit Truck until you open them.
 
-In a Codex-controlled session, the first image task asks whether to use Codex built-in image generation or OpenRouter; that choice lasts for the session. Claude Code, Hermes, Human-driven image generation, and all video generation use OpenRouter. Final crop-and-merge rendering remains in the desktop's **Make final video** window and uses local `ffmpeg` and `ffprobe`.
+In a Codex-controlled session, the first image task opens a Fruit Truck choice between Codex built-in image generation and OpenRouter; that choice lasts for the session. OpenRouter model choices include published price information when available. The agent prepares final clip order and ranges, then the user reviews and renders them in **Make final video**. Distributed macOS builds use the bundled LGPL FFmpeg/FFprobe executables for MP4, MOV, and WebM input, then encode the final H.264 file through Apple's VideoToolbox hardware path when available.
 
 Uploads are copied into `~/.fruit-truck/assets`; generated media and legacy IndexedDB-only assets are materialized into managed storage before the bridge publishes them. Session and bridge JSON store `localPath` metadata rather than Base64 media payloads.
 
@@ -146,7 +157,21 @@ npm run test:e2e
 cd src-tauri && cargo test
 ```
 
-Playwright runs headless at 1920×1080 and covers the full-window Agent/Assets layout, chat-owned decision status, Assembly, and Agent Skill management.
+Playwright runs headless at 1920×1080 and covers the full-window Agent/Assets layout, passive decision badges, visual review, Assembly, and Agent Skill management.
+
+### macOS media packaging
+
+`npm run bundle:mac:universal` builds FFmpeg 8.1.2 from its verified source
+archive for Apple Silicon and Intel, combines both slices, validates that they
+link only to macOS system libraries, and places them in the app bundle. It then
+builds the Universal DMG using `src-tauri/tauri.release.conf.json`.
+
+The FFmpeg build disables GPL and non-free components. Rendering uses one
+filter graph for trim, timestamp reset, aspect-fit scale, pad, 30 fps
+normalization, and concatenation, followed by one `h264_videotoolbox` encode.
+`allow_sw=1` provides an Apple software fallback if hardware encoding is
+unavailable. See [third-party notices](./THIRD_PARTY_NOTICES.md) and the
+[release guide](./docs/RELEASING.md).
 
 ### Project structure
 

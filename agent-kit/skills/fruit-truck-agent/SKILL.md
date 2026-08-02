@@ -1,122 +1,122 @@
 ---
 name: fruit-truck-agent
-description: Orchestrate resumable image and video production through Fruit Truck, collecting every session decision in the current agent chat. Use when a local Codex, Claude Code, or Hermes agent must plan, generate, evaluate, revise, or continue media work through the Fruit Truck MCP server.
+description: Orchestrate resumable image and video production from the current agent chat through Fruit Truck, using Fruit Truck for rich media review while keeping textual creative clarification in chat.
 ---
 
 # Fruit Truck Agent
 
-Turn intent into a durable production session. The agent plans, asks, evaluates, and executes. Fruit Truck stores state and media, while the user answers creative choices, model selections, feedback, approvals, and Custom Skill changes in this chat.
+Turn rough intent into a durable production session. The agent structures the brief, finds or requests references, plans, generates, evaluates, revises, and hands a prepared assembly to Fruit Truck. Fruit Truck stores state and media and provides the rich visual checkpoints that agent chat cannot represent well.
 
-## Connect or resume
+## Start from the agent
 
-1. Call `list_sessions` and `get_session` when the user refers to existing work.
-2. For new work, call `create_session`, then `claim_session` before planning or execution.
-3. Keep facts, user decisions, agent assumptions, and Skill defaults distinct.
-4. Treat desktop and MCP as concurrent writers. On a revision conflict, reread and merge before retrying.
-5. Before other work, inspect pending blocking decisions. If the current user message answers one, resolve it; otherwise present the pending question again.
+For new work:
 
-## Ask every session decision in chat
+1. Call `create_session` with the user's original intent.
+2. Call `ensure_desktop`. Fruit Truck may start in the background, but must never steal foreground focus or switch the user's active session.
+3. If the result is `user_action_required`, ask the user to open Fruit Truck and end the turn. Reuse the same session after they reply.
+4. If OpenRouter will be needed and `credentialConfigured` is false, ask the user to add the API key in Fruit Truck Settings before paid generation.
+5. Call `claim_session`, then write the brief, requirements, and content-dependent plan.
 
-For every user-owned choice:
+For existing work, call `list_sessions` and `get_session`, then resume the exact next action. Inspect pending decisions and jobs before creating anything.
 
-1. Choose a stable, session-unique `requestKey` for the checkpoint, then call `queue_decision`, `request_model_selection`, or `request_custom_skill_activation`; reuse the same key when retrying. For the session-scoped backend choice, call `request_image_backend_selection`, which is idempotent without a key.
-2. Present two or three concise numbered options in this chat, including one recommendation when useful.
-3. End the turn and wait for the user's reply. Do not poll `await_decision`.
-4. On the next turn, call `resolve_decision` with the exact user reply in `userResponse`, the matching `optionId`, and any useful note or newly imported asset IDs.
-5. Continue automatically after the resolution is stored.
+Starting an Agent run authorizes paid generation while Agent control remains active. Do not request a budget, generation limit, batch approval, or per-call cost approval. Show available price information during model selection and keep actual provider cost as transparent session metadata.
 
-Never resolve a choice from your own recommendation or an ambiguous reply. A pending decision survives app closure, agent interruption, and restart.
+## Split decisions by medium
 
-Use blocking chat decisions for material ambiguity, uploads only the user can provide, model selection, major image/keyframe/video/final approval, expensive batches, abnormal retries, and Custom Skill changes.
+Ask in the current agent chat only when prose discussion is materially better:
 
-For an upload, ask the user to add files through Fruit Truck Assets/InputTray. After the user confirms in chat, reread the session and attach the new asset IDs when resolving the upload decision.
+- ambiguous goal, deliverable, or usage;
+- essential story event or character relationship;
+- identity facts, prohibited content, or hard distribution constraints.
+
+For a chat decision, call `queue_decision` with `channel: agent_chat`, present concise options here, end the turn, and call `resolve_decision` only after the explicit reply.
+
+Use Fruit Truck UI for:
+
+- Codex image backend and OpenRouter model selection;
+- uploaded or web reference selection;
+- character/product/environment sheets;
+- keyframes, image batches, video shots, and final approvals;
+- grouped single-choice or multi-select media review;
+- final-video assembly review.
+
+For a UI decision, call `queue_decision` with `channel: fruit_truck_ui` and an accurate `presentation`/`selectionMode`. Tell the user that a review is waiting in Fruit Truck, but do not foreground the app. Call `await_decision`; on timeout, reuse the same decision ID. Never call `resolve_decision` for a UI checkpoint.
+
+Custom Skill approval and activation stay in chat because the content is textual and `resolve_decision` applies the save or activation atomically.
+
+Use a stable, session-unique `requestKey` for every checkpoint. Blocking decisions stop execution and survive app closure, agent interruption, and restart.
 
 ## Build the production graph
 
-Use `replace_plan` for a content-dependent dependency graph and `set_step_status` for meaningful transitions. Only one step may be active, and a blocking pending decision stops execution.
+Derive the smallest useful graph from the requested output:
 
-Detect prerequisite assets:
+- single image → references if needed, candidate generation, review, final;
+- single short video → compatible frame/reference preparation, motion generation, review, final;
+- multi-shot ad, story, animal film, documentary, or 3D piece → continuity assets, storyboard/keyframes, short shots, assembly, final.
 
-- recurring people or characters → identity/character sheet;
-- products, logos, packaging, or props → product/detail sheet;
-- recurring locations → environment reference;
+Detect prerequisites:
+
+- recurring people, characters, or animals → identity sheet;
+- products, packaging, logos, or props → product/detail sheet;
+- recurring location → environment reference;
 - multi-shot video → storyboard and approved keyframes;
-- model-specific frame inputs → compatible start/end/reference frames.
+- model-specific inputs → compatible start/end/reference frames.
 
-## Choose the image backend
+Use `replace_plan` and `set_step_status`. Plan IDs, names, grouping, and stage semantics belong to the active Workflow Skill, not Fruit Truck. Keep the graph as light or detailed as the job requires. Mark every independent ready step active when work can proceed concurrently; do not create placeholder stages merely to fit a fixed schema. Make autonomous choices for shot count, framing, lens, camera movement, light, color, and prompt detail unless they change a user-owned fact.
 
-This choice applies only when the claimed session reports `connection.agentHost: codex`.
+## References
 
-Immediately before the session's first image generation or edit:
+Prefer user-supplied assets when identity or product fidelity matters. Queue an `upload` Fruit Truck decision and wait for the user to import/select them.
 
-1. Call `request_image_backend_selection`.
-2. Present its `Codex built-in image generation` and `OpenRouter image generation` options in chat.
-3. Resolve the explicit reply with `resolve_decision`.
-4. Reuse the stored backend for the rest of the session. Call with `reselect: true` only when the user explicitly asks to switch.
+When web search is available, find suitable reference candidates, then call `import_remote_asset` with the direct media URL, source page, license status, and role. Treat unknown licensing as reference-only and preserve attribution. Queue a visual selection instead of choosing an important identity reference silently.
 
-Claude Code, Hermes, and unknown hosts use OpenRouter by policy and never ask this question. Human-driven desktop generation also uses OpenRouter.
+Preserve source media and lineage. Session metadata stores managed local paths, never Base64 or data URLs. Bridge persistence uses a small revision index plus one bounded snapshot file per session; treat the index and session files as one locked store.
 
-When `codex_builtin` is selected:
+## Generation threads, backends, and models
 
-1. Use `$imagegen` for every image generation or edit.
-2. For a local edit target, inspect its managed `localPath` with `view_image` before invoking imagegen.
-3. Preserve source images and include every input asset in `parentAssetIds`.
-4. Pass the generated output path to `register_host_image`; do not leave session media only under the Codex generated-images directory.
-5. Evaluate and request approval in chat like any other artifact.
+Treat a Fruit Truck generation thread as a visible, mode-scoped workspace and execution lane, not as a workflow stage or a separate agent conversation. Give it a short semantic name and free-form `outputRole`; the Workflow Skill decides what those mean. Assets remain session-wide and can feed any image or video thread.
 
-If Codex image generation fails or is unavailable, record the error and ask whether to reselect OpenRouter. Never switch silently.
+1. Reuse the single default thread for a one-off generation.
+2. For independent outputs, call `create_generation_thread` once per output, then `update_generation_thread` with its prompt, asset bindings, model override, and options.
+3. Call `enhance_generation_threads` when prompt enhancement is useful.
+4. Call `run_generation_threads` once with every ready thread. The call validates the batch atomically and starts all OpenRouter work without an app concurrency cap.
+5. Persist the returned attempt IDs. Call `await_generation_threads`; `status: pending` means “still pending,” never “submit again.” At `status: terminal`, inspect `outcome` (`completed`, `partial_failure`, `failed`, `uncertain`, or `canceled`) before continuing.
 
-When `openrouter` is selected, follow the model-selection and `submit_generation` flow below.
+Only one attempt may be active inside a thread. A plan step may use several threads, and a thread does not need a plan-step link. Create a blank thread for new work; duplicate only when inheriting the current prompt and settings is intentional.
 
-## Select OpenRouter models
+For a Codex-claimed session, call `request_image_backend_selection` immediately before the first image task and await the Fruit Truck UI result. Reuse it for the session.
 
-For image and video stages independently:
+- `codex_builtin`: `run_generation_threads` returns one host action per image thread. Invoke `$imagegen` for those actions concurrently in the current Codex conversation, then call `register_host_image` with each `threadId` and `attemptId`. Call `fail_host_generation` for an action that fails.
+- `openrouter`: `run_generation_threads` starts the selected image and video threads in parallel.
 
-1. Call `list_models` immediately before first use.
-2. Filter by current inputs and capabilities.
-3. Compare compatible candidates by input structure, result character, constraints, price when available, and likely latency.
-4. Call `request_model_selection`, present the candidates in chat, and resolve the user's reply.
-5. Reuse the recorded model until it becomes incompatible or the user asks to change it.
+Claude Code, Hermes, and unknown hosts use OpenRouter by policy.
+
+For each distinct OpenRouter model requirement, call `list_models`, filter by required inputs, and call `request_model_selection` with two or three compatible candidates. Pass `threadIds` when the choice applies only to particular threads; omit it to change the mode default. Include input structure, constraints, available pricing/range, and one recommendation. Await the Fruit Truck UI choice and reuse it until incompatible or explicitly changed.
 
 ## Generate, evaluate, and replan
 
-1. Write a stage-specific prompt tied to the agreed role and acceptance criteria.
-2. Map approved inputs to the selected route.
-3. For OpenRouter, call `submit_generation`; use `poll_video` for asynchronous video jobs.
-4. Use `register_asset` for uploaded or external derivatives and `register_host_image` only for Codex built-in output.
-5. Use `evaluate_asset` for technical defects, aesthetic finish, identity/continuity, and a recommendation.
-6. Queue approval, show the relevant asset in Fruit Truck when useful, and resolve the user's chat reply.
-7. Replan from evidence. Successful submission is not proof of a successful result.
+1. Write an output-specific prompt tied to the thread role and acceptance criteria.
+2. Bind only approved compatible inputs.
+3. Generate with the chosen backend; poll asynchronous video jobs.
+4. Evaluate technical defects, finish, identity/continuity, and story readability.
+5. Queue a Fruit Truck media checkpoint for major sheets, keyframes, shots, batches, and finals.
+6. Apply UI feedback and regenerate only the failed artifact unless it exposes a shared reference problem.
 
-Preserve source assets. Session JSON stores managed `localPath` metadata, never Base64 or data URLs.
+A successful API submission is not proof of a successful result. Never duplicate a paid request after a timeout or restart.
 
-## Produce multi-shot video
+## Assemble and finish
 
-Plan short shots and continuity constraints unless one continuous generation is explicitly required. Generate and approve keyframes before motion, then evaluate shots independently.
+For multi-shot video, call `propose_assembly` with approved clips in narrative order and recommended in/out points. Tell the user that the assembly is ready, then await the Fruit Truck UI decision. The user may edit ranges/order and presses Render.
 
-The user still configures and renders final clips in Fruit Truck's `Make final video` window. Ask them in chat to complete that direct manipulation, reread the resulting artifact, then request final approval in chat.
+After rendering, reread the output, evaluate it, and queue a final Fruit Truck approval. Complete the session only after explicit final approval.
 
-## Pause, recover, and hand over
+## Pause and recovery
 
 - Honor pause, stop, or Human control immediately.
-- On failure, record the error and a concrete recovery option.
-- On restart, reread pending decisions, completed resolutions, jobs, and the selected image backend before acting.
-- Never duplicate work because a request, poll, or chat turn ended.
-
-## Custom Skills
-
-`propose_custom_skill` creates a text-only proposal and a blocking chat approval. Give it a stable `requestKey`, present a concise summary plus save/reject options, and reuse that key after interruption. `resolve_decision` saves, versions, and activates an approved proposal for the current session.
-
-Use `request_custom_skill_activation` to activate or deactivate an existing Skill only after explicit chat confirmation. Settings remains available for manual import, inspection, and rollback.
-
-Custom Skills must not contain binary media, asset/session IDs, local paths, secrets, inferred sensitive data, or unjustified one-off generalizations.
-
-Precedence:
-
-1. current explicit user instruction;
-2. user Custom Skill;
-3. activated Workflow/Domain Skill;
-4. Core defaults.
+- Do not launch or foreground Fruit Truck again when its heartbeat is healthy.
+- On provider failure, record the error and retry only with changed conditions or clear rationale.
+- On restart, reread pending decisions, resolutions, thread attempts (including video `jobId` and polling metadata), selected backend/model, and artifact lineage. Await queued attempts by ID; never guess whether an uncertain submission completed.
+- On conflict, reread, merge, and retry without overwriting newer desktop state.
 
 ## Tool details
 

@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useI18n } from "@/i18n";
-import type { StudioSession } from "@/studio";
+import { activeGenerationAttempt, type StudioSession } from "@/studio";
 
 const MIN_WIDTH = 210;
 const MAX_WIDTH = 420;
@@ -102,13 +102,22 @@ export function SessionSidebar({
           {!filtered.length ? <p className="session-empty">{t("noMatchingSessions")}</p> : null}
           {filtered.map((session) => {
             const active = session.id === activeId;
+            const pendingUiDecisions = session.agent.decisions.filter((decision) =>
+              decision.status === "pending" && decision.channel === "fruit_truck_ui"
+            ).length;
+            const runningThreads = [...session.threads.image, ...session.threads.video]
+              .filter((thread) => Boolean(activeGenerationAttempt(thread))).length;
             return (
               <div className={`session-row ${active ? "active" : ""}`} key={session.id}>
                 <button type="button" className="session-row-main" onClick={() => onSelect(session.id)}>
                   <span className="session-state">{active ? <Check /> : null}</span>
                   <span>
                     <strong>{session.name}</strong>
-                    <small>{new Date(session.updatedAt).toLocaleString(locale)}</small>
+                    <small>{runningThreads
+                      ? t("parallelAgentActions", { count: runningThreads })
+                      : pendingUiDecisions
+                        ? t("pendingReviewCount", { count: pendingUiDecisions })
+                        : new Date(session.updatedAt).toLocaleString(locale)}</small>
                   </span>
                 </button>
                 <div className="session-row-actions">

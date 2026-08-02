@@ -1,12 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
-import { normalizeAgentState, validateAgentState, type AgentSessionState } from "@/agent";
+import { normalizeAgentState, validateAgentState, type AgentSessionState } from "./agent.ts";
 import {
   createSession,
   materializeLegacyAssetForBridge,
+  type GenerationDefaults,
+  type GenerationThread,
   type SessionAsset,
   type StudioSession,
-} from "@/studio";
-import { isTauriRuntime, type GenerationMode } from "@/openrouter";
+} from "./studio.ts";
+import { isTauriRuntime, type GenerationMode } from "./openrouter.ts";
 
 export type AgentBridgeSession = {
   id: string;
@@ -15,17 +17,20 @@ export type AgentBridgeSession = {
   updatedAt: string;
   mode?: GenerationMode;
   selectedModelIds?: Partial<Record<GenerationMode, string>>;
+  generationDefaults?: GenerationDefaults;
+  threads?: Record<GenerationMode, GenerationThread[]>;
+  activeThreadIds?: Record<GenerationMode, string>;
   assets?: SessionAsset[];
   agent: AgentSessionState;
 };
 
 export type AgentBridgeEnvelope = {
-  schemaVersion: 1;
+  schemaVersion: 1 | 2 | 3;
   revision: number;
   sessions: AgentBridgeSession[];
 };
 
-function validBridgeSession(value: unknown): value is AgentBridgeSession {
+export function validBridgeSession(value: unknown): value is AgentBridgeSession {
   if (!value || typeof value !== "object") return false;
   const item = value as Partial<AgentBridgeSession>;
   if (typeof item.id !== "string"
@@ -34,34 +39,155 @@ function validBridgeSession(value: unknown): value is AgentBridgeSession {
     || typeof item.createdAt !== "string"
     || typeof item.updatedAt !== "string"
     || !item.agent
-    || item.agent.schemaVersion !== 1) {
+    || (item.agent.schemaVersion !== 1 && item.agent.schemaVersion !== 2 && item.agent.schemaVersion !== 3)) {
     return false;
   }
   const agent = normalizeAgentState(item.agent);
   return validateAgentState(agent).length === 0
-    && validSessionAssetReferences({ agent, assets: item.assets });
+    && validSessionAssetReferences({ agent, assets: item.assets, threads: item.threads });
 }
 
-function validSessionAssetReferences(session: Pick<AgentBridgeSession, "assets" | "agent">) {
-  const validAssets = (session.assets ?? []).every((asset) =>
-    !asset.blobKey
-    && (!asset.externalUrl || /^https?:\/\//i.test(asset.externalUrl))
-    && (!asset.localPath || /^(?:\/|[A-Za-z]:[\\/])/.test(asset.localPath))
-  );
-  const assetIds = new Set((session.assets ?? []).map((asset) => asset.id));
-  return validAssets && session.agent.artifacts.every((artifact) =>
-    assetIds.has(artifact.assetId) && artifact.parentAssetIds.every((id) => assetIds.has(id))
-  )
-    && session.agent.decisions.every((decision) => decision.relatedAssetIds.every((id) => assetIds.has(id)))
-    && session.agent.assembly.clips.every((clip) => assetIds.has(clip.assetId));
+export function recoverBridgeGenerationState(value: AgentBridgeSession): AgentBridgeSession {
+  const base = createSession(value.name || "Recovered agent session");
+  const assets = Array.isArray(value.assets) ? value.assets : [];
+  const assetIds = new Set(assets.map((asset) => asset.id));
+  const attemptStatuses = new Set(["queued", "enhancing", "awaiting_host", "submitting", "in_progress", "completed", "failed", "uncertain", "canceled"]);
+  const recoverThreads = (mode: GenerationMode): GenerationThread[] => {
+    const source = Array.isArray(value.threads?.[mode]) ? value.threads[mode] : [];
+    const recovered = source.flatMap((candidate, index) => {
+      if (!candidate || typeof candidate !== "object" || typeof candidate.id !== "string") return [];
+      const fallback = base.threads[mode][0];
+      const draft = candidate.draft && typeof candidate.draft === "object" ? candidate.draft : fallback.draft;
+      return [{
+        ...fallback,
+        ...candidate,
+        mode,
+        name: typeof candidate.name === "string" && candidate.name.trim() ? candidate.name : `${mode === "image" ? "Image" : "Video"} ${index + 1}`,
+        revision: Number.isInteger(candidate.revision) && candidate.revision >= 0 ? candidate.revision : 0,
+        optionOverrides: candidate.optionOverrides && typeof candidate.optionOverrides === "object" ? candidate.optionOverrides : {},
+        draft: {
+          ...fallback.draft,
+          ...draft,
+          references: Array.isArray(draft.references) ? draft.references.filter((reference) => reference && assetIds.has(reference.assetId)) : [],
+        },
+        attempts: Array.isArray(candidate.attempts) ? candidate.attempts.flatMap((attempt) => {
+          if (!attempt || typeof attempt !== "object" || typeof attempt.id !== "string") return [];
+          const status = attemptStatuses.has(attempt.status) ? attempt.status : "uncertain";
+          const request = attempt.request && !/data:(?:image|video)\/|;base64,/i.test(JSON.stringify(attempt.request)) ? attempt.request : undefined;
+          return [{
+            ...attempt,
+            status,
+            request,
+            error: status === "uncertain" && !attemptStatuses.has(attempt.status) ? "Recovered an unsupported attempt status; review before retrying." : attempt.error,
+            inputAssetIds: Array.isArray(attempt.inputAssetIds) ? attempt.inputAssetIds.filter((id) => assetIds.has(id)) : [],
+            assetIds: Array.isArray(attempt.assetIds) ? attempt.assetIds.filter((id) => assetIds.has(id)) : [],
+            snapshot: attempt.snapshot && Array.isArray(attempt.snapshot.assetBindings)
+              ? { ...attempt.snapshot, assetBindings: attempt.snapshot.assetBindings.filter((binding) => assetIds.has(binding.assetId)) }
+              : undefined,
+          }];
+        }) : [],
+        enhancementAttempts: Array.isArray(candidate.enhancementAttempts) ? candidate.enhancementAttempts : [],
+      } satisfies GenerationThread];
+    });
+    return recovered.length ? recovered : base.threads[mode];
+  };
+  const threads = { image: recoverThreads("image"), video: recoverThreads("video") };
+  const generationDefaults = value.generationDefaults && typeof value.generationDefaults === "object"
+    ? {
+      modelIds: { ...base.generationDefaults.modelIds, ...value.generationDefaults.modelIds },
+      options: { ...base.generationDefaults.options, ...value.generationDefaults.options },
+      providerJson: { ...base.generationDefaults.providerJson, ...value.generationDefaults.providerJson },
+    }
+    : base.generationDefaults;
+  return {
+    ...value,
+    assets,
+    generationDefaults,
+    threads,
+    activeThreadIds: {
+      image: threads.image.some((thread) => thread.id === value.activeThreadIds?.image) ? value.activeThreadIds!.image : threads.image[0].id,
+      video: threads.video.some((thread) => thread.id === value.activeThreadIds?.video) ? value.activeThreadIds!.video : threads.video[0].id,
+    },
+  };
+}
+
+function validSessionAssetReferences(session: Pick<AgentBridgeSession, "assets" | "agent" | "threads">) {
+  try {
+    const assets = Array.isArray(session.assets) ? session.assets : [];
+    const validAssets = assets.every((asset) =>
+      !!asset
+      && typeof asset === "object"
+      && !asset.blobKey
+      && (!asset.externalUrl || /^https?:\/\//i.test(asset.externalUrl))
+      && (!asset.localPath || /^(?:\/|[A-Za-z]:[\\/])/.test(asset.localPath))
+    );
+    if (!validAssets) return false;
+
+    const assetIds = new Set(assets.map((asset) => asset.id));
+    const imageThreads = Array.isArray(session.threads?.image) ? session.threads.image : [];
+    const videoThreads = Array.isArray(session.threads?.video) ? session.threads.video : [];
+    const threads = [...imageThreads, ...videoThreads];
+    const terminalStatuses = new Set(["queued", "enhancing", "awaiting_host", "submitting", "in_progress", "completed", "failed", "uncertain", "canceled"]);
+    const threadIds: string[] = [];
+    const attemptIds: string[] = [];
+
+    for (const thread of threads) {
+      if (!thread || typeof thread !== "object") return false;
+      if (typeof thread.id !== "string") return false;
+      if (thread.mode !== "image" && thread.mode !== "video") return false;
+      if (!Number.isInteger(thread.revision)) return false;
+      if (thread.enhancementAttempts != null && !Array.isArray(thread.enhancementAttempts)) return false;
+      if (!thread.draft || typeof thread.draft !== "object" || !Array.isArray(thread.draft.references)) return false;
+      if (!Array.isArray(thread.attempts)) return false;
+      if (!thread.draft.references.every((reference) => reference && assetIds.has(reference.assetId))) return false;
+
+      threadIds.push(thread.id);
+      for (const attempt of thread.attempts) {
+        if (!attempt || typeof attempt !== "object" || typeof attempt.id !== "string") return false;
+        if (!terminalStatuses.has(attempt.status)) return false;
+        if (!Array.isArray(attempt.inputAssetIds) || !attempt.inputAssetIds.every((id) => assetIds.has(id))) return false;
+        if (!Array.isArray(attempt.assetIds) || !attempt.assetIds.every((id) => assetIds.has(id))) return false;
+        if (attempt.snapshot) {
+          if (typeof attempt.snapshot !== "object" || !Array.isArray(attempt.snapshot.assetBindings)) return false;
+          if (!attempt.snapshot.assetBindings.every((binding) => binding && assetIds.has(binding.assetId))) return false;
+        }
+        if (attempt.request && /data:(?:image|video)\/|;base64,/i.test(JSON.stringify(attempt.request))) return false;
+        attemptIds.push(attempt.id);
+      }
+    }
+
+    if (new Set(threadIds).size !== threadIds.length || new Set(attemptIds).size !== attemptIds.length) return false;
+    if (!session.agent || typeof session.agent !== "object") return false;
+    if (!Array.isArray(session.agent.artifacts) || !Array.isArray(session.agent.decisions) || !session.agent.assembly || !Array.isArray(session.agent.assembly.clips)) {
+      return false;
+    }
+
+    return session.agent.artifacts.every((artifact) =>
+      artifact && assetIds.has(artifact.assetId) && Array.isArray(artifact.parentAssetIds) && artifact.parentAssetIds.every((id) => assetIds.has(id))
+    )
+      && session.agent.decisions.every((decision) =>
+        decision
+        && Array.isArray(decision.relatedAssetIds)
+        && Array.isArray(decision.options)
+        && decision.relatedAssetIds.every((id) => assetIds.has(id))
+        && decision.options.every((option) => !option?.assetId || assetIds.has(option.assetId))
+      )
+      && session.agent.assembly.clips.every((clip) => clip && assetIds.has(clip.assetId));
+  } catch {
+    return false;
+  }
 }
 
 export async function readAgentBridge(): Promise<AgentBridgeEnvelope> {
   const value = await invoke<AgentBridgeEnvelope>("read_agent_sessions");
-  if (value?.schemaVersion !== 1 || !Array.isArray(value.sessions)) {
+  if ((value?.schemaVersion !== 1 && value?.schemaVersion !== 2 && value?.schemaVersion !== 3) || !Array.isArray(value.sessions)) {
     throw new Error("The external agent bridge returned an unsupported schema.");
   }
-  return { ...value, sessions: value.sessions.filter(validBridgeSession) };
+  const recovered = { ...value, sessions: value.sessions.map(recoverBridgeGenerationState) };
+  const invalid = (recovered.sessions as unknown[]).find((session) => !validBridgeSession(session));
+  const invalidId = invalid && typeof invalid === "object" && "id" in invalid && typeof invalid.id === "string" ? invalid.id : "unknown";
+  if (invalid) throw new Error(`The external agent bridge contains a malformed session (${invalidId}). Its data was left untouched for recovery.`);
+  return recovered;
 }
 
 export async function waitForAgentBridge(
@@ -72,14 +198,22 @@ export async function waitForAgentBridge(
     afterRevision,
     timeoutMs,
   });
-  if (value?.schemaVersion !== 1 || !Array.isArray(value.sessions)) {
+  if ((value?.schemaVersion !== 1 && value?.schemaVersion !== 2 && value?.schemaVersion !== 3) || !Array.isArray(value.sessions)) {
     throw new Error("The external agent bridge returned an unsupported schema.");
   }
-  return { ...value, sessions: value.sessions.filter(validBridgeSession) };
+  const recovered = { ...value, sessions: value.sessions.map(recoverBridgeGenerationState) };
+  const invalid = (recovered.sessions as unknown[]).find((session) => !validBridgeSession(session));
+  const invalidId = invalid && typeof invalid === "object" && "id" in invalid && typeof invalid.id === "string" ? invalid.id : "unknown";
+  if (invalid) throw new Error(`The external agent bridge contains a malformed session (${invalidId}). Its data was left untouched for recovery.`);
+  return recovered;
 }
 
 export function materializeAgentSession(value: AgentBridgeSession): StudioSession {
   const base = createSession(value.name || "Agent session");
+  const threads = value.threads ? {
+    image: value.threads.image.map((thread) => ({ ...thread, attempts: thread.attempts ?? [], enhancementAttempts: thread.enhancementAttempts ?? [] })),
+    video: value.threads.video.map((thread) => ({ ...thread, attempts: thread.attempts ?? [], enhancementAttempts: thread.enhancementAttempts ?? [] })),
+  } : base.threads;
   return {
     ...base,
     id: value.id,
@@ -87,17 +221,22 @@ export function materializeAgentSession(value: AgentBridgeSession): StudioSessio
     createdAt: value.createdAt,
     updatedAt: value.updatedAt,
     mode: value.mode === "video" ? "video" : "image",
-    selectedModelIds: {
-      image: value.selectedModelIds?.image ?? value.agent.modelSelections.image.modelId ?? "",
-      video: value.selectedModelIds?.video ?? value.agent.modelSelections.video.modelId ?? "",
+    generationDefaults: value.generationDefaults ?? {
+      ...base.generationDefaults,
+      modelIds: {
+        image: value.selectedModelIds?.image ?? value.agent.modelSelections.image.modelId ?? "",
+        video: value.selectedModelIds?.video ?? value.agent.modelSelections.video.modelId ?? "",
+      },
     },
+    threads,
+    activeThreadIds: value.activeThreadIds ?? base.activeThreadIds,
     assets: Array.isArray(value.assets) ? value.assets : [],
     agent: normalizeAgentState(value.agent),
     agentBridge: true,
   };
 }
 
-export function serializeAgentSession(session: StudioSession): AgentBridgeSession {
+function serializeAgentSession(session: StudioSession): AgentBridgeSession {
   const stateErrors = validateAgentState(session.agent);
   if (stateErrors.length) throw new Error(`Agent state is invalid: ${stateErrors.join(" ")}`);
   if (!validSessionAssetReferences(session)) {
@@ -109,7 +248,12 @@ export function serializeAgentSession(session: StudioSession): AgentBridgeSessio
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
     mode: session.mode,
-    selectedModelIds: session.selectedModelIds,
+    generationDefaults: session.generationDefaults,
+    threads: {
+      image: session.threads.image.map(compactThreadHistory),
+      video: session.threads.video.map(compactThreadHistory),
+    },
+    activeThreadIds: session.activeThreadIds,
     assets: session.assets.map((asset) => ({
       ...asset,
       blobKey: undefined,
@@ -117,6 +261,21 @@ export function serializeAgentSession(session: StudioSession): AgentBridgeSessio
       bridgeAvailability: asset.localPath || asset.externalUrl ? "available" : "desktop_only",
     })),
     agent: session.agent,
+  };
+}
+
+function compactThreadHistory(thread: GenerationThread): GenerationThread {
+  const terminal = new Set(["completed", "failed", "uncertain", "canceled"]);
+  return {
+    ...thread,
+    attempts: [
+      ...thread.attempts.filter((attempt) => !terminal.has(attempt.status)),
+      ...thread.attempts.filter((attempt) => terminal.has(attempt.status)).slice(-100),
+    ],
+    enhancementAttempts: [
+      ...thread.enhancementAttempts.filter((attempt) => attempt.status === "in_progress"),
+      ...thread.enhancementAttempts.filter((attempt) => attempt.status !== "in_progress").slice(-100),
+    ],
   };
 }
 
@@ -160,10 +319,6 @@ export type CustomSkillSummary = {
   path: string;
   versions: number[];
 };
-
-export async function saveCustomSkill(name: string, markdown: string): Promise<SavedCustomSkill> {
-  return invoke<SavedCustomSkill>("save_custom_skill_text", { name, markdown });
-}
 
 export async function listCustomSkills(): Promise<CustomSkillSummary[]> {
   if (!isTauriRuntime()) return [];
