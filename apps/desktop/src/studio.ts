@@ -577,6 +577,45 @@ export async function resolveAssetSource(asset: SessionAsset): Promise<string> {
   return blob ? URL.createObjectURL(blob) : "";
 }
 
+function dataUrlToObjectUrl(source: string): string {
+  const match = source.match(/^data:([^;,]+);base64,(.+)$/s);
+  if (!match) throw new Error("The managed image payload is invalid.");
+  const binary = atob(match[2]);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return URL.createObjectURL(new Blob([bytes], { type: match[1] }));
+}
+
+export async function resolveAssetMaskSource(asset: SessionAsset): Promise<string> {
+  if (asset.localPath && isTauriRuntime()) {
+    const dataUrl = await invoke<string>("read_managed_image_data_url", { path: asset.localPath });
+    return dataUrlToObjectUrl(dataUrl);
+  }
+  return resolveAssetSource(asset);
+}
+
+export async function exportAssetToDownloads(asset: SessionAsset): Promise<string> {
+  if (isTauriRuntime()) {
+    const exportable = asset.localPath ? asset : await materializeLegacyAssetForBridge(asset);
+    if (!exportable.localPath) throw new Error(`${asset.name} is not available in local managed storage.`);
+    return invoke<string>("export_managed_asset", {
+      path: exportable.localPath,
+      name: asset.name,
+    });
+  }
+  const source = await resolveAssetSource(asset);
+  if (!source) throw new Error(`${asset.name} has no readable source.`);
+  const anchor = document.createElement("a");
+  anchor.href = source;
+  anchor.download = asset.name;
+  anchor.hidden = true;
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+  if (source.startsWith("blob:")) window.setTimeout(() => URL.revokeObjectURL(source), 1_000);
+  return asset.name;
+}
+
 function blobToDataUrl(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();

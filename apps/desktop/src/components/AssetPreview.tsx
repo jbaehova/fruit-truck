@@ -34,6 +34,6 @@ export function AssetPreview({
 
   if (!source) return <span className={`asset-missing ${className ?? ""}`} />;
   return asset.kind === "image"
-    ? <img className={className} src={source} alt={asset.name} />
-    : <video className={className} src={source} controls={controls} muted={!controls} playsInline preload="metadata" />;
+    ? <img className={className} src={source} alt={asset.name} draggable={false} />
+    : <video className={className} src={source} controls={controls} muted={!controls} playsInline preload="metadata" draggable={false} />;
 }

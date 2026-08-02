@@ -186,6 +186,35 @@ fn validate_managed_media_path(app: &tauri::AppHandle, path: &Path) -> Result<Pa
   validate_media_path_in_roots(path, &managed_roots(app)?)
 }
 
+fn unique_export_path(root: &Path, requested_name: &str) -> PathBuf {
+  let safe_name = Path::new(requested_name)
+    .file_name()
+    .and_then(|value| value.to_str())
+    .filter(|value| !value.is_empty())
+    .unwrap_or("fruit-truck-asset");
+  let requested = Path::new(safe_name);
+  let stem = requested
+    .file_stem()
+    .and_then(|value| value.to_str())
+    .filter(|value| !value.is_empty())
+    .unwrap_or("fruit-truck-asset");
+  let extension = requested.extension().and_then(|value| value.to_str());
+  for suffix in 0u32.. {
+    let name = if suffix == 0 {
+      safe_name.to_string()
+    } else if let Some(extension) = extension {
+      format!("{stem} ({suffix}).{extension}")
+    } else {
+      format!("{stem} ({suffix})")
+    };
+    let candidate = root.join(name);
+    if !candidate.exists() {
+      return candidate;
+    }
+  }
+  unreachable!("u32 export suffix space was exhausted")
+}
+
 fn unique_media_path(root: &Path, prefix: &str, extension: &str) -> Result<PathBuf, String> {
   secure_directory(root)?;
   let stamp = std::time::SystemTime::now()
@@ -444,6 +473,42 @@ async fn pick_and_import_assets(app: tauri::AppHandle) -> Result<Vec<ManagedAsse
 fn delete_managed_asset(app: tauri::AppHandle, path: String) -> Result<(), String> {
   let canonical = validate_managed_media_path(&app, Path::new(&path))?;
   std::fs::remove_file(canonical).map_err(|error| error.to_string())
+}
+
+
+#[tauri::command]
+fn export_managed_asset(app: tauri::AppHandle, path: String, name: String) -> Result<String, String> {
+  let source = validate_managed_media_path(&app, Path::new(&path))?;
+  let downloads = app.path().download_dir().map_err(|error| error.to_string())?;
+  std::fs::create_dir_all(&downloads).map_err(|error| error.to_string())?;
+  let destination = unique_export_path(&downloads, &name);
+  std::fs::copy(source, &destination).map_err(|error| error.to_string())?;
+  Ok(destination.to_string_lossy().into_owned())
+}
+
+
+fn image_data_url_from_file(path: &Path) -> Result<String, String> {
+  let metadata = std::fs::metadata(path).map_err(|error| error.to_string())?;
+  if metadata.len() == 0 || metadata.len() > MAX_IMAGE_BYTES {
+    return Err("A managed image exceeds the local safety limit.".into());
+  }
+  let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
+  let name = path.file_name().and_then(|item| item.to_str()).unwrap_or("image.png");
+  let (kind, mime_type, _) = inspect_media(&bytes[..bytes.len().min(16)], name)?;
+  if kind != "image" {
+    return Err("The managed asset is not an image.".into());
+  }
+  Ok(format!(
+    "data:{mime_type};base64,{}",
+    base64::engine::general_purpose::STANDARD.encode(bytes),
+  ))
+}
+
+
+#[tauri::command]
+fn read_managed_image_data_url(app: tauri::AppHandle, path: String) -> Result<String, String> {
+  let source = validate_managed_media_path(&app, Path::new(&path))?;
+  image_data_url_from_file(&source)
 }
 
 struct AgentStoreLock(PathBuf);
@@ -1597,6 +1662,8 @@ pub fn run() {
       abort_shared_asset,
       pick_and_import_assets,
       delete_managed_asset,
+      export_managed_asset,
+      read_managed_image_data_url,
       assemble_video,
       read_agent_sessions,
       wait_for_agent_sessions,
@@ -1613,6 +1680,7 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+  use base64::Engine;
   use super::{
     assembly_filter_graph,
     list_custom_skills_from_root,
@@ -1623,7 +1691,9 @@ mod tests {
     target_video_bitrate,
     validate_custom_skill_text,
     validate_media_path_in_roots,
+    unique_export_path,
     import_media_file,
+    image_data_url_from_file,
     append_shared_asset_chunk_to_root,
     finish_shared_asset_to_root,
     openrouter_url,
@@ -1813,6 +1883,44 @@ mod tests {
     let disguised = source_directory.join("disguised.png");
     std::fs::write(&disguised, b"not an image").unwrap();
     assert!(import_media_file(&disguised, &root.join("assets")).is_err());
+    let _ = std::fs::remove_dir_all(root);
+  }
+}
+  #[test]
+  fn managed_image_bytes_are_exposed_as_a_canvas_safe_data_url() {
+    let root = std::env::temp_dir().join(format!(
+      "fruit-truck-image-data-url-test-{}-{}",
+      std::process::id(),
+      std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let image = root.join("reference.png");
+    let png = b"\x89PNG\r\n\x1a\ncanvas-safe";
+    std::fs::write(&image, png).unwrap();
+
+    let data_url = image_data_url_from_file(&image).unwrap();
+    assert_eq!(
+      data_url,
+      format!(
+        "data:image/png;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(png),
+      ),
+    );
+    let _ = std::fs::remove_dir_all(root);
+  }
+
+  #[test]
+  fn exports_use_safe_names_without_overwriting_existing_downloads() {
+    let root = std::env::temp_dir().join(format!(
+      "fruit-truck-export-test-{}-{}",
+      std::process::id(),
+      std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("result.png"), b"existing").unwrap();
+
+    assert_eq!(unique_export_path(&root, "../result.png"), root.join("result (1).png"));
+    assert_eq!(unique_export_path(&root, "../../"), root.join("fruit-truck-asset"));
     let _ = std::fs::remove_dir_all(root);
   }
 }

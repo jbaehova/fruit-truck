@@ -1,7 +1,8 @@
 import { Field } from "@base-ui/react/field";
 import { ImagePlus, Trash2, Upload } from "lucide-react";
-import { useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { AssetPreview } from "@/components/AssetPreview";
+import { clearAssetDragData, hasAssetDragData, readActiveAssetDragId, readAssetDragId, subscribeToAssetPointerDrop } from "@/assetDrag";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useI18n, type MessageKey } from "@/i18n";
@@ -38,14 +39,14 @@ export function InputTray({
   const { t } = useI18n();
   const [dragging, setDragging] = useState(false);
   const enabled = roles.length > 0 && limit > 0;
-  const assetMap = new Map(assets.map((asset) => [asset.id, asset]));
+  const assetMap = useMemo(() => new Map(assets.map((asset) => [asset.id, asset])), [assets]);
 
-  const roleFor = (asset: SessionAsset) =>
+  const roleFor = useCallback((asset: SessionAsset) =>
     asset.kind === "video"
       ? roles.includes("video_reference") ? "video_reference" : null
-      : roles.includes("reference") ? "reference" : roles.find((role) => role !== "video_reference") ?? null;
+      : roles.includes("reference") ? "reference" : roles.find((role) => role !== "video_reference") ?? null, [roles]);
 
-  const addAssets = (incoming: SessionAsset[]) => {
+  const addAssets = useCallback((incoming: SessionAsset[]) => {
     const next = [...references];
     for (const asset of incoming) {
       if (next.length >= limit || next.some((reference) => reference.assetId === asset.id)) continue;
@@ -54,25 +55,33 @@ export function InputTray({
       next.push({ assetId: asset.id, role, slot: nextReferenceSlot(next) });
     }
     onChange(next);
-  };
+  }, [limit, onChange, references, roleFor]);
 
   const addFiles = async (files: FileList | File[]) => addAssets(await onImport(files));
   const pickFiles = async () => addAssets(await onPick());
 
+  useEffect(() => subscribeToAssetPointerDrop("inputs", (assetId) => {
+    if (!enabled) return;
+    setDragging(false);
+    const asset = assetMap.get(assetId);
+    if (asset) addAssets([asset]);
+  }), [addAssets, assetMap, enabled]);
+
   return (
     <Field.Root
       className={`reference-section ${dragging ? "dragging" : ""}`}
+      data-asset-drop-target="inputs"
       invalid={Boolean(error)}
       onDragEnter={(event) => {
         if (!enabled) return;
-        if (Array.from(event.dataTransfer.types).some((type) => type === "application/x-fruit-truck-asset" || type === "Files")) {
+        if (hasAssetDragData(event.dataTransfer) || Array.from(event.dataTransfer.types).includes("Files")) {
           event.preventDefault();
           setDragging(true);
         }
       }}
       onDragOver={(event) => {
         if (!enabled) return;
-        if (Array.from(event.dataTransfer.types).some((type) => type === "application/x-fruit-truck-asset" || type === "Files")) {
+        if (hasAssetDragData(event.dataTransfer) || Array.from(event.dataTransfer.types).includes("Files")) {
           event.preventDefault();
           event.dataTransfer.dropEffect = "copy";
           setDragging(true);
@@ -81,10 +90,29 @@ export function InputTray({
       onDragLeave={(event) => {
         if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false);
       }}
+      onPointerEnter={(event) => {
+        if (enabled && (event.buttons & 1) && readActiveAssetDragId()) setDragging(true);
+      }}
+      onPointerMove={(event) => {
+        if (enabled && (event.buttons & 1) && readActiveAssetDragId()) setDragging(true);
+      }}
+      onPointerLeave={() => {
+        if (readActiveAssetDragId()) setDragging(false);
+      }}
+      onPointerUp={(event) => {
+        if (!enabled) return;
+        const assetId = readActiveAssetDragId();
+        if (!assetId) return;
+        event.preventDefault();
+        setDragging(false);
+        const asset = assetMap.get(assetId);
+        if (asset) addAssets([asset]);
+        clearAssetDragData();
+      }}
       onDrop={(event) => {
         event.preventDefault();
         setDragging(false);
-        const assetId = event.dataTransfer.getData("application/x-fruit-truck-asset");
+        const assetId = readAssetDragId(event.dataTransfer);
         if (assetId) {
           const asset = assetMap.get(assetId);
           if (asset) addAssets([asset]);

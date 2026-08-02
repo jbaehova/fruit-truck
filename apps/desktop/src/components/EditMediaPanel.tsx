@@ -12,6 +12,7 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { AssetPreview } from "@/components/AssetPreview";
+import { clearAssetDragData, hasAssetDragData, readActiveAssetDragId, readAssetDragId, subscribeToAssetPointerDrop } from "@/assetDrag";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { useI18n } from "@/i18n";
@@ -20,10 +21,6 @@ import { resolveAssetSource, type MaskPoint, type MaskStroke, type SessionAsset 
 
 const BRUSH_SIZES = [0.025, 0.05, 0.09] as const;
 const maskBuffers = new WeakMap<HTMLCanvasElement, HTMLCanvasElement>();
-
-function hasType(event: ReactDragEvent, type: string) {
-  return Array.from(event.dataTransfer.types).includes(type);
-}
 
 function renderStrokes(
   canvas: HTMLCanvasElement,
@@ -243,12 +240,18 @@ export function EditMediaPanel({
   const strokes = maskStrokes ?? [];
   const supportsMask = kind === "image" && Boolean(asset) && onMaskStrokesChange && onMaskInstructionsChange;
 
+  useEffect(() => subscribeToAssetPointerDrop("edit", (assetId) => {
+    setDragging(false);
+    onDropAsset(assetId);
+  }), [onDropAsset]);
+
   const acceptDrop = (event: ReactDragEvent) =>
-    hasType(event, "application/x-fruit-truck-asset") || hasType(event, "Files");
+    hasAssetDragData(event.dataTransfer) || Array.from(event.dataTransfer.types).includes("Files");
 
   return (
     <section
       className={`edit-media-panel ${dragging ? "dragging" : ""}`}
+      data-asset-drop-target="edit"
       onDragEnter={(event) => {
         if (!acceptDrop(event)) return;
         event.preventDefault();
@@ -262,10 +265,27 @@ export function EditMediaPanel({
       onDragLeave={(event) => {
         if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false);
       }}
+      onPointerEnter={(event) => {
+        if ((event.buttons & 1) && readActiveAssetDragId()) setDragging(true);
+      }}
+      onPointerMove={(event) => {
+        if ((event.buttons & 1) && readActiveAssetDragId()) setDragging(true);
+      }}
+      onPointerLeave={() => {
+        if (readActiveAssetDragId()) setDragging(false);
+      }}
+      onPointerUp={(event) => {
+        const assetId = readActiveAssetDragId();
+        if (!assetId) return;
+        event.preventDefault();
+        setDragging(false);
+        onDropAsset(assetId);
+        clearAssetDragData();
+      }}
       onDrop={(event) => {
         event.preventDefault();
         setDragging(false);
-        const assetId = event.dataTransfer.getData("application/x-fruit-truck-asset");
+        const assetId = readAssetDragId(event.dataTransfer);
         if (assetId) onDropAsset(assetId);
         else if (event.dataTransfer.files.length) void onImport(event.dataTransfer.files);
       }}
@@ -276,7 +296,7 @@ export function EditMediaPanel({
           <strong>{asset ? asset.name : t(kind === "image" ? "chooseEditImage" : "chooseEditVideo")}</strong>
           <small>{asset ? targetLabel : t("editCanvasDropHint")}</small>
         </div>
-        <div>
+        <div className="edit-media-actions">
           {asset ? (
             <ToggleGroup
               className="canvas-view-switch"

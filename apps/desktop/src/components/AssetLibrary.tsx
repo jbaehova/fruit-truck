@@ -6,10 +6,12 @@ import { ToggleGroup } from "@base-ui/react/toggle-group";
 import { Check, Download, Eye, Film, ImageIcon, Plus, Trash2, Video, X } from "lucide-react";
 import { useState } from "react";
 import { AssetPreview } from "@/components/AssetPreview";
+import { beginAssetPointerDrag, clearAssetDragData } from "@/assetDrag";
 import { Button } from "@/components/ui/button";
+import { toast } from "@/components/ui/toast-manager";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useI18n, type MessageKey } from "@/i18n";
-import { resolveAssetSource, type SessionAsset, type SessionVideoJob } from "@/studio";
+import { exportAssetToDownloads, type SessionAsset, type SessionVideoJob } from "@/studio";
 import type { ArtifactNode } from "@/agent";
 
 const ORIGIN_KEYS: Record<SessionAsset["origin"], MessageKey> = {
@@ -66,12 +68,12 @@ export function AssetLibrary({
   };
 
   const exportAsset = async (asset: SessionAsset) => {
-    const source = await resolveAssetSource(asset);
-    const anchor = document.createElement("a");
-    anchor.href = source;
-    anchor.download = asset.name;
-    anchor.click();
-    if (source.startsWith("blob:")) window.setTimeout(() => URL.revokeObjectURL(source), 1_000);
+    try {
+      const path = await exportAssetToDownloads(asset);
+      toast.success(t("downloadComplete", { name: asset.name, path }));
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
+    }
   };
 
   return (
@@ -156,11 +158,6 @@ export function AssetLibrary({
           <article
             key={asset.id}
             className={`asset-tile ${selectedIds.has(asset.id) ? "selected" : ""}`}
-            draggable
-            onDragStart={(event) => {
-              event.dataTransfer.setData("application/x-fruit-truck-asset", asset.id);
-              event.dataTransfer.effectAllowed = "copy";
-            }}
           >
             <Checkbox.Root
               className="asset-select"
@@ -170,7 +167,16 @@ export function AssetLibrary({
             >
               <Checkbox.Indicator><Check /></Checkbox.Indicator>
             </Checkbox.Root>
-            <Button variant="ghost" className="asset-visual" onClick={() => setPreview(asset)}>
+            <Button
+              variant="ghost"
+              className="asset-visual"
+              onPointerDown={(event) => {
+                if (event.button === 0) beginAssetPointerDrag(asset.id);
+              }}
+              onPointerUp={clearAssetDragData}
+              onPointerCancel={clearAssetDragData}
+              onClick={() => setPreview(asset)}
+            >
               <AssetPreview asset={asset} />
               <span>{asset.kind === "image" ? <ImageIcon /> : <Video />}{t(ORIGIN_KEYS[asset.origin])}</span>
             </Button>

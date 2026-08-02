@@ -100,10 +100,14 @@ export async function applyAlphaMaskBlob(source: string, strokes: MaskStroke[]):
   context.drawImage(mask, 0, 0);
   context.globalCompositeOperation = "source-over";
   return new Promise((resolve, reject) => {
-    canvas.toBlob((blob) => {
-      if (blob) resolve(blob);
-      else reject(new Error("The edit image could not be converted into a mask-ready PNG."));
-    }, "image/png");
+    try {
+      canvas.toBlob((blob) => {
+        if (blob) resolve(blob);
+        else reject(new Error("The edit image could not be converted into a mask-ready PNG."));
+      }, "image/png");
+    } catch {
+      reject(new Error("The edit image could not be converted into a mask-ready PNG."));
+    }
   });
 }
 
