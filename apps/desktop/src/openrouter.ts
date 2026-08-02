@@ -20,6 +20,7 @@ export type ImageModel = {
   supported_parameters: Record<string, CapabilityDescriptor>;
   supports_streaming?: boolean;
   endpoint_count?: number;
+  pricing?: Array<{ billable: string; unit: string; cost_usd: number; variant?: string }>;
 };
 
 export type ImageModelEndpoint = {
@@ -54,6 +55,46 @@ export type VideoModel = {
 };
 
 export type GenerationModel = ImageModel | VideoModel;
+
+function formatUsd(value: number) {
+  if (!Number.isFinite(value)) return "";
+  return value < 0.01 ? `$${value.toFixed(4)}` : `$${value.toFixed(2)}`;
+}
+
+export function modelPriceLabel(mode: GenerationMode, model: GenerationModel): string {
+  if (mode === "image") {
+    const pricing = (model as ImageModel).pricing ?? [];
+    if (!pricing.length) return "Price unavailable";
+    const costs = pricing.map((item) => item.cost_usd).filter(Number.isFinite);
+    if (!costs.length) return "Price unavailable";
+    const minimum = Math.min(...costs);
+    const maximum = Math.max(...costs);
+    const unit = pricing[0]?.unit?.replaceAll("_", " ") ?? "generation";
+    return minimum === maximum
+      ? `${formatUsd(minimum)} / ${unit}`
+      : `${formatUsd(minimum)}–${formatUsd(maximum)} / ${unit}`;
+  }
+  const values = Object.values((model as VideoModel).pricing_skus ?? {})
+    .map((value) => Number(String(value).replace(/[^0-9.eE+-]/g, "")))
+    .filter((value) => Number.isFinite(value));
+  if (!values.length) return "Price unavailable";
+  const minimum = Math.min(...values);
+  const maximum = Math.max(...values);
+  return minimum === maximum ? `${formatUsd(minimum)} estimated` : `${formatUsd(minimum)}–${formatUsd(maximum)} estimated`;
+}
+
+export function estimateGenerationCost(mode: GenerationMode, model: GenerationModel, options: DraftOptions): number | undefined {
+  if (mode === "image") {
+    const costs = ((model as ImageModel).pricing ?? []).map((item) => item.cost_usd).filter((value) => Number.isFinite(value) && value >= 0);
+    if (!costs.length) return undefined;
+    const count = typeof options.n === "number" && options.n > 0 ? options.n : 1;
+    return Math.min(...costs) * count;
+  }
+  const costs = Object.values((model as VideoModel).pricing_skus ?? {})
+    .map((value) => Number(String(value).replace(/[^0-9.eE+-]/g, "")))
+    .filter((value) => Number.isFinite(value) && value >= 0);
+  return costs.length ? Math.min(...costs) : undefined;
+}
 
 export type ReferenceAsset = {
   id: string;
@@ -95,6 +136,7 @@ export type CredentialStatus = {
 export type ImageResult = {
   kind: "image";
   urls: string[];
+  actualCostUsd?: number;
 };
 
 export type VideoResult = {
@@ -104,6 +146,7 @@ export type VideoResult = {
   url?: string;
   error?: string;
   progress?: number;
+  actualCostUsd?: number;
 };
 
 export function isTauriRuntime() {
@@ -137,21 +180,37 @@ export async function removeApiKey(): Promise<CredentialStatus> {
   return getCredentialStatus();
 }
 
+export function retryDelayMs(retryAfter: string | null, retry: number, now = Date.now(), jitter = Math.random()): number {
+  const value = retryAfter?.trim() ?? "";
+  const seconds = Number(value);
+  const dateDelay = Date.parse(value) - now;
+  const delay = value && Number.isFinite(seconds) && seconds >= 0
+    ? seconds * 1_000
+    : value && Number.isFinite(dateDelay) && dateDelay > 0
+      ? dateDelay
+      : 500 * 2 ** retry + Math.floor(Math.max(0, Math.min(1, jitter)) * 200);
+  return Math.min(30_000, Math.max(0, delay));
+}
+
 async function request<T>(method: "GET" | "POST", path: string, body?: unknown): Promise<T> {
   if (isTauriRuntime()) {
     return invokeTauri<T>("openrouter_request", { method, path, body: body ?? null });
   }
   const key = window.localStorage.getItem("fruit-truck.dev-key");
-  const response = await fetch(`https://openrouter.ai/api/v1${path}`, {
-    method,
-    headers: {
-      "Content-Type": "application/json",
-      ...(key ? { Authorization: `Bearer ${key}` } : {}),
-    },
-    body: body == null ? undefined : JSON.stringify(body),
-  });
-  if (!response.ok) throw new Error(`OpenRouter ${response.status}: ${await response.text()}`);
-  return response.json() as Promise<T>;
+  for (let retry = 0; ; retry += 1) {
+    const response = await fetch(`https://openrouter.ai/api/v1${path}`, {
+      method,
+      headers: {
+        "Content-Type": "application/json",
+        ...(key ? { Authorization: `Bearer ${key}` } : {}),
+      },
+      body: body == null ? undefined : JSON.stringify(body),
+    });
+    if (response.ok) return response.json() as Promise<T>;
+    const message = await response.text();
+    if (![429, 503].includes(response.status) || retry >= 3) throw new Error(`OpenRouter ${response.status}: ${message}`);
+    await new Promise((resolveWait) => window.setTimeout(resolveWait, retryDelayMs(response.headers.get("retry-after"), retry)));
+  }
 }
 
 export async function loadModels(mode: "image"): Promise<ImageModel[]>;
@@ -425,6 +484,7 @@ export async function enhancePrompt(input: PromptEnhancementInput): Promise<stri
 export async function generateImage(payload: Record<string, unknown>): Promise<ImageResult> {
   const response = await request<{
     data?: Array<{ b64_json?: string; url?: string; local_path?: string; media_type?: string }>;
+    usage?: { cost?: number };
   }>("POST", "/images", payload);
   const urls = (response.data ?? []).flatMap((item) => {
     if (item.local_path) return [item.local_path];
@@ -433,18 +493,18 @@ export async function generateImage(payload: Record<string, unknown>): Promise<I
     return [];
   });
   if (!urls.length) throw new Error("OpenRouter returned no image data.");
-  return { kind: "image", urls };
+  return { kind: "image", urls, actualCostUsd: typeof response.usage?.cost === "number" ? response.usage.cost : undefined };
 }
 
 export async function submitVideo(payload: Record<string, unknown>): Promise<VideoResult> {
-  const response = await request<{ id?: string; job_id?: string; status?: VideoResult["status"] }>(
+  const response = await request<{ id?: string; job_id?: string; status?: VideoResult["status"]; usage?: { cost?: number } }>(
     "POST",
     "/videos",
     payload,
   );
   const jobId = response.id ?? response.job_id;
   if (!jobId) throw new Error("OpenRouter returned no video job ID.");
-  return { kind: "video", jobId, status: response.status ?? "pending" };
+  return { kind: "video", jobId, status: response.status ?? "pending", actualCostUsd: typeof response.usage?.cost === "number" ? response.usage.cost : undefined };
 }
 
 export async function pollVideo(jobId: string): Promise<VideoResult> {
@@ -455,6 +515,7 @@ export async function pollVideo(jobId: string): Promise<VideoResult> {
     error?: string | { message?: string };
     unsigned_urls?: string[];
     data?: Array<{ url?: string }>;
+    usage?: { cost?: number };
   }>("GET", `/videos/${encodeURIComponent(jobId)}`);
   const error = typeof response.error === "string" ? response.error : response.error?.message;
   const url = response.unsigned_urls?.[0] ?? response.data?.[0]?.url;
@@ -465,6 +526,7 @@ export async function pollVideo(jobId: string): Promise<VideoResult> {
     progress: response.progress,
     error,
     url,
+    actualCostUsd: typeof response.usage?.cost === "number" ? response.usage.cost : undefined,
   };
 }
 

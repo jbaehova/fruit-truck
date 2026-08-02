@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useI18n } from "@/i18n";
-import { modelInputSignature, type GenerationMode, type GenerationModel } from "@/openrouter";
+import { modelInputSignature, modelPriceLabel, type GenerationMode, type GenerationModel } from "@/openrouter";
 
 type Props = {
   mode: GenerationMode;
@@ -41,6 +41,10 @@ export function ModelSelector({ mode, models, selectedId, loading, disabled, onS
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const selected = models.find((model) => model.id === selectedId) ?? null;
+  const price = (model: GenerationModel) => {
+    const value = modelPriceLabel(mode, model);
+    return value === "Price unavailable" ? t("priceUnavailable") : value;
+  };
   const filtered = useMemo(() => {
     const value = query.trim().toLowerCase();
     if (!value) return models;
@@ -65,6 +69,7 @@ export function ModelSelector({ mode, models, selectedId, loading, disabled, onS
           <strong>{selected ? modelName(selected) : loading ? t("loadingModels") : t("chooseModel")}</strong>
         </span>
         {selected ? <span className="model-selector-provider">{providerName(selected)}</span> : null}
+        {selected ? <span className="model-selector-price">{price(selected)}</span> : null}
         <ChevronDown className="model-selector-chevron" />
       </Popover.Trigger>
       <Popover.Portal>
@@ -113,7 +118,7 @@ export function ModelSelector({ mode, models, selectedId, loading, disabled, onS
                     <span className="model-icon">{mode === "image" ? <ImageIcon /> : <Video />}</span>
                     <span className="model-copy">
                       <strong>{modelName(model)}</strong>
-                      <small>{providerName(model)} · {localizedInputSignature(mode, model, language, t)}</small>
+                      <small>{providerName(model)} · {localizedInputSignature(mode, model, language, t)} · {price(model)}</small>
                     </span>
                     {active ? <Check className="model-check" /> : null}
                   </Button>

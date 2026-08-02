@@ -4,11 +4,13 @@ import {
   allowedAssetRoles,
   buildRequest,
   defaultOptions,
+  estimateGenerationCost,
   productSystemInstruction,
   promptEnhancerInstruction,
   validateEnhancedPrompt,
   modelInputSignature,
   prettyRequest,
+  retryDelayMs,
   supportsVideoInput,
   type ImageModel,
   type ReferenceAsset,
@@ -156,4 +158,28 @@ test("request previews never expose Base64 media", () => {
   assert.doesNotMatch(preview, /;base64,/i);
   assert.doesNotMatch(preview, /A{20}/);
   assert.match(preview, /media payload omitted/);
+});
+
+test("retry delays honor Retry-After and bound exponential fallback", () => {
+  assert.equal(retryDelayMs("2", 0, 0, 0), 2_000);
+  assert.equal(retryDelayMs("Thu, 01 Jan 1970 00:00:03 GMT", 0, 1_000, 0), 2_000);
+  assert.equal(retryDelayMs(null, 2, 0, 0), 2_000);
+  assert.equal(retryDelayMs("999", 0, 0, 0), 30_000);
+});
+
+test("generation cost estimates use structured catalog pricing", () => {
+  const image: ImageModel = {
+    id: "priced/image",
+    name: "Priced image",
+    supported_parameters: {},
+    pricing: [{ billable: "image", unit: "image", cost_usd: 0.04 }],
+  };
+  const video: VideoModel = {
+    id: "priced/video",
+    name: "Priced video",
+    pricing_skus: { standard: "$0.25" },
+  };
+  assert.equal(estimateGenerationCost("image", image, { n: 3 }), 0.12);
+  assert.equal(estimateGenerationCost("video", video, {}), 0.25);
+  assert.equal(estimateGenerationCost("video", { id: "unknown", name: "Unknown" }, {}), undefined);
 });

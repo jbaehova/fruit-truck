@@ -1218,25 +1218,46 @@ async fn openrouter_request(
     .timeout(std::time::Duration::from_secs(180))
     .build()
     .map_err(|error| error.to_string())?;
-  let request = match method.as_str() {
-    "GET" => client.get(url.clone()),
-    "POST" => client.post(url),
-    _ => return Err("Unsupported HTTP method.".into()),
+  if !matches!(method.as_str(), "GET" | "POST") {
+    return Err("Unsupported HTTP method.".into());
   }
-  .bearer_auth(api_key)
-  .header("Content-Type", "application/json")
-  .header("HTTP-Referer", "https://fruit-truck.local")
-  .header("X-Title", "Fruit Truck");
-  let response = if let Some(mut payload) = body {
-    hydrate_local_media_references(&app, &mut payload)?;
-    request.json(&payload).send().await
-  } else {
-    request.send().await
+  let mut hydrated_body = body;
+  if let Some(payload) = hydrated_body.as_mut() {
+    hydrate_local_media_references(&app, payload)?;
   }
-  .map_err(|error| format!("Could not reach OpenRouter: {error}"))?;
-  if !response.status().is_success() {
-    return Err(response_error(response).await);
-  }
+  let response = {
+    let mut retry = 0u32;
+    loop {
+      let request = match method.as_str() {
+        "GET" => client.get(url.clone()),
+        "POST" => client.post(url.clone()),
+        _ => unreachable!(),
+      }
+      .bearer_auth(&api_key)
+      .header("Content-Type", "application/json")
+      .header("HTTP-Referer", "https://fruit-truck.local")
+      .header("X-Title", "Fruit Truck");
+      let response = if let Some(payload) = hydrated_body.as_ref() {
+        request.json(payload).send().await
+      } else {
+        request.send().await
+      }
+      .map_err(|error| format!("Could not reach OpenRouter: {error}"))?;
+      if response.status().is_success() {
+        break response;
+      }
+      let retryable = matches!(response.status().as_u16(), 429 | 503);
+      if !retryable || retry >= 3 {
+        return Err(response_error(response).await);
+      }
+      let retry_after = response.headers().get(reqwest::header::RETRY_AFTER).and_then(|value| value.to_str().ok());
+      let delay = openrouter_retry_delay(retry_after, retry);
+      tauri::async_runtime::spawn_blocking(move || std::thread::sleep(delay))
+        .await
+        .map_err(|error| format!("OpenRouter retry wait failed: {error}"))?;
+      retry += 1;
+    }
+  };
   let bytes = read_bounded_response(response, MAX_OPENROUTER_JSON_BYTES, "OpenRouter response").await?;
   let mut payload = serde_json::from_slice::<Value>(&bytes)
     .map_err(|error| format!("OpenRouter returned invalid JSON: {error}"))?;
@@ -1246,7 +1267,16 @@ async fn openrouter_request(
   Ok(payload)
 }
 
-fn is_blocked_ip_address(address: std::net::IpAddr) -> bool {
+fn openrouter_retry_delay(retry_after: Option<&str>, retry: u32) -> std::time::Duration {
+  let milliseconds = retry_after
+    .and_then(|value| value.trim().parse::<f64>().ok())
+    .filter(|value| value.is_finite() && *value >= 0.0)
+    .map(|seconds| (seconds * 1_000.0) as u64)
+    .unwrap_or_else(|| 500u64.saturating_mul(2u64.saturating_pow(retry.min(6))));
+  std::time::Duration::from_millis(milliseconds.min(30_000))
+}
+
+fn is_blocked_ip_addressfn is_blocked_ip_address(address: std::net::IpAddr) -> bool {
   match address {
     std::net::IpAddr::V4(value) => {
       value.is_private()
@@ -1697,6 +1727,7 @@ mod tests {
     append_shared_asset_chunk_to_root,
     finish_shared_asset_to_root,
     openrouter_url,
+    openrouter_retry_delay,
     validate_remote_image_url,
     write_assembly_source,
   };
@@ -1715,6 +1746,15 @@ mod tests {
   }
 
   #[test]
+
+  #[test]
+  fn openrouter_retries_honor_seconds_and_bound_backoff() {
+    assert_eq!(openrouter_retry_delay(Some("2"), 0), std::time::Duration::from_secs(2));
+    assert_eq!(openrouter_retry_delay(None, 0), std::time::Duration::from_millis(500));
+    assert_eq!(openrouter_retry_delay(None, 3), std::time::Duration::from_secs(4));
+    assert_eq!(openrouter_retry_delay(Some("999"), 0), std::time::Duration::from_secs(30));
+  }
+
   fn api_keys_are_masked() {
     assert_eq!(mask_key("sk-or-v1-1234567890"), "sk-or-v…7890");
     assert_eq!(mask_key("가나다라마바사아자차카타"), "가나다라마바사…자차카타");
