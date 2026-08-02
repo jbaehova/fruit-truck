@@ -1349,10 +1349,24 @@ button, input, textarea { font-family: inherit; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 7px; }
 .settings-dialog { width: min(620px, 100%); max-height: min(850px, 90vh); display: grid; grid-template-rows: auto minmax(0, 1fr) auto; }
 .settings-body { display: grid; gap: 17px; padding: 18px; overflow: auto; }
+.settings-credential { display: grid; gap: 11px; padding-bottom: 17px; border-bottom: 1px solid var(--line); }
+.settings-section-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.settings-section-header > div { display: grid; gap: 2px; }
+.settings-section-header strong { font-size: 12.5px; font-weight: 650; }
+.settings-section-header small { color: var(--text-muted); font-size: 10.5px; line-height: 1.45; }
+.settings-credential-loading { margin: 0; padding: 14px 10px; color: var(--text-muted); background: var(--surface-subtle); font-size: 11px; }
 .settings-key-field { display: grid; gap: 7px; }
 .settings-key-field > label, .settings-field-label { font-size: 12px; font-weight: 650; }
-.settings-key-field > div:not(.settings-field-label) { display: grid; grid-template-columns: 1fr auto; gap: 7px; }
+.settings-key-field > div:not(.settings-field-label) { display: flex; gap: 7px; }
+.settings-key-field > div:not(.settings-field-label) .base-input { flex: 1; }
 .settings-key-field > p, .settings-key-field [data-base-ui-field-error] { margin: 0; color: var(--text-muted); font-size: 11px; }
+.credential-summary { min-height: 48px; display: grid; grid-template-columns: 27px minmax(0, 1fr) auto; align-items: center; gap: 9px; padding: 9px; border: 1px solid var(--text); background: var(--surface-subtle); }
+.credential-summary-icon { width: 27px; height: 27px; display: grid; place-items: center; color: #fff; background: var(--text); }
+.credential-summary-icon svg { width: 13px; height: 13px; }
+.credential-summary > span:nth-child(2) { min-width: 0; display: grid; gap: 2px; }
+.credential-summary strong { font-size: 12px; font-weight: 620; }
+.credential-summary small { overflow: hidden; color: var(--text-muted); font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.settings-key-error { margin: 0; color: var(--text); font-size: 11px; }
 .credential-location { display: flex; align-items: flex-start; gap: 9px; padding: 11px; border: 1px solid var(--text); border-radius: 0; background: var(--surface-subtle); }
 .credential-location > svg { width: 14px; margin-top: 1px; color: var(--text); }
 .credential-location span { display: grid; gap: 3px; }
@@ -1361,7 +1375,7 @@ button, input, textarea { font-family: inherit; }
 .settings-note { margin: 0; color: var(--text-muted); font-size: 11px; line-height: 1.55; }
 .external-link { width: fit-content; padding-inline: 0; color: var(--text); font-size: 11.5px; text-decoration: none; }
 .external-link svg { width: 10px; }
-.settings-footer { display: flex; align-items: center; justify-content: space-between; padding: 12px 18px; border-top: 1px solid var(--line); background: var(--surface-subtle); }
+.settings-footer { display: flex; align-items: center; justify-content: flex-end; padding: 12px 18px; border-top: 1px solid var(--line); background: var(--surface-subtle); }
 .rename-dialog { width: min(400px, 100%); }
 .rename-dialog form { display: grid; gap: 16px; padding: 18px; }
 .confirm-dialog { width: min(410px, 100%); display: grid; grid-template-columns: 34px 1fr; gap: 11px; padding: 19px; }

@@ -2,7 +2,7 @@ import { Dialog } from "@base-ui/react/dialog";
 import { Field } from "@base-ui/react/field";
 import { Form } from "@base-ui/react/form";
 import { useEffect, useRef, useState } from "react";
-import { ExternalLink, History, ShieldCheck, SlidersHorizontal, Upload, WandSparkles, X } from "lucide-react";
+import { Check, ExternalLink, History, Pencil, ShieldCheck, SlidersHorizontal, Upload, WandSparkles, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -40,6 +40,7 @@ export function SettingsDialog({
 }: Props) {
   const { language, setLanguage, t } = useI18n();
   const [key, setKey] = useState("");
+  const [editingKey, setEditingKey] = useState(false);
   const [busy, setBusy] = useState(false);
   const [keyError, setKeyError] = useState<string | null>(null);
   const [skillError, setSkillError] = useState<string | null>(null);
@@ -61,6 +62,7 @@ export function SettingsDialog({
   useEffect(() => {
     if (open) {
       setKey("");
+      setEditingKey(false);
       setKeyError(null);
       setSkillError(null);
       void refreshSkills();
@@ -73,6 +75,19 @@ export function SettingsDialog({
       setKeyError(null);
       await onSave(key);
       setKey("");
+      setEditingKey(false);
+    } catch (cause) {
+      setKeyError(String(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const removeKey = async () => {
+    try {
+      setBusy(true);
+      setKeyError(null);
+      await onRemove();
     } catch (cause) {
       setKeyError(String(cause));
     } finally {
@@ -97,23 +112,80 @@ export function SettingsDialog({
               <Dialog.Close render={<Button type="button" variant="ghost" size="icon" />} aria-label={t("closeSettings")}><X /></Dialog.Close>
             </header>
             <div className="settings-body">
-              <Form onFormSubmit={() => void saveKey()}>
-                <Field.Root className="settings-key-field" name="apiKey" invalid={Boolean(keyError)}>
-                  <Field.Label>{t("apiKey")}</Field.Label>
+              <section className="settings-credential" aria-labelledby="settings-api-key-title">
+                <header className="settings-section-header">
                   <div>
-                    <Input type="password" autoComplete="off" placeholder={status?.maskedKey ?? "sk-or-v1-…"} value={key} onChange={(event) => setKey(event.target.value)} />
-                    <Button type="submit" disabled={busy || key.trim().length < 12}>{t("saveKey")}</Button>
+                    <strong id="settings-api-key-title">{t("apiKey")}</strong>
+                    <small>{status === null ? t("loading") : status.configured ? t("apiKeyConfiguredHint") : t("apiKeyMissingHint")}</small>
                   </div>
-                  {keyError ? <Field.Error className="field-error" match>{keyError}</Field.Error> : null}
-                </Field.Root>
-              </Form>
-              <div className="credential-location">
-                <ShieldCheck />
-                <span>
-                  <strong>{t("localPlaintextStorage")}</strong>
-                  <small>{status?.path ?? "~/.fruit-truck/credentials.json"}<br />{t("storagePermissions")}</small>
-                </span>
-              </div>
+                  {status?.configured && !editingKey ? (
+                    <Button type="button" variant="outline" size="xs" onClick={() => setEditingKey(true)}>
+                      <Pencil /> {t("changeApiKey")}
+                    </Button>
+                  ) : null}
+                </header>
+                {status === null ? (
+                  <p className="settings-credential-loading">{t("loading")}</p>
+                ) : status.configured && !editingKey ? (
+                  <div className="credential-summary">
+                    <span className="credential-summary-icon"><Check /></span>
+                    <span>
+                      <strong>{t("apiKeyConfigured")}</strong>
+                      <small>{status.maskedKey}</small>
+                    </span>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="xs"
+                      disabled={busy}
+                      onClick={() => void removeKey()}
+                    >{t("removeSavedKey")}</Button>
+                  </div>
+                ) : (
+                  <Form onFormSubmit={() => void saveKey()}>
+                    <Field.Root className="settings-key-field" name="apiKey" invalid={Boolean(keyError)}>
+                      <Field.Label className="sr-only">{t("apiKey")}</Field.Label>
+                      <div>
+                        <Input
+                          autoFocus={editingKey}
+                          type="password"
+                          autoComplete="off"
+                          placeholder="sk-or-v1-…"
+                          value={key}
+                          onChange={(event) => setKey(event.target.value)}
+                        />
+                        {status?.configured ? (
+                          <Button type="button" variant="outline" onClick={() => {
+                            setKey("");
+                            setKeyError(null);
+                            setEditingKey(false);
+                          }}>{t("cancel")}</Button>
+                        ) : null}
+                        <Button type="submit" disabled={busy || key.trim().length < 12}>{t("saveKey")}</Button>
+                      </div>
+                      {keyError ? <Field.Error className="field-error" match>{keyError}</Field.Error> : null}
+                    </Field.Root>
+                  </Form>
+                )}
+                {keyError && status?.configured && !editingKey ? <p className="settings-key-error" role="alert">{keyError}</p> : null}
+                <div className="credential-location">
+                  <ShieldCheck />
+                  <span>
+                    <strong>{t("localPlaintextStorage")}</strong>
+                    <small>{status?.path ?? "~/.fruit-truck/credentials.json"}<br />{t("storagePermissions")}</small>
+                  </span>
+                </div>
+                <p className="settings-note">{t("keyPrivacyHint")}</p>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="external-link"
+                  nativeButton={false}
+                  render={<a href="https://openrouter.ai/settings/keys" target="_blank" rel="noreferrer" />}
+                >
+                  {t("manageKeys")} <ExternalLink />
+                </Button>
+              </section>
               <Field.Root className="settings-key-field">
                 <Field.Label className="settings-field-label" nativeLabel={false} render={<div />}>{t("language")}</Field.Label>
                 <Select value={language} onValueChange={(value) => value && setLanguage(value as Language)}>
@@ -167,16 +239,6 @@ export function SettingsDialog({
                 </div>
                 {skillError ? <p className="settings-skill-error" role="alert">{skillError}</p> : null}
               </section>
-              <p className="settings-note">{t("keyPrivacyHint")}</p>
-              <Button
-                variant="ghost"
-                size="sm"
-                className="external-link"
-                nativeButton={false}
-                render={<a href="https://openrouter.ai/settings/keys" target="_blank" rel="noreferrer" />}
-              >
-                {t("manageKeys")} <ExternalLink />
-              </Button>
               <p className="settings-note">
                 {t("ffmpegNotice")}{" "}
                 <a href="https://github.com/jbaehova/fruit-truck/releases/latest" target="_blank" rel="noreferrer">
@@ -185,14 +247,6 @@ export function SettingsDialog({
               </p>
             </div>
             <footer className="settings-footer">
-              <Button type="button" variant="outline" disabled={!status?.configured || busy} onClick={() => void (async () => {
-                try {
-                  setBusy(true);
-                  await onRemove();
-                } finally {
-                  setBusy(false);
-                }
-              })()}>{t("removeSavedKey")}</Button>
               <Dialog.Close render={<Button type="button" />}>{t("done")}</Dialog.Close>
             </footer>
           </Dialog.Popup>
