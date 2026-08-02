@@ -7,6 +7,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{Emitter, Manager};
 use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_shell::{
+  process::{Command as ShellCommand, CommandEvent},
+  ShellExt,
+};
 
 const API_BASE: &str = "https://openrouter.ai/api/v1";
 const CREDENTIALS_FILE: &str = "credentials.json";
@@ -1289,40 +1293,132 @@ async fn cache_video_content(
   })
 }
 
-fn command_available(name: &str) -> bool {
-  std::process::Command::new(name)
-    .arg("-version")
-    .stdout(std::process::Stdio::null())
-    .stderr(std::process::Stdio::null())
-    .status()
-    .is_ok_and(|status| status.success())
+fn media_command(app: &tauri::AppHandle, name: &str) -> Result<ShellCommand, String> {
+  #[cfg(debug_assertions)]
+  {
+    Ok(app.shell().command(name))
+  }
+  #[cfg(not(debug_assertions))]
+  {
+    app
+      .shell()
+      .sidecar(name)
+      .map_err(|error| format!("The bundled {name} executable is unavailable: {error}"))
+  }
 }
 
-fn video_dimensions(path: &Path) -> Result<(u32, u32), String> {
-  let output = std::process::Command::new("ffprobe")
-    .args([
-      "-v", "error",
-      "-select_streams", "v:0",
-      "-show_entries", "stream=width,height",
-      "-of", "csv=s=x:p=0",
-    ])
-    .arg(path)
-    .output()
-    .map_err(|error| format!("Could not inspect video dimensions: {error}"))?;
-  if !output.status.success() {
-    return Err("FFprobe could not inspect the first assembly clip.".into());
+fn bounded_diagnostic(bytes: &[u8]) -> String {
+  let start = bytes.len().saturating_sub(MAX_ERROR_BYTES);
+  String::from_utf8_lossy(&bytes[start..]).trim().to_string()
+}
+
+struct MediaCommandOutput {
+  success: bool,
+  stdout: Vec<u8>,
+  stderr: Vec<u8>,
+}
+
+fn append_bounded(buffer: &mut Vec<u8>, bytes: &[u8]) {
+  let incoming = bytes.len().min(MAX_ERROR_BYTES);
+  let overflow = buffer.len().saturating_add(incoming).saturating_sub(MAX_ERROR_BYTES);
+  if overflow > 0 {
+    buffer.drain(..overflow.min(buffer.len()));
   }
-  let value = String::from_utf8_lossy(&output.stdout);
+  buffer.extend_from_slice(&bytes[bytes.len() - incoming..]);
+}
+
+async fn execute_media_command(command: ShellCommand) -> Result<MediaCommandOutput, String> {
+  let (mut events, _child) = command
+    .spawn()
+    .map_err(|error| format!("Could not launch bundled media tool: {error}"))?;
+  let mut stdout = Vec::new();
+  let mut stderr = Vec::new();
+  let mut exit_code = None;
+  while let Some(event) = events.recv().await {
+    match event {
+      CommandEvent::Stdout(bytes) => {
+        append_bounded(&mut stdout, &bytes);
+        append_bounded(&mut stdout, b"\n");
+      }
+      CommandEvent::Stderr(bytes) => {
+        append_bounded(&mut stderr, &bytes);
+        append_bounded(&mut stderr, b"\n");
+      }
+      CommandEvent::Error(error) => append_bounded(&mut stderr, error.as_bytes()),
+      CommandEvent::Terminated(payload) => exit_code = payload.code,
+      _ => {}
+    }
+  }
+  Ok(MediaCommandOutput {
+    success: exit_code == Some(0),
+    stdout,
+    stderr,
+  })
+}
+
+fn parse_video_dimensions(value: &str) -> Result<(u32, u32), String> {
   let (width, height) = value
     .trim()
     .split_once('x')
     .ok_or("FFprobe returned an invalid video size.")?;
   let width = width.parse::<u32>().map_err(|_| "Invalid video width.")?;
   let height = height.parse::<u32>().map_err(|_| "Invalid video height.")?;
-  if width == 0 || height == 0 || width > 8192 || height > 8192 {
+  let width = width - width % 2;
+  let height = height - height % 2;
+  if width < 2 || height < 2 || width > 8192 || height > 8192 {
     return Err("The assembly video size is unsupported.".into());
   }
-  Ok((width - width % 2, height - height % 2))
+  Ok((width, height))
+}
+
+async fn video_dimensions(app: &tauri::AppHandle, path: &Path) -> Result<(u32, u32), String> {
+  let command = media_command(app, "ffprobe")?
+    .args([
+      "-v",
+      "error",
+      "-select_streams",
+      "v:0",
+      "-show_entries",
+      "stream=width,height",
+      "-of",
+      "csv=s=x:p=0",
+    ])
+    .arg(path);
+  let output = execute_media_command(command).await?;
+  if !output.success {
+    let diagnostic = bounded_diagnostic(&output.stderr);
+    return Err(if diagnostic.is_empty() {
+      "FFprobe could not inspect the first assembly clip.".into()
+    } else {
+      format!("FFprobe could not inspect the first assembly clip: {diagnostic}")
+    });
+  }
+  parse_video_dimensions(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn target_video_bitrate(width: u32, height: u32) -> u64 {
+  let estimated = (width as f64 * height as f64 * 30.0 * 0.16).round() as u64;
+  estimated.clamp(4_000_000, 40_000_000)
+}
+
+fn assembly_filter_graph(clips: &[AssemblyClip], width: u32, height: u32) -> String {
+  let mut filters = clips
+    .iter()
+    .enumerate()
+    .map(|(index, clip)| {
+      format!(
+        "[{index}:v]trim=start={:.3}:end={:.3},setpts=PTS-STARTPTS,\
+scale={width}:{height}:force_original_aspect_ratio=decrease,\
+pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black,setsar=1,fps=30[v{index}]",
+        clip.start_seconds, clip.end_seconds,
+      )
+    })
+    .collect::<Vec<_>>();
+  let inputs = (0..clips.len())
+    .map(|index| format!("[v{index}]"))
+    .collect::<String>();
+  filters.push(format!("{inputs}concat=n={}:v=1:a=0[outv]", clips.len()));
+  filters.join(";")
 }
 
 fn write_assembly_source(
@@ -1348,16 +1444,13 @@ fn write_assembly_source(
 }
 
 #[tauri::command]
-fn assemble_video(
+async fn assemble_video(
   app: tauri::AppHandle,
   clips: Vec<AssemblyClip>,
   expected_duration: Option<f64>,
 ) -> Result<AssemblyResult, String> {
   if clips.is_empty() || clips.len() > 24 {
     return Err("Choose between 1 and 24 clips for an assembly.".into());
-  }
-  if !command_available("ffmpeg") || !command_available("ffprobe") {
-    return Err("FFmpeg and FFprobe are required for final video rendering. Install FFmpeg, then try again.".into());
   }
   let duration = clips.iter().try_fold(0.0, |total, clip| {
     let clip_duration = clip.end_seconds - clip.start_seconds;
@@ -1393,13 +1486,11 @@ fn assemble_video(
     .map_err(|error| error.to_string())?
     .as_millis();
   let work = cache.join(format!("assembly-{}-{stamp}", std::process::id()));
-  let legacy_generated = cache.join("generated");
   let output_directory = generated;
   std::fs::create_dir_all(&work).map_err(|error| error.to_string())?;
-  std::fs::create_dir_all(&legacy_generated).map_err(|error| error.to_string())?;
   std::fs::create_dir_all(&output_directory).map_err(|error| error.to_string())?;
 
-  let result = (|| -> Result<AssemblyResult, String> {
+  let result = async {
     let mut total_bytes = 0usize;
     let mut sources = Vec::with_capacity(clips.len());
     for (index, clip) in clips.iter().enumerate() {
@@ -1411,50 +1502,58 @@ fn assemble_video(
         &mut total_bytes,
       )?);
     }
-    let (width, height) = video_dimensions(&sources[0])?;
-    let mut segments = Vec::with_capacity(clips.len());
-    for (index, (clip, source)) in clips.iter().zip(sources.iter()).enumerate() {
-      let segment = work.join(format!("segment-{index}.mp4"));
-      let clip_duration = clip.end_seconds - clip.start_seconds;
-      let filter = format!(
-        "scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black,setsar=1"
-      );
-      let status = std::process::Command::new("ffmpeg")
-        .args(["-hide_banner", "-loglevel", "error", "-y", "-ss"])
-        .arg(format!("{:.3}", clip.start_seconds))
-        .arg("-i")
-        .arg(source)
-        .args(["-t"])
-        .arg(format!("{clip_duration:.3}"))
-        .args(["-vf", &filter, "-an", "-r", "30", "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p", "-movflags", "+faststart"])
-        .arg(&segment)
-        .status()
-        .map_err(|error| format!("Could not launch FFmpeg: {error}"))?;
-      if !status.success() {
-        return Err(format!("FFmpeg could not render crop {} ({}).", index + 1, clip.name));
-      }
-      segments.push(segment);
-    }
-    let concat_file = work.join("concat.txt");
-    let concat = segments.iter()
-      .map(|path| format!("file '{}'", path.to_string_lossy().replace('\'', "'\\''")))
-      .collect::<Vec<_>>()
-      .join("\n");
-    std::fs::write(&concat_file, concat).map_err(|error| error.to_string())?;
+    let (width, height) = video_dimensions(&app, &sources[0]).await?;
+    let filter = assembly_filter_graph(&clips, width, height);
+    let bitrate = target_video_bitrate(width, height).to_string();
+    let temporary_output = work.join("final.mp4");
     let output = output_directory.join(format!("final-{stamp}.mp4"));
-    let status = std::process::Command::new("ffmpeg")
-      .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i"])
-      .arg(&concat_file)
-      .args(["-c", "copy", "-movflags", "+faststart"])
-      .arg(&output)
-      .status()
-      .map_err(|error| format!("Could not launch FFmpeg: {error}"))?;
-    if !status.success() {
-      return Err("FFmpeg could not merge the cropped clips.".into());
+
+    let mut command = media_command(&app, "ffmpeg")?
+      .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-y"]);
+    for source in &sources {
+      command = command.arg("-i").arg(source);
     }
+    let command = command
+      .args([
+        "-filter_complex",
+        &filter,
+        "-map",
+        "[outv]",
+        "-an",
+        "-c:v",
+        "h264_videotoolbox",
+        "-profile:v",
+        "high",
+        "-allow_sw",
+        "1",
+        "-prio_speed",
+        "0",
+        "-b:v",
+        &bitrate,
+        "-pix_fmt",
+        "yuv420p",
+        "-fps_mode",
+        "cfr",
+        "-movflags",
+        "+faststart",
+        "-f",
+        "mp4",
+      ])
+      .arg(&temporary_output);
+    let rendered = execute_media_command(command).await?;
+    if !rendered.success {
+      let diagnostic = bounded_diagnostic(&rendered.stderr);
+      return Err(if diagnostic.is_empty() {
+        "FFmpeg could not render the final video.".into()
+      } else {
+        format!("FFmpeg could not render the final video: {diagnostic}")
+      });
+    }
+    std::fs::rename(&temporary_output, &output).map_err(|error| error.to_string())?;
     set_private_file_permissions(&output)?;
     Ok(AssemblyResult { path: output.to_string_lossy().into_owned(), duration })
-  })();
+  }
+  .await;
   let _ = std::fs::remove_dir_all(&work);
   result
 }
@@ -1464,6 +1563,7 @@ pub fn run() {
   tauri::Builder::default()
     .plugin(tauri_plugin_dialog::init())
     .plugin(tauri_plugin_process::init())
+    .plugin(tauri_plugin_shell::init())
     .plugin(tauri_plugin_updater::Builder::new().build())
     .on_window_event(|window, event| {
       let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event else {
@@ -1514,11 +1614,13 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
   use super::{
-    command_available,
+    assembly_filter_graph,
     list_custom_skills_from_root,
     mask_key,
+    parse_video_dimensions,
     read_custom_skill_from_root,
     save_custom_skill_to_root,
+    target_video_bitrate,
     validate_custom_skill_text,
     validate_media_path_in_roots,
     import_media_file,
@@ -1562,9 +1664,43 @@ mod tests {
   }
 
   #[test]
-  fn command_probe_never_panics() {
-    assert!(!command_available("fruit-truck-command-that-does-not-exist"));
+  fn assembly_video_dimensions_are_even_and_bounded() {
+    assert_eq!(parse_video_dimensions("1921x1081").unwrap(), (1920, 1080));
+    assert!(parse_video_dimensions("1x1080").is_err());
+    assert!(parse_video_dimensions("9000x1080").is_err());
+    assert!(parse_video_dimensions("not-a-size").is_err());
   }
+
+  #[test]
+  fn assembly_bitrate_scales_and_clamps() {
+    assert_eq!(target_video_bitrate(640, 360), 4_000_000);
+    assert_eq!(target_video_bitrate(1920, 1080), 9_953_280);
+    assert_eq!(target_video_bitrate(8192, 8192), 40_000_000);
+  }
+
+  #[test]
+  fn assembly_filter_trims_normalizes_and_concatenates_once() {
+    let clips = vec![
+      super::AssemblyClip {
+        source: "/managed/one.webm".into(),
+        name: "one".into(),
+        start_seconds: 1.25,
+        end_seconds: 3.5,
+      },
+      super::AssemblyClip {
+        source: "/managed/two.mp4".into(),
+        name: "two".into(),
+        start_seconds: 0.0,
+        end_seconds: 2.0,
+      },
+    ];
+    let filter = assembly_filter_graph(&clips, 1920, 1080);
+    assert!(filter.contains("[0:v]trim=start=1.250:end=3.500"));
+    assert!(filter.contains("scale=1920:1080:force_original_aspect_ratio=decrease"));
+    assert!(filter.contains("[v0][v1]concat=n=2:v=1:a=0[outv]"));
+    assert_eq!(filter.matches("concat=").count(), 1);
+  }
+
 
   #[test]
   fn custom_skill_approval_writes_and_versions_skill_markdown() {

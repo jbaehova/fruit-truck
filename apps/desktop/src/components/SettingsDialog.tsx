@@ -177,6 +177,12 @@ export function SettingsDialog({
               >
                 {t("manageKeys")} <ExternalLink />
               </Button>
+              <p className="settings-note">
+                {t("ffmpegNotice")}{" "}
+                <a href="https://github.com/jbaehova/fruit-truck/releases/latest" target="_blank" rel="noreferrer">
+                  {t("ffmpegSource")} <ExternalLink />
+                </a>
+              </p>
             </div>
             <footer className="settings-footer">
               <Button type="button" variant="outline" disabled={!status?.configured || busy} onClick={() => void (async () => {

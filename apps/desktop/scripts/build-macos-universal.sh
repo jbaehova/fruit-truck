@@ -1,7 +1,23 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
-npm run tauri -- build --bundles dmg --target universal-apple-darwin
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+desktop_dir="$(cd -- "${script_dir}/.." && pwd)"
+build_root="$(mktemp -d "${TMPDIR:-/tmp}/fruit-truck-universal.XXXXXX")"
+cleanup() {
+  [[ "${build_root}" == *"/fruit-truck-universal."* ]] && rm -rf -- "${build_root}"
+}
+trap cleanup EXIT
+
+bash "${script_dir}/build-ffmpeg-macos.sh" --arch arm64 --output-dir "${build_root}/arm64"
+bash "${script_dir}/build-ffmpeg-macos.sh" --arch x86_64 --output-dir "${build_root}/x86_64"
+bash "${script_dir}/assemble-universal-ffmpeg.sh" "${build_root}/arm64" "${build_root}/x86_64"
+
+cd "${desktop_dir}"
+npm run tauri -- build \
+  --bundles dmg \
+  --target universal-apple-darwin \
+  --config src-tauri/tauri.release.conf.json
 
 bundle_dir="src-tauri/target/universal-apple-darwin/release/bundle/dmg"
 raw_dmg="$(find "$bundle_dir" -name 'Fruit Truck_*_universal.dmg' -print -quit)"

@@ -9,7 +9,50 @@ permissions:
   contents: write
 
 jobs:
+  build-ffmpeg:
+    name: Build FFmpeg (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+          - arch: x86_64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Intel assembler
+        if: matrix.arch == 'x86_64'
+        run: command -v nasm >/dev/null 2>&1 || brew install nasm
+
+      - name: Build pinned LGPL FFmpeg
+        env:
+          FFMPEG_ARCH: ${{ matrix.arch }}
+        run: |
+          output_dir="$RUNNER_TEMP/ffmpeg-$FFMPEG_ARCH"
+          mkdir -p "$output_dir"
+          source_archive_args=()
+          if [[ "$FFMPEG_ARCH" == "arm64" ]]; then
+            source_archive_args=(--source-archive "$output_dir/ffmpeg-8.1.2.tar.xz")
+          fi
+          bash apps/desktop/scripts/build-ffmpeg-macos.sh \
+            --arch "$FFMPEG_ARCH" \
+            --output-dir "$output_dir" \
+            "${source_archive_args[@]}"
+
+      - name: Upload architecture artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-${{ matrix.arch }}
+          path: ${{ runner.temp }}/ffmpeg-${{ matrix.arch }}
+          if-no-files-found: error
+          retention-days: 7
+
   release-macos:
+    needs: build-ffmpeg
     runs-on: macos-latest
     steps:
       - name: Check out repository
@@ -35,6 +78,18 @@ jobs:
       - name: Install desktop dependencies
         working-directory: apps/desktop
         run: npm ci
+
+      - name: Download FFmpeg architecture artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ffmpeg-*
+          path: ${{ runner.temp }}/ffmpeg-artifacts
+
+      - name: Assemble and verify Universal FFmpeg
+        run: |
+          bash apps/desktop/scripts/assemble-universal-ffmpeg.sh \
+            "$RUNNER_TEMP/ffmpeg-artifacts/ffmpeg-arm64" \
+            "$RUNNER_TEMP/ffmpeg-artifacts/ffmpeg-x86_64"
 
       - name: Verify release tag matches app version
         if: github.event_name == 'push'
@@ -72,10 +127,16 @@ jobs:
           releaseDraft: true
           prerelease: false
           generateReleaseNotes: true
-          args: --target universal-apple-darwin --bundles app,dmg
+          args: --target universal-apple-darwin --bundles app,dmg --config src-tauri/tauri.release.conf.json
           releaseAssetNamePattern: Fruit-Truck-macOS-universal[ext]
 
-      - name: Create and upload checksum
+      - name: Verify app bundle is self-contained
+        run: |
+          APP_PATH=$(find apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos -name 'Fruit Truck.app' -print -quit)
+          test -n "$APP_PATH"
+          bash apps/desktop/scripts/verify-app-bundle-media-tools.sh "$APP_PATH"
+
+      - name: Upload DMG, FFmpeg compliance assets, and checksums
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ github.ref_name }}
@@ -86,7 +147,22 @@ jobs:
           gh release upload "$RELEASE_TAG" Fruit-Truck-macOS-universal.dmg --clobber
           DMG_HASH=$(shasum -a 256 Fruit-Truck-macOS-universal.dmg | cut -d ' ' -f 1)
           printf '%s  %s\n' "$DMG_HASH" "Fruit-Truck-macOS-universal.dmg" > Fruit-Truck-macOS-universal.dmg.sha256
-          gh release upload "$RELEASE_TAG" Fruit-Truck-macOS-universal.dmg.sha256 --clobber
+          cp "$RUNNER_TEMP/ffmpeg-artifacts/ffmpeg-arm64/ffmpeg-8.1.2.tar.xz" .
+          cp apps/desktop/src-tauri/target/bundled-tools/licenses/ffmpeg/build-config-arm64.txt .
+          cp apps/desktop/src-tauri/target/bundled-tools/licenses/ffmpeg/build-config-x86_64.txt .
+          shasum -a 256 \
+            ffmpeg-8.1.2.tar.xz \
+            build-config-arm64.txt \
+            build-config-x86_64.txt \
+            > ffmpeg-8.1.2-assets.sha256
+          gh release upload "$RELEASE_TAG" \
+            Fruit-Truck-macOS-universal.dmg.sha256 \
+            ffmpeg-8.1.2.tar.xz \
+            build-config-arm64.txt \
+            build-config-x86_64.txt \
+            ffmpeg-8.1.2-assets.sha256 \
+            THIRD_PARTY_NOTICES.md \
+            --clobber
 
       - name: Publish release
         env:
