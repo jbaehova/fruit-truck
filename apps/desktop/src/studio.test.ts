@@ -6,11 +6,47 @@ import {
   effectiveThreadDraft,
   effectiveThreadModelId,
   emptyDraft,
+  initializeSessionCatalogDefaults,
   loadStudioState,
+  nextAvailableSessionName,
   optionOverridesFromDefaults,
   saveStudioState,
   type StudioState,
 } from "./studio.ts";
+
+test("new session names advance past existing generated-name collisions", () => {
+  const sessions = [
+    { name: "First session" },
+    { name: "Session 3" },
+  ];
+  assert.equal(nextAvailableSessionName(sessions, (count) => `Session ${count}`), "Session 4");
+  assert.equal(nextAvailableSessionName([{ name: "세션 2" }], (count) => `세션 ${count}`), "세션 3");
+});
+
+test("sessions created after catalog loading inherit usable image and video defaults", () => {
+  const configured = initializeSessionCatalogDefaults(createSession("Configured"), {
+    image: [{
+      id: "image/default",
+      name: "Image default",
+      supported_parameters: { quality: { type: "enum", values: ["standard", "high"] } },
+    }],
+    video: [{
+      id: "video/generate",
+      name: "Video generate",
+      supported_durations: [5],
+    }, {
+      id: "video/edit",
+      name: "Video edit",
+      architecture: { input_modalities: ["text", "video"] },
+      supported_durations: [8],
+    }],
+  });
+
+  assert.deepEqual(configured.generationDefaults.modelIds, { image: "image/default", video: "video/generate" });
+  assert.deepEqual(configured.generationDefaults.options.image, { quality: "standard" });
+  assert.deepEqual(configured.generationDefaults.options.videoGenerate, { duration: 5, resolution: undefined, aspect_ratio: undefined, generate_audio: undefined });
+  assert.deepEqual(configured.generationDefaults.options.videoEdit, { duration: 8, resolution: undefined, aspect_ratio: undefined, generate_audio: undefined });
+});
 
 function withLocalStorage(run: (writes: Map<string, string>) => void) {
   const writes = new Map<string, string>();

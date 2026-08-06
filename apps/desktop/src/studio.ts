@@ -1,11 +1,12 @@
 import type {
   DraftOptions,
+  GenerationModel,
   GenerationMode,
   ReferenceRole,
   VideoWorkflow,
   VideoResult,
 } from "./openrouter.ts";
-import { isTauriRuntime } from "./openrouter.ts";
+import { defaultOptions, isTauriRuntime, supportsVideoInput } from "./openrouter.ts";
 import { createAgentState, normalizeAgentState, type AgentSessionState } from "./agent.ts";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 
@@ -58,6 +59,7 @@ export type GenerationDraftState = {
   enhancePrompt: boolean;
   enhancedPrompt: string;
   enhancedPromptDirty: boolean;
+  enhancedVisualCount: number;
   imageEditMode: boolean;
   imageEditTarget: string;
   maskInstructions: string;
@@ -216,6 +218,12 @@ export type NativeManagedAsset = {
   byteSize: number;
 };
 
+export type PromptContextFrame = {
+  position: "beginning" | "middle" | "end";
+  timestampSeconds: number;
+  dataUrl: string;
+};
+
 export const PROMPT_MODELS: Array<{
   id: PromptModel;
   label: string;
@@ -234,6 +242,7 @@ export function emptyDraft(): GenerationDraftState {
     enhancePrompt: true,
     enhancedPrompt: "",
     enhancedPromptDirty: false,
+    enhancedVisualCount: 0,
     imageEditMode: false,
     imageEditTarget: "",
     maskInstructions: "",
@@ -299,10 +308,6 @@ export function latestGenerationAttempt(thread: GenerationThread) {
   return thread.attempts.at(-1);
 }
 
-export function allGenerationThreads(session: Pick<StudioSession, "threads">) {
-  return [...session.threads.image, ...session.threads.video];
-}
-
 export function activeVideoJobsFromAttempts(session: Pick<StudioSession, "threads">): SessionVideoJob[] {
   return session.threads.video.flatMap((thread) => thread.attempts.flatMap((attempt) => {
     if (!attempt.jobId || !["submitting", "in_progress"].includes(attempt.status)) return [];
@@ -349,6 +354,40 @@ export function createSession(name = "Untitled session"): StudioSession {
   };
 }
 
+export function nextAvailableSessionName(
+  sessions: Array<Pick<StudioSession, "name">>,
+  format: (count: number) => string,
+) {
+  const existing = new Set(sessions.map((session) => session.name.trim()));
+  let count = sessions.length + 1;
+  while (existing.has(format(count))) count += 1;
+  return format(count);
+}
+
+export function initializeSessionCatalogDefaults(
+  session: StudioSession,
+  catalogs: Record<GenerationMode, GenerationModel[]>,
+) {
+  const imageModel = catalogs.image[0] ?? null;
+  const videoModel = catalogs.video[0] ?? null;
+  const videoEditModel = catalogs.video.find((model) => supportsVideoInput(model)) ?? videoModel;
+  return {
+    ...session,
+    generationDefaults: {
+      modelIds: {
+        image: imageModel?.id ?? "",
+        video: videoModel?.id ?? "",
+      },
+      options: {
+        image: defaultOptions("image", imageModel),
+        videoGenerate: defaultOptions("video", videoModel),
+        videoEdit: defaultOptions("video", videoEditModel),
+      },
+      providerJson: { image: "", videoGenerate: "", videoEdit: "" },
+    },
+  };
+}
+
 function createInitialStudioState(): StudioState {
   const session = createSession("First session");
   return {
@@ -373,6 +412,9 @@ function normalizeDraft(draft: GenerationDraftState | undefined): GenerationDraf
   return {
     ...emptyDraft(),
     ...value,
+    enhancedVisualCount: typeof value.enhancedVisualCount === "number" && value.enhancedVisualCount > 0
+      ? Math.floor(value.enhancedVisualCount)
+      : 0,
     maskInstructions: value.maskInstructions ?? "",
     maskStrokes: Array.isArray(value.maskStrokes)
       ? value.maskStrokes.map((stroke) => ({ ...stroke, operation: stroke.operation === "erase" ? "erase" as const : "paint" as const }))
@@ -911,6 +953,13 @@ export async function assetRequestUrl(asset: SessionAsset): Promise<string> {
     return asset.externalUrl;
   }
   throw new Error(`${asset.name} has no readable source.`);
+}
+
+export async function extractPromptContextFrames(asset: SessionAsset): Promise<PromptContextFrame[]> {
+  if (!isTauriRuntime() || !asset.localPath || asset.kind !== "video") {
+    throw new Error(`${asset.name} requires a managed desktop video for visual prompt enhancement.`);
+  }
+  return invoke<PromptContextFrame[]>("extract_prompt_context_frames", { path: asset.localPath });
 }
 
 export function nextReferenceSlot(references: DraftReference[]): number {
