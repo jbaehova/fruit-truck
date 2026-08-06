@@ -4,7 +4,7 @@ import { Progress } from "@base-ui/react/progress";
 import { useI18n } from "@/i18n";
 import type { AgentSessionState } from "@/agent";
 import { activeGenerationAttempt, latestGenerationAttempt, type GenerationThread } from "@/studio";
-import type { GenerationMode } from "@/openrouter";
+import { formatUsd, type GenerationMode } from "@/openrouter";
 
 export type BatchSummary = {
   total: number;
@@ -126,7 +126,7 @@ export function AgentPanel({
           <div><dt>{t("uncertainThreads")}</dt><dd>{uncertainCount}</dd></div>
           <div><dt>{t("completedThreads")}</dt><dd>{completedCount}</dd></div>
           <div><dt>{t("pendingDecisions")}</dt><dd>{pending.length}</dd></div>
-          <div><dt>{t("trackedCost")}</dt><dd>${totalCost.toFixed(2)}</dd></div>
+          <div><dt>{t("trackedCost")}</dt><dd>{formatUsd(totalCost)}</dd></div>
         </dl>
         {outsideMode.length ? <p>{t("outsideModeRunning", { count: outsideMode.length })}</p> : null}
         {failedThreads.length ? <div className="project-thread-links">{failedThreads.map((thread) => (
@@ -141,8 +141,8 @@ export function AgentPanel({
           failed: batchSummary.failed + batchSummary.uncertain + batchSummary.canceled,
         })}{batchSummary.actualCostUsd != null || batchSummary.estimatedCostUsd != null ? <small>{t("batchCost", {
           cost: [
-            batchSummary.actualCostUsd != null ? `$${batchSummary.actualCostUsd.toFixed(2)} ${t("actualCost")}` : "",
-            batchSummary.estimatedCostUsd != null ? `$${batchSummary.estimatedCostUsd.toFixed(2)} ${t("estimatedCost")}` : "",
+            batchSummary.actualCostUsd != null ? `${formatUsd(batchSummary.actualCostUsd)} ${t("actualCost")}` : "",
+            batchSummary.estimatedCostUsd != null ? `${formatUsd(batchSummary.estimatedCostUsd)} ${t("estimatedCost")}` : "",
           ].filter(Boolean).join(" · "),
         })}</small> : null}</p> : null}
       </section>

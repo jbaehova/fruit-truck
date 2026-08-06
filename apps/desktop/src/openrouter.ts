@@ -9,6 +9,30 @@ type CapabilityDescriptor = {
   max?: number;
 };
 
+type ImagePricingLine = {
+  billable: string;
+  unit: string;
+  cost_usd: number;
+  variant?: string;
+};
+
+type VideoPricingBasis = "second" | "token" | "image" | "generation";
+
+type VideoPricingLine = {
+  sku: string;
+  costUsd: number;
+  basis: VideoPricingBasis;
+  minimum: boolean;
+  resolution?: string;
+  audio?: boolean;
+  workflow?: "text" | "image" | "edit";
+};
+
+export type GenerationCostContext = {
+  videoWorkflow?: VideoWorkflow;
+  imageInputCount?: number;
+};
+
 export type ImageModel = {
   id: string;
   name: string;
@@ -20,7 +44,9 @@ export type ImageModel = {
   supported_parameters: Record<string, CapabilityDescriptor>;
   supports_streaming?: boolean;
   endpoint_count?: number;
-  pricing?: Array<{ billable: string; unit: string; cost_usd: number; variant?: string }>;
+  endpoints?: string;
+  endpoint_details?: ImageModelEndpoint[];
+  pricing?: ImagePricingLine[];
 };
 
 export type ImageModelEndpoint = {
@@ -29,7 +55,7 @@ export type ImageModelEndpoint = {
   provider_tag?: string | null;
   supported_parameters: Record<string, CapabilityDescriptor>;
   allowed_passthrough_parameters?: string[];
-  pricing?: Array<{ billable: string; unit: string; cost_usd: number; variant?: string }>;
+  pricing?: ImagePricingLine[];
   supports_streaming?: boolean;
 };
 
@@ -56,44 +82,219 @@ export type VideoModel = {
 
 export type GenerationModel = ImageModel | VideoModel;
 
-function formatUsd(value: number) {
+export function formatUsd(value: number) {
   if (!Number.isFinite(value)) return "";
-  return value < 0.01 ? `$${value.toFixed(4)}` : `$${value.toFixed(2)}`;
+  const [whole, fractional = ""] = value.toFixed(8).split(".");
+  return `$${whole}.${fractional.replace(/0+$/, "").padEnd(2, "0")}`;
+}
+
+function normalizedUsd(value: number) {
+  return Math.round(value * 100_000_000) / 100_000_000;
+}
+
+function outputImagePricingLines(pricing: ImagePricingLine[]) {
+  return pricing.filter((item) => item.billable === "output_image" || item.billable === "image");
+}
+
+function estimateImagePricing(
+  pricing: ImagePricingLine[],
+  options: DraftOptions,
+  context: GenerationCostContext,
+) {
+  const selectedVariant = typeof options.resolution === "string" ? options.resolution.toLowerCase() : undefined;
+  const output = outputImagePricingLines(pricing)
+    .filter((item) => item.unit === "image" && Number.isFinite(item.cost_usd) && item.cost_usd >= 0);
+  const exact = selectedVariant ? output.filter((item) => item.variant?.toLowerCase() === selectedVariant) : [];
+  const generic = output.filter((item) => !item.variant);
+  const candidates = selectedVariant
+    ? exact.length ? exact : generic
+    : output;
+  if (!candidates.length) return undefined;
+  const count = typeof options.n === "number" && options.n > 0 ? options.n : 1;
+  const inputRates = pricing
+    .filter((item) => ["input_image", "input_reference"].includes(item.billable) && item.unit === "image")
+    .map((item) => item.cost_usd)
+    .filter((value) => Number.isFinite(value) && value >= 0);
+  const inputCost = inputRates.length ? Math.min(...inputRates) * (context.imageInputCount ?? 0) : 0;
+  return normalizedUsd(Math.min(...candidates.map((item) => item.cost_usd)) * count + inputCost);
+}
+
+function videoPricingLines(model: VideoModel): VideoPricingLine[] {
+  return Object.entries(model.pricing_skus ?? {}).flatMap(([sku, raw]) => {
+    const value = Number(String(raw).replace(/[^0-9.eE+-]/g, ""));
+    if (!Number.isFinite(value)) return [];
+    // Live responses currently use underscores, while documented examples
+    // also use hyphens. Interpret both spellings as the same SKU grammar.
+    const normalized = sku.toLowerCase().replaceAll("-", "_");
+    const basis: VideoPricingBasis = normalized.includes("token")
+      ? "token"
+      : normalized.includes("reference_image") || normalized.includes("image_input")
+        ? "image"
+        : normalized.includes("second") || normalized.includes("duration_seconds")
+          ? "second"
+          : "generation";
+    const resolution = normalized.match(/(?:^|_)(480p|720p|1080p|1024p|2k|4k)(?:_|$)/)?.[1];
+    const audio = normalized.includes("without_audio")
+      ? false
+      : normalized.includes("with_audio") ? true : undefined;
+    const workflow = normalized.includes("video_continuation")
+      ? "edit" as const
+      : normalized.includes("image_to_video")
+        ? "image" as const
+        : normalized.includes("text_to_video") ? "text" as const : undefined;
+    return [{
+      sku,
+      costUsd: normalized.includes("cents") ? value / 100 : value,
+      basis,
+      minimum: normalized.includes("minimum") && normalized.includes("generation"),
+      resolution,
+      audio,
+      workflow,
+    }];
+  });
+}
+
+function compactUsd(value: number) {
+  return Number.isInteger(value) ? `$${value}` : formatUsd(value);
+}
+
+function compactRateUsd(value: number) {
+  const decimals = value < 0.1 ? 5 : value < 1 ? 4 : 2;
+  const fixed = value.toFixed(decimals);
+  const [whole, fractional = ""] = fixed.split(".");
+  return `$${whole}.${fractional.replace(/0+$/, "").padEnd(2, "0")}`;
+}
+
+function compactPriceRange(values: number[], unit: string, scale = 1) {
+  const scaled = values.map((value) => normalizedUsd(value * scale));
+  const minimum = Math.min(...scaled);
+  const maximum = Math.max(...scaled);
+  return minimum === maximum
+    ? `${compactUsd(minimum)}/${unit}`
+    : `${compactUsd(minimum)}–${compactUsd(maximum)}/${unit}`;
+}
+
+function imageTokenPriceLabel(pricing: ImagePricingLine[]) {
+  const tokenLines = pricing.filter((line) => line.unit === "token" && Number.isFinite(line.cost_usd));
+  const input = tokenLines.filter((line) => line.billable.startsWith("input_"));
+  const output = outputImagePricingLines(tokenLines);
+  const labels = [];
+  if (input.length) labels.push(compactPriceRange(input.map((line) => line.cost_usd), "M input", 1_000_000));
+  if (output.length) labels.push(compactPriceRange(output.map((line) => line.cost_usd), input.length ? "M output" : "M output tokens", 1_000_000));
+  return labels.join(" · ");
+}
+
+function seedanceSecondPrice(model: VideoModel, lines: VideoPricingLine[], options: DraftOptions = {}) {
+  if (!model.id.startsWith("bytedance/seedance-")) return undefined;
+  const sizes = (model.supported_sizes ?? []).flatMap((size) => {
+    const match = size.match(/^(\d+)x(\d+)$/i);
+    if (!match) return [];
+    const width = Number(match[1]);
+    const height = Number(match[2]);
+    return [{ width, height }];
+  });
+  const resolution = typeof options.resolution === "string" ? options.resolution.toLowerCase() : "";
+  const resolutionPixels = resolution === "4k"
+    ? 2160
+    : Number(resolution.match(/^(\d+)p$/)?.[1] ?? 0);
+  const aspect = typeof options.aspect_ratio === "string" ? options.aspect_ratio.match(/^(\d+):(\d+)$/) : null;
+  const targetRatio = aspect ? Number(aspect[1]) / Number(aspect[2]) : 16 / 9;
+  const candidates = sizes
+    .map((size) => {
+      const ratioDifference = Math.abs(size.width / size.height - targetRatio);
+      return {
+        ...size,
+        score: (resolutionPixels && Math.min(size.width, size.height) !== resolutionPixels ? 100 : 0)
+          + (ratioDifference <= 0.03 ? 0 : ratioDifference),
+      };
+    })
+    .sort((left, right) => left.score - right.score || left.width * left.height - right.width * right.height);
+  const selectedSize = candidates[0];
+  if (!selectedSize) return undefined;
+  const tokenRates = lines.filter((line) => line.basis === "token").map((line) => line.costUsd);
+  if (!tokenRates.length) return undefined;
+  const tokensPerSecond = selectedSize.width * selectedSize.height * 24 / 1024;
+  return Math.min(...tokenRates) * tokensPerSecond;
+}
+
+function selectVideoSecondRate(lines: VideoPricingLine[], options: DraftOptions, context: GenerationCostContext) {
+  const resolution = typeof options.resolution === "string" ? options.resolution.toLowerCase() : undefined;
+  const audio = typeof options.generate_audio === "boolean" ? options.generate_audio : undefined;
+  const desiredWorkflow = context.videoWorkflow === "edit"
+    ? "edit"
+    : (context.imageInputCount ?? 0) > 0 ? "image" : "text";
+  const scored = lines.filter((line) => line.basis === "second" && !line.minimum).map((line) => {
+    let score = 0;
+    if (line.resolution) score += line.resolution === resolution ? 4 : -100;
+    if (line.audio != null) score += line.audio === audio ? 8 : -100;
+    if (line.workflow) score += line.workflow === desiredWorkflow ? 2 : -100;
+    return { line, score };
+  });
+  const bestScore = Math.max(...scored.map((item) => item.score));
+  return scored.filter((item) => item.score === bestScore).map((item) => item.line.costUsd).sort((a, b) => a - b)[0];
 }
 
 export function modelPriceLabel(mode: GenerationMode, model: GenerationModel): string {
   if (mode === "image") {
-    const pricing = (model as ImageModel).pricing ?? [];
+    const allPricing = (model as ImageModel).pricing ?? [];
+    const tokenLabel = imageTokenPriceLabel(allPricing);
+    if (tokenLabel) return tokenLabel;
+    const pricing = outputImagePricingLines(allPricing);
     if (!pricing.length) return "Price unavailable";
-    const costs = pricing.map((item) => item.cost_usd).filter(Number.isFinite);
+    const primaryUnit = pricing.some((item) => item.unit === "image")
+      ? "image"
+      : pricing.some((item) => item.unit === "megapixel") ? "megapixel" : pricing[0]?.unit;
+    const costs = pricing
+      .filter((item) => item.unit === primaryUnit)
+      .map((item) => item.cost_usd)
+      .filter(Number.isFinite);
     if (!costs.length) return "Price unavailable";
-    const minimum = Math.min(...costs);
-    const maximum = Math.max(...costs);
-    const unit = pricing[0]?.unit?.replaceAll("_", " ") ?? "generation";
-    return minimum === maximum
-      ? `${formatUsd(minimum)} / ${unit}`
-      : `${formatUsd(minimum)}–${formatUsd(maximum)} / ${unit}`;
+    const unit = primaryUnit === "megapixel" ? "MP" : primaryUnit?.replaceAll("_", " ") ?? "generation";
+    return compactPriceRange(costs, unit);
   }
-  const values = Object.values((model as VideoModel).pricing_skus ?? {})
-    .map((value) => Number(String(value).replace(/[^0-9.eE+-]/g, "")))
-    .filter((value) => Number.isFinite(value));
-  if (!values.length) return "Price unavailable";
-  const minimum = Math.min(...values);
-  const maximum = Math.max(...values);
-  return minimum === maximum ? `${formatUsd(minimum)} estimated` : `${formatUsd(minimum)}–${formatUsd(maximum)} estimated`;
+  const lines = videoPricingLines(model as VideoModel);
+  const derivedSecond = seedanceSecondPrice(model as VideoModel, lines);
+  if (derivedSecond != null) return `from ${compactRateUsd(derivedSecond)}/second`;
+  const primary = lines.filter((line) => !line.minimum && line.basis !== "image");
+  const basis = (["second", "token", "generation"] as const).find((candidate) => primary.some((line) => line.basis === candidate));
+  if (!basis) return "Price unavailable";
+  const values = primary.filter((line) => line.basis === basis).map((line) => line.costUsd);
+  const label = basis === "token"
+    ? compactPriceRange(values, "M video tokens", 1_000_000)
+    : compactPriceRange(values, basis === "second" ? "second" : basis);
+  const minimumGeneration = lines.filter((line) => line.minimum).map((line) => line.costUsd);
+  return minimumGeneration.length ? `${label} · ${formatUsd(Math.min(...minimumGeneration))} minimum` : label;
 }
 
-export function estimateGenerationCost(mode: GenerationMode, model: GenerationModel, options: DraftOptions): number | undefined {
+export function estimateGenerationCost(
+  mode: GenerationMode,
+  model: GenerationModel,
+  options: DraftOptions,
+  context: GenerationCostContext = {},
+): number | undefined {
   if (mode === "image") {
-    const costs = ((model as ImageModel).pricing ?? []).map((item) => item.cost_usd).filter((value) => Number.isFinite(value) && value >= 0);
-    if (!costs.length) return undefined;
-    const count = typeof options.n === "number" && options.n > 0 ? options.n : 1;
-    return Math.min(...costs) * count;
+    const image = model as ImageModel;
+    const endpointEstimates = (image.endpoint_details ?? [])
+      .map((endpoint) => estimateImagePricing(endpoint.pricing ?? [], options, context))
+      .filter((value): value is number => value != null);
+    if (endpointEstimates.length) return Math.min(...endpointEstimates);
+    return estimateImagePricing(image.pricing ?? [], options, context);
   }
-  const costs = Object.values((model as VideoModel).pricing_skus ?? {})
-    .map((value) => Number(String(value).replace(/[^0-9.eE+-]/g, "")))
-    .filter((value) => Number.isFinite(value) && value >= 0);
-  return costs.length ? Math.min(...costs) : undefined;
+  const lines = videoPricingLines(model as VideoModel);
+  const minimum = lines.filter((line) => line.minimum).map((line) => line.costUsd);
+  const secondRate = selectVideoSecondRate(lines, options, context)
+    ?? seedanceSecondPrice(model as VideoModel, lines, options);
+  const duration = typeof options.duration === "number" && options.duration > 0 ? options.duration : undefined;
+  const fixed = lines.filter((line) => line.basis === "generation" && !line.minimum).map((line) => line.costUsd);
+  let total = secondRate != null && duration != null
+    ? secondRate * duration
+    : fixed.length ? Math.min(...fixed) : undefined;
+  if (total == null && minimum.length) total = Math.min(...minimum);
+  if (total == null) return undefined;
+  if (minimum.length) total = Math.max(total, Math.min(...minimum));
+  const inputRates = lines.filter((line) => line.basis === "image").map((line) => line.costUsd);
+  if (inputRates.length) total += Math.min(...inputRates) * (context.imageInputCount ?? 0);
+  return normalizedUsd(total);
 }
 
 export type ReferenceAsset = {
@@ -124,8 +325,26 @@ export type PromptEnhancementInput = {
   editMode?: boolean;
   editTarget?: string;
   prompt: string;
+  maskInstructions?: string;
+  hasMask?: boolean;
   references: Array<{ slot: number; name: string; mediaType: string; role: ReferenceRole }>;
+  visuals: PromptEnhancementVisual[];
 };
+
+export type PromptEnhancementVisual = {
+  id: string;
+  kind: "reference" | "edit_target" | "mask_guide" | "video_frame";
+  source: string;
+  slot: number;
+  name: string;
+  role: ReferenceRole;
+  framePosition?: "beginning" | "middle" | "end";
+  timestampSeconds?: number;
+};
+
+export type PromptEnhancementContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } };
 
 export type CredentialStatus = {
   configured: boolean;
@@ -213,6 +432,20 @@ async function request<T>(method: "GET" | "POST", path: string, body?: unknown):
   }
 }
 
+async function mapWithConcurrency<T, U>(items: T[], concurrency: number, transform: (item: T) => Promise<U>): Promise<U[]> {
+  const results = new Array<U>(items.length);
+  let nextIndex = 0;
+  const worker = async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await transform(items[index]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker));
+  return results;
+}
+
 export async function loadModels(mode: "image"): Promise<ImageModel[]>;
 export async function loadModels(mode: "video"): Promise<VideoModel[]>;
 export async function loadModels(mode: GenerationMode): Promise<GenerationModel[]> {
@@ -234,6 +467,31 @@ export async function loadModels(mode: GenerationMode): Promise<GenerationModel[
     ...model,
     architecture: model.architecture ?? architecture.get(model.id),
   }));
+}
+
+export function applyImageModelEndpoints(model: ImageModel, endpointDetails: ImageModelEndpoint[]): ImageModel {
+  const endpointPricing = endpointDetails.flatMap((endpoint) => endpoint.pricing ?? []);
+  return {
+    ...model,
+    endpoint_details: endpointDetails,
+    pricing: endpointPricing.length ? endpointPricing : model.pricing,
+  };
+}
+
+export async function hydrateImageModelPricing(
+  models: ImageModel[],
+  onHydrated?: (model: ImageModel, endpoints: ImageModelEndpoint[]) => void,
+): Promise<ImageModel[]> {
+  return mapWithConcurrency(models, 6, async (model) => {
+    try {
+      const endpointDetails = await loadImageModelEndpoints(model.id);
+      const hydrated = applyImageModelEndpoints(model, endpointDetails);
+      onHydrated?.(hydrated, endpointDetails);
+      return hydrated;
+    } catch {
+      return model;
+    }
+  });
 }
 
 export async function loadImageModelEndpoints(modelId: string): Promise<ImageModelEndpoint[]> {
@@ -366,7 +624,6 @@ export function buildRequest(draft: GenerationDraft, model: GenerationModel | nu
       duration: Boolean(videoModel.supported_durations?.length),
       resolution: Boolean(videoModel.supported_resolutions?.length),
       aspect_ratio: Boolean(videoModel.supported_aspect_ratios?.length),
-      size: Boolean(videoModel.supported_sizes?.length),
       generate_audio: videoModel.generate_audio === true,
       seed: videoModel.seed === true,
     };
@@ -417,24 +674,65 @@ export function productSystemInstruction(input: Omit<PromptEnhancementInput, "pr
     : input.mode === "video" && input.videoWorkflow === "edit"
       ? "Treat the numbered video reference as the source footage to transform."
       : "";
+  const hasMaskGuide = input.visuals.some((visual) => visual.kind === "mask_guide");
   return [
     `The active Fruit Truck task is ${task}.`,
     "Numbered references are immutable input identities.",
     "Do not invent inputs or options outside the selected model's declared capabilities.",
     editRule,
+    input.hasMask && hasMaskGuide
+      ? "The edit target and a magenta mask-guide view are supplied. The overlay is a coarse pointer to an existing semantic subject or part, never a literal silhouette or an object to generate."
+      : input.hasMask
+        ? "Mask instructions apply to an existing semantic subject or part in the edit target. No visual mask-guide image is supplied, so do not claim a precise boundary that cannot be seen."
+        : "",
   ].filter(Boolean).join(" ");
 }
 
-export function promptEnhancerInstruction(): string {
+export function promptEnhancerInstruction(visualKinds: PromptEnhancementVisual["kind"][] = []): string {
+  const hasVisuals = visualKinds.length > 0;
   return [
     "You are Fruit Truck's prompt enhancer.",
     "Rewrite the user's request into one production-ready media prompt.",
     "Infer the best structure for this request instead of forcing a fixed schema.",
     "Preserve intent, names, constraints, ambiguity that should remain creative, and every #number reference.",
     "Preserve the user's language and every negative or forbidden condition.",
+    hasVisuals ? "Inspect every supplied visual before adding detail, and use only facts that are actually visible." : "",
+    "For edits, identify the existing subject and requested attribute precisely while preserving all unrequested identity, anatomy, geometry, texture, lighting, depth, composition, and continuity.",
+    visualKinds.includes("mask_guide") ? "For a mask guide, infer the intended semantic part from the original image, allow its boundary to snap or softly blend to nearby natural edges, and explicitly prevent generation of the painted brush-stroke silhouette as a new object." : "",
+    visualKinds.includes("video_frame") ? "Treat beginning, middle, and end video frames as one time-ordered source clip, not as separate scenes." : "",
     "Add useful visual, temporal, camera, material, lighting, composition, and continuity detail only when relevant.",
     "Return only the enhanced prompt. Do not add headings, analysis, JSON, or markdown.",
   ].filter(Boolean).join(" ");
+}
+
+export function promptEnhancementUserContent(input: PromptEnhancementInput): PromptEnhancementContentPart[] {
+  const referenceCatalog = input.references.length
+    ? ["", "Available numbered references:", ...input.references.map((reference) =>
+      `#${reference.slot}: ${reference.name} (${reference.mediaType}, ${reference.role})`,
+    )]
+    : [];
+  const visualCatalog = input.visuals.length
+    ? ["", "Visual inputs, in the same order as the attached images:", ...input.visuals.map((visual, index) => {
+      const frame = visual.kind === "video_frame"
+        ? `, ${visual.framePosition} at ${(visual.timestampSeconds ?? 0).toFixed(2)}s`
+        : "";
+      return `Visual ${index + 1}: #${visual.slot} ${visual.name} (${visual.kind}, ${visual.role}${frame})`;
+    })]
+    : [];
+  const text = [
+    "User prompt:",
+    input.prompt.trim() || "(none)",
+    ...(input.hasMask ? ["", "Mask instructions:", input.maskInstructions?.trim() || "Apply the user prompt to the semantically selected subject or part."] : []),
+    ...referenceCatalog,
+    ...visualCatalog,
+  ].join("\n");
+  return [
+    { type: "text", text },
+    ...input.visuals.map((visual): PromptEnhancementContentPart => ({
+      type: "image_url",
+      image_url: { url: visual.source },
+    })),
+  ];
 }
 
 export function validateEnhancedPrompt(original: string, enhanced: string, editTarget?: string): string | null {
@@ -452,11 +750,6 @@ export function validateEnhancedPrompt(original: string, enhanced: string, editT
 }
 
 export async function enhancePrompt(input: PromptEnhancementInput): Promise<string> {
-  const catalog = input.references.length
-    ? `\n\nAvailable references:\n${input.references.map((reference) =>
-      `#${reference.slot}: ${reference.name} (${reference.mediaType}, ${reference.role})`,
-    ).join("\n")}`
-    : "";
   const response = await request<{
     choices?: Array<{ message?: { content?: string | Array<{ type?: string; text?: string }> } }>;
   }>("POST", "/chat/completions", {
@@ -467,8 +760,8 @@ export async function enhancePrompt(input: PromptEnhancementInput): Promise<stri
         role: "system",
         content: productSystemInstruction(input),
       },
-      { role: "system", content: promptEnhancerInstruction() },
-      { role: "user", content: `${input.prompt.trim()}${catalog}` },
+      { role: "system", content: promptEnhancerInstruction(input.visuals.map((visual) => visual.kind)) },
+      { role: "user", content: promptEnhancementUserContent(input) },
     ],
   });
   const content = response.choices?.[0]?.message?.content;
@@ -476,7 +769,11 @@ export async function enhancePrompt(input: PromptEnhancementInput): Promise<stri
     ? content
     : content?.map((part) => part.text ?? "").join("");
   if (!text?.trim()) throw new Error("The prompt model returned no enhanced prompt.");
-  const validationError = validateEnhancedPrompt(input.prompt, text, input.editTarget);
+  const originalIntent = [
+    input.prompt.trim(),
+    input.hasMask ? input.maskInstructions?.trim() ?? "" : "",
+  ].filter(Boolean).join("\n");
+  const validationError = validateEnhancedPrompt(originalIntent, text, input.editTarget);
   if (validationError) throw new Error(validationError);
   return text.trim();
 }

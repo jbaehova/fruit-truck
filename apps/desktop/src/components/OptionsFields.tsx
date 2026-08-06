@@ -75,8 +75,9 @@ export function OptionsFields({ mode, model, options, onOptionsChange }: Props) 
       } else if (descriptor.type === "boolean" && name === "seed") {
         advancedFields.push(
           <Field.Root className="option-field" key={name}>
-            <Field.Label>{t("seed")}</Field.Label>
+            <Field.Label>{t("seed")} ({t("optional")})</Field.Label>
             <Input type="number" placeholder={t("random")} value={options.seed == null ? "" : Number(options.seed)} onChange={(event) => onOptionsChange({ ...options, seed: event.target.value ? Number(event.target.value) : undefined })} />
+            <Field.Description>{t("seedHint")}</Field.Description>
           </Field.Root>,
         );
       }
@@ -86,12 +87,11 @@ export function OptionsFields({ mode, model, options, onOptionsChange }: Props) 
     if (video.supported_durations?.length) basic.push(<EnumField key="duration" name="duration" values={video.supported_durations} value={options.duration} onChange={(value) => patch("duration", value)} />);
     if (video.supported_resolutions?.length) basic.push(<EnumField key="resolution" name="resolution" values={video.supported_resolutions} value={options.resolution} onChange={(value) => patch("resolution", value)} />);
     if (video.supported_aspect_ratios?.length) basic.push(<EnumField key="aspect_ratio" name="aspect_ratio" values={video.supported_aspect_ratios} value={options.aspect_ratio} onChange={(value) => patch("aspect_ratio", value)} />);
-    if (video.supported_sizes?.length) advancedFields.push(<EnumField key="size" name="size" values={video.supported_sizes} value={options.size} onChange={(value) => patch("size", value)} />);
     if (video.generate_audio) basic.push(
       <Field.Root className="option-toggle" key="audio"><span><Field.Label nativeLabel={false} render={<div />}><strong>{t("generateAudio")}</strong></Field.Label><Field.Description>{t("includeSound")}</Field.Description></span><Switch checked={Boolean(options.generate_audio)} onCheckedChange={(value) => patch("generate_audio", value)} /></Field.Root>,
     );
     if (video.seed) advancedFields.push(
-      <Field.Root className="option-field" key="seed"><Field.Label>{t("seed")}</Field.Label><Input type="number" placeholder={t("random")} value={options.seed == null ? "" : Number(options.seed)} onChange={(event) => onOptionsChange({ ...options, seed: event.target.value ? Number(event.target.value) : undefined })} /></Field.Root>,
+      <Field.Root className="option-field" key="seed"><Field.Label>{t("seed")} ({t("optional")})</Field.Label><Input type="number" placeholder={t("random")} value={options.seed == null ? "" : Number(options.seed)} onChange={(event) => onOptionsChange({ ...options, seed: event.target.value ? Number(event.target.value) : undefined })} /><Field.Description>{t("seedHint")}</Field.Description></Field.Root>,
     );
   }
 
