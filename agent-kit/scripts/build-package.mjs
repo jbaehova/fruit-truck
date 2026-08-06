@@ -22,10 +22,14 @@ const compile = async (source, destination) => {
       verbatimModuleSyntax: true,
     },
     fileName: source,
-  }).outputText.replaceAll("../src/agent.ts", "../src/agent.js").replaceAll("../src/openrouter.ts", "../src/openrouter.js");
+  }).outputText
+    .replaceAll("../src/agent.ts", "../src/agent.js")
+    .replaceAll("../src/openrouter.ts", "../src/openrouter.js")
+    .replaceAll("../src/mask.ts", "../src/mask.js");
   await writeFile(destination, output, { mode: 0o755 });
 };
 
 await compile(join(desktop, "scripts", "mcp-server.ts"), join(dist, "scripts", "mcp-server.js"));
 await compile(join(desktop, "src", "agent.ts"), join(dist, "src", "agent.js"));
 await compile(join(desktop, "src", "openrouter.ts"), join(dist, "src", "openrouter.js"));
+await compile(join(desktop, "src", "mask.ts"), join(dist, "src", "mask.js"));

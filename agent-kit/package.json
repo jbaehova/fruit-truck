@@ -26,5 +26,8 @@
   "devDependencies": {
     "typescript": "~6.0.2"
   },
-  "license": "UNLICENSED"
+  "license": "UNLICENSED",
+  "dependencies": {
+    "pngjs": "^7.0.0"
+  }
 }

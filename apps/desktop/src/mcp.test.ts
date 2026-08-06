@@ -615,13 +615,16 @@ test("OpenRouter thread batches persist media-free attempts and resume independe
   const assetsDirectory = join(dataDirectory, "assets");
   mkdirSync(assetsDirectory, { recursive: true, mode: 0o700 });
   const referencePath = join(assetsDirectory, "reference.png");
-  writeFileSync(referencePath, Buffer.from("\x89PNG\r\n\x1a\nreference", "binary"), { mode: 0o600 });
+  writeFileSync(referencePath, readFileSync(join(process.cwd(), "public", "fruit-truck-icon.png")), { mode: 0o600 });
   writeFileSync(join(dataDirectory, "credentials.json"), JSON.stringify({ openrouter_api_key: "test-key" }), { mode: 0o600 });
 
   let imageActive = 0;
   let maxImageActive = 0;
   let imageCalls = 0;
+  const imagePrompts: string[] = [];
+  const imagePayloads: Record<string, unknown>[] = [];
   let enhancementCalls = 0;
+  let enhancementImageParts = 0;
   let retry429Calls = 0;
   let delayImageCatalog = false;
   let nextJob = 1;
@@ -638,15 +641,33 @@ test("OpenRouter thread batches persist media-free attempts and resume independe
       if (delayImageCatalog) await new Promise((resolve) => setTimeout(resolve, 100));
       return sendJson(200, { data: [{ id: "test/image", name: "Test image", supported_parameters: { input_references: { type: "range", min: 0, max: 2 } }, pricing: [{ billable: "image", unit: "image", cost_usd: 0.04 }] }] });
     }
+    if (request.method === "GET" && request.url === "/images/models/test/image/endpoints") {
+      return sendJson(200, { endpoints: [{
+        provider_name: "Test provider",
+        provider_slug: "test",
+        supported_parameters: { input_references: { type: "range", min: 0, max: 2 } },
+        pricing: [
+          { billable: "output_image", unit: "image", cost_usd: 0.04 },
+          { billable: "input_reference", unit: "image", cost_usd: 0.01 },
+        ],
+      }] });
+    }
     if (request.method === "GET" && request.url === "/videos/models") return sendJson(200, { data: [{ id: "test/video", name: "Test video", input_reference_types: ["image"], max_input_references: 2, pricing_skus: { standard: "$0.25" } }] });
     if (request.method === "POST" && request.url === "/chat/completions") {
       enhancementCalls += 1;
-      const messages = body.messages as Array<{ content?: string }>;
-      const original = messages.at(-1)?.content?.split("\n\nAvailable references:", 1)[0] ?? "enhanced";
+      const messages = body.messages as Array<{ content?: string | Array<{ type?: string; text?: string }> }>;
+      const content = messages.at(-1)?.content;
+      const userText = typeof content === "string"
+        ? content
+        : content?.find((part) => part.type === "text")?.text ?? "";
+      enhancementImageParts += Array.isArray(content) ? content.filter((part) => part.type === "image_url").length : 0;
+      const original = userText.match(/User prompt:\n([\s\S]*?)(?:\n\n(?:Mask instructions|Available numbered references|Visual inputs)|$)/)?.[1] ?? "enhanced";
       return sendJson(200, { choices: [{ message: { content: `${original} enhanced` } }] });
     }
     if (request.method === "POST" && request.url === "/images") {
       imageCalls += 1;
+      imagePrompts.push(String(body.prompt ?? ""));
+      imagePayloads.push(body);
       imageActive += 1;
       maxImageActive = Math.max(maxImageActive, imageActive);
       await new Promise((resolve) => setTimeout(resolve, 40));
@@ -691,6 +712,12 @@ test("OpenRouter thread batches persist media-free attempts and resume independe
     rmSync(dataDirectory, { recursive: true, force: true });
   });
   await server.request("initialize", {});
+  const listedImages = await server.call("list_models", { mode: "image" });
+  assert.equal(listedImages.isError, false, String(listedImages.value));
+  assert.deepEqual(
+    ((listedImages.value as Array<{ pricing?: Array<{ billable: string }> }>)[0]?.pricing ?? []).map((item) => item.billable),
+    ["output_image", "input_reference"],
+  );
 
   const created = await server.call("create_session", { name: "Batch", intent: "Parallel media batch" });
   const sessionId = (created.value as BridgeSession).id;
@@ -728,6 +755,7 @@ test("OpenRouter thread batches persist media-free attempts and resume independe
   assert.equal(imageDone.isError, false, String(imageDone.value));
   assert.equal((imageDone.value as { status: string; outcome: string }).status, "terminal");
   assert.equal((imageDone.value as { outcome: string }).outcome, "completed");
+  assert.ok((imageDone.value as { attempts: Array<{ estimatedCostUsd?: number }> }).attempts.every((attempt) => attempt.estimatedCostUsd === 0.05));
   assert.ok(maxImageActive >= 2, `expected parallel image submissions, observed ${maxImageActive}`);
   const persisted = storedEnvelopeText(dataDirectory);
   assert.doesNotMatch(persisted, /;base64,|data:image\//i);
@@ -775,6 +803,32 @@ test("OpenRouter thread batches persist media-free attempts and resume independe
   assert.equal((retry429Done.value as { outcome: string }).outcome, "completed");
   assert.equal(retry429Calls, 2);
 
+  const maskEnvelope = readStoredEnvelope(dataDirectory);
+  const maskSession = maskEnvelope.sessions.find((item) => item.id === sessionId)!;
+  const maskThread = maskSession.threads.image.find((item) => item.id === imageOne.id)!;
+  maskThread.draft.prompt = "";
+  maskThread.draft.imageEditMode = true;
+  maskThread.draft.imageEditTarget = "#1";
+  maskThread.draft.maskInstructions = "Turn the selected feathers black.";
+  maskThread.draft.maskStrokes = [{ points: [{ x: 0.25, y: 0.25 }, { x: 0.5, y: 0.5 }], size: 0.08, operation: "paint" }];
+  maskThread.draft.enhancePrompt = false;
+  maskThread.revision += 1;
+  maskEnvelope.revision += 1;
+  writeStoredEnvelope(dataDirectory, maskEnvelope);
+  const maskOnly = await server.call("run_generation_threads", { sessionId, requestKey: "mask-only", threadIds: [imageOne.id] });
+  assert.equal(maskOnly.isError, false, String(maskOnly.value));
+  const maskAttemptId = (maskOnly.value as { attempts: Array<{ attemptId: string }> }).attempts[0].attemptId;
+  const maskDone = await server.call("await_generation_threads", { sessionId, attemptIds: [maskAttemptId], timeoutMs: 5_000 });
+  assert.equal((maskDone.value as { outcome: string }).outcome, "completed", JSON.stringify(maskDone.value));
+  assert.match(imagePrompts.at(-1) ?? "", /\[MASK INSTRUCTIONS\]\nTurn the selected feathers black\./);
+  assert.doesNotMatch(imagePrompts.at(-1) ?? "", /\[USER PROMPT\]/);
+  const maskedReferences = imagePayloads.at(-1)?.input_references as Array<{ image_url?: { url?: string } }>;
+  const maskedUrl = maskedReferences[0]?.image_url?.url ?? "";
+  assert.match(maskedUrl, /^data:image\/png;base64,/);
+  const maskedPng = Buffer.from(maskedUrl.split(",", 2)[1] ?? "", "base64");
+  assert.deepEqual(maskedPng.subarray(0, 8), Buffer.from("\x89PNG\r\n\x1a\n", "binary"));
+  assert.equal(maskedPng[25], 6, "masked PNG should use RGBA color type");
+
   current = (await server.call("get_session", { sessionId })).value as BridgeSession;
   const racingThread = current.threads.image.find((item) => item.id === imageOne.id)!;
   delayImageCatalog = true;
@@ -800,6 +854,7 @@ test("OpenRouter thread batches persist media-free attempts and resume independe
   const enhancedRetry = await server.call("enhance_generation_threads", { sessionId, requestKey: "enhance-once", threadIds: [imageOne.id] });
   assert.equal(enhancedRetry.isError, false, String(enhancedRetry.value));
   assert.equal(enhancementCalls, 1);
+  assert.equal(enhancementImageParts, 1);
 
   const archived = await server.call("archive_generation_thread", { sessionId, threadId: imageTwo.id });
   assert.equal(archived.isError, false, String(archived.value));

@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 import { createInterface } from "node:readline";
-import { mkdir, open, readFile, readdir, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { delimiter, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
+import { PNG } from "pngjs";
 import {
   createCustomSkillDraft,
   createAgentState,
@@ -23,19 +24,28 @@ import {
   type PlanStep,
 } from "../src/agent.ts";
 import {
+  applyImageModelEndpoints,
   buildRequest,
+  estimateGenerationCost,
   productSystemInstruction,
+  promptEnhancementUserContent,
   promptEnhancerInstruction,
   validateEnhancedPrompt,
+  type DraftOptions,
   type GenerationModel,
+  type ImageModel,
+  type ImageModelEndpoint,
+  type PromptEnhancementVisual,
   type ReferenceAsset,
 } from "../src/openrouter.ts";
+import { composeEditPrompt, hasGenerationInstructions } from "../src/mask.ts";
 import type {
   GenerationAttempt,
   GenerationAttemptSnapshot,
   GenerationDefaults,
   GenerationDraftState,
   GenerationThread,
+  MaskStroke,
   PromptEnhancementAttempt,
 } from "../src/studio.ts";
 
@@ -322,7 +332,7 @@ function availableTools() {
 function emptyThreadDraft(): GenerationDraftState {
   return {
     prompt: "", references: [], options: {}, providerJson: "", enhancePrompt: false,
-    enhancedPrompt: "", enhancedPromptDirty: false, imageEditMode: false,
+    enhancedPrompt: "", enhancedPromptDirty: false, enhancedVisualCount: 0, imageEditMode: false,
     imageEditTarget: "", maskInstructions: "", maskStrokes: [],
   };
 }
@@ -1050,15 +1060,23 @@ async function validateCodexImageSource(source: string, mimeType: string) {
 
 async function hydrateGenerationAssets(
   session: BridgeSession,
-  bindings: Array<{ assetId: string; role: ReferenceAsset["role"] }>,
+  bindings: Array<{ assetId: string; role: ReferenceAsset["role"]; slot?: number }>,
+  mask?: { targetSlot: number; strokes: MaskStroke[] },
 ): Promise<ReferenceAsset[]> {
   if (bindings.length > 12) throw new Error("At most 12 asset bindings are allowed.");
   return Promise.all(bindings.map(async (binding, index) => {
     const asset = session.assets.find((item) => item.id === binding.assetId);
     const source = asset?.localPath ?? asset?.externalUrl;
     if (!asset || !source) throw new Error(`Asset ${binding.assetId} has no readable source.`);
+    const slot = binding.slot ?? index + 1;
     let dataUrl = source;
-    if (!/^(?:data:|https?:\/\/)/i.test(dataUrl)) {
+    let name = asset.name;
+    let mediaType = asset.mimeType;
+    if (mask && slot === mask.targetSlot) {
+      dataUrl = await renderAgentAlphaMask(asset, mask.strokes);
+      name = `${asset.name} (transparent edit mask)`;
+      mediaType = "image/png";
+    } else if (!/^(?:data:|https?:\/\/)/i.test(dataUrl)) {
       const path = await validateLocalAssetSource(dataUrl);
       const metadata = await stat(path);
       if (metadata.size > 30 * 1024 * 1024) throw new Error(`${asset.name} exceeds the 30 MB generation input limit.`);
@@ -1067,13 +1085,177 @@ async function hydrateGenerationAssets(
     }
     return {
       id: asset.id,
-      name: asset.name,
-      mediaType: asset.mimeType,
+      name,
+      mediaType,
       dataUrl,
       role: binding.role,
-      slot: index + 1,
+      slot,
     };
   }));
+}
+
+function maskCanvasDimensions(width: number, height: number, maxEdge = 2048) {
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    throw new Error("The edit image has invalid dimensions.");
+  }
+  const scale = Math.min(1, maxEdge / Math.max(width, height));
+  return {
+    width: Math.max(1, Math.round(width * scale)),
+    height: Math.max(1, Math.round(height * scale)),
+  };
+}
+
+function rasterizeAgentMask(strokes: MaskStroke[], width: number, height: number) {
+  const pixels = Buffer.alloc(width * height);
+  const fillCircle = (centerX: number, centerY: number, radius: number, value: number) => {
+    const left = Math.max(0, Math.floor(centerX - radius));
+    const right = Math.min(width - 1, Math.ceil(centerX + radius));
+    const top = Math.max(0, Math.floor(centerY - radius));
+    const bottom = Math.min(height - 1, Math.ceil(centerY + radius));
+    const radiusSquared = radius * radius;
+    for (let y = top; y <= bottom; y += 1) {
+      for (let x = left; x <= right; x += 1) {
+        const dx = x - centerX;
+        const dy = y - centerY;
+        if (dx * dx + dy * dy <= radiusSquared) pixels[y * width + x] = value;
+      }
+    }
+  };
+  for (const stroke of strokes) {
+    if (!stroke.points.length) continue;
+    const value = stroke.operation === "erase" ? 0 : 255;
+    const radius = Math.max(1, stroke.size * Math.min(width, height) / 2);
+    const points = stroke.points.map((point) => ({
+      x: Math.max(0, Math.min(width - 1, point.x * width)),
+      y: Math.max(0, Math.min(height - 1, point.y * height)),
+    }));
+    fillCircle(points[0].x, points[0].y, radius, value);
+    for (let index = 1; index < points.length; index += 1) {
+      const start = points[index - 1];
+      const end = points[index];
+      const distance = Math.hypot(end.x - start.x, end.y - start.y);
+      const steps = Math.max(1, Math.ceil(distance / Math.max(1, radius / 2)));
+      for (let step = 1; step <= steps; step += 1) {
+        const progress = step / steps;
+        fillCircle(
+          start.x + (end.x - start.x) * progress,
+          start.y + (end.y - start.y) * progress,
+          radius,
+          value,
+        );
+      }
+    }
+  }
+  if (!pixels.includes(255)) throw new Error("The edit mask contains no painted selection.");
+  return pixels;
+}
+
+async function materializeAgentMaskSource(asset: BridgeAsset, work: string) {
+  const source = asset.localPath ?? asset.externalUrl;
+  if (!source) throw new Error(`${asset.name} has no readable mask source.`);
+  if (!/^(?:data:|https?:\/\/)/i.test(source)) {
+    return { path: await validateLocalAssetSource(source), cleanup: false };
+  }
+  if (/^https?:\/\//i.test(source)) {
+    const downloaded = await downloadPublicReference(source, asset.name);
+    if (!downloaded.mimeType.startsWith("image/")) {
+      await unlink(downloaded.path).catch(() => undefined);
+      throw new Error("The edit mask target must be an image.");
+    }
+    return { path: downloaded.path, cleanup: true };
+  }
+  const match = source.match(/^data:(image\/[A-Za-z0-9.+-]+);base64,([A-Za-z0-9+/=\r\n]+)$/);
+  if (!match) throw new Error("The edit image contains an invalid data URL.");
+  const bytes = Buffer.from(match[2], "base64");
+  if (!bytes.length || bytes.length > 30 * 1024 * 1024) throw new Error("The edit image exceeds the 30 MB safety limit.");
+  const path = join(work, "source-image");
+  await writeFile(path, bytes, { mode: 0o600 });
+  return { path, cleanup: false };
+}
+
+async function convertMaskSourceToPng(source: string, destination: string) {
+  await new Promise<void>((resolveConversion, rejectConversion) => {
+    const child = spawn("/usr/bin/sips", ["-s", "format", "png", source, "--out", destination], {
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    const diagnostics: Buffer[] = [];
+    let settled = false;
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (error) rejectConversion(error);
+      else resolveConversion();
+    };
+    const timeout = setTimeout(() => {
+      child.kill("SIGKILL");
+      finish(new Error("Image conversion timed out while preparing the edit mask."));
+    }, 60_000);
+    child.stderr.on("data", (chunk: Buffer) => {
+      diagnostics.push(Buffer.from(chunk));
+      while (diagnostics.reduce((total, item) => total + item.length, 0) > 2_000) diagnostics.shift();
+    });
+    child.once("error", (error) => finish(new Error(`Could not launch the macOS image converter: ${error.message}`)));
+    child.once("close", (code) => finish(code === 0
+      ? undefined
+      : new Error(`Could not convert the edit image to PNG${diagnostics.length ? `: ${Buffer.concat(diagnostics).toString("utf8").trim()}` : "."}`)));
+  });
+}
+
+function assertSafePng(bytes: Buffer) {
+  if (bytes.length < 24 || !bytes.subarray(0, 8).equals(Buffer.from("\x89PNG\r\n\x1a\n", "binary"))) {
+    throw new Error("The edit image is not a valid PNG.");
+  }
+  const width = bytes.readUInt32BE(16);
+  const height = bytes.readUInt32BE(20);
+  if (!width || !height || width > 16_384 || height > 16_384 || width * height > 32_000_000) {
+    throw new Error("The edit image dimensions exceed the mask safety limit.");
+  }
+}
+
+async function readAgentMaskPng(source: string, work: string) {
+  let bytes = await readFile(source);
+  try {
+    assertSafePng(bytes);
+    return PNG.sync.read(bytes);
+  } catch (error) {
+    if (bytes.subarray(0, 8).equals(Buffer.from("\x89PNG\r\n\x1a\n", "binary"))) throw error;
+  }
+  const converted = join(work, "source.png");
+  await convertMaskSourceToPng(source, converted);
+  const metadata = await stat(converted);
+  if (!metadata.size || metadata.size > 160 * 1024 * 1024) throw new Error("The converted edit image exceeds the mask safety limit.");
+  bytes = await readFile(converted);
+  assertSafePng(bytes);
+  return PNG.sync.read(bytes);
+}
+
+async function renderAgentAlphaMask(asset: BridgeAsset, strokes: MaskStroke[]) {
+  if (asset.kind !== "image") throw new Error("Only image assets can receive an edit mask.");
+  const work = await mkdtemp(join(dataDirectory, "mask-work-"));
+  let cleanupSource: string | undefined;
+  try {
+    const source = await materializeAgentMaskSource(asset, work);
+    if (source.cleanup) cleanupSource = source.path;
+    const png = await readAgentMaskPng(source.path, work);
+    const maskDimensions = maskCanvasDimensions(png.width, png.height);
+    const maskPixels = rasterizeAgentMask(strokes, maskDimensions.width, maskDimensions.height);
+    for (let y = 0; y < png.height; y += 1) {
+      const maskY = Math.min(maskDimensions.height - 1, Math.floor(y * maskDimensions.height / png.height));
+      for (let x = 0; x < png.width; x += 1) {
+        const maskX = Math.min(maskDimensions.width - 1, Math.floor(x * maskDimensions.width / png.width));
+        if (maskPixels[maskY * maskDimensions.width + maskX] > 0) png.data[(y * png.width + x) * 4 + 3] = 0;
+      }
+    }
+    const output = PNG.sync.write(png, { colorType: 6, inputColorType: 6 });
+    if (!output.length || output.length > 30 * 1024 * 1024) {
+      throw new Error("The masked edit image exceeds the 30 MB generation input limit.");
+    }
+    return `data:image/png;base64,${output.toString("base64")}`;
+  } finally {
+    if (cleanupSource) await unlink(cleanupSource).catch(() => undefined);
+    await rm(work, { recursive: true, force: true });
+  }
 }
 
 function findGenerationThread(session: BridgeSession, threadId: string) {
@@ -1087,6 +1269,156 @@ function updateThreadAttempt(session: BridgeSession, threadId: string, attemptId
   Object.assign(attempt, patch, { updatedAt: new Date().toISOString() });
   thread.updatedAt = attempt.updatedAt;
   return { thread, attempt };
+}
+
+function mediaToolPath(name: "ffmpeg" | "ffprobe") {
+  const environmentPath = process.env[name === "ffmpeg" ? "FRUIT_TRUCK_FFMPEG" : "FRUIT_TRUCK_FFPROBE"];
+  const target = process.arch === "arm64" ? "aarch64-apple-darwin" : "x86_64-apple-darwin";
+  const appRelative = `${name}-${target}`;
+  const candidates = [
+    environmentPath,
+    join(process.cwd(), "apps", "desktop", "src-tauri", "target", "bundled-tools", appRelative),
+    join(process.cwd(), "src-tauri", "target", "bundled-tools", appRelative),
+    join("/Applications", "Fruit Truck.app", "Contents", "MacOS", appRelative),
+    join("/Applications", "Fruit Truck.app", "Contents", "MacOS", name),
+    join(homedir(), "Applications", "Fruit Truck.app", "Contents", "MacOS", appRelative),
+    join(homedir(), "Applications", "Fruit Truck.app", "Contents", "MacOS", name),
+  ].find((candidate): candidate is string => Boolean(candidate && existsSync(candidate)));
+  return candidates ?? name;
+}
+
+async function captureMediaTool(
+  name: "ffmpeg" | "ffprobe",
+  args: string[],
+  maxOutputBytes: number,
+): Promise<Buffer> {
+  return new Promise((resolveCapture, rejectCapture) => {
+    const child = spawn(mediaToolPath(name), args, { stdio: ["ignore", "pipe", "pipe"] });
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    let stdoutBytes = 0;
+    let settled = false;
+    const finish = (error?: Error, output?: Buffer) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (error) rejectCapture(error);
+      else resolveCapture(output ?? Buffer.alloc(0));
+    };
+    const timeout = setTimeout(() => {
+      child.kill("SIGKILL");
+      finish(new Error(`${name} timed out while preparing prompt context.`));
+    }, 60_000);
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdoutBytes += chunk.length;
+      if (stdoutBytes > maxOutputBytes) {
+        child.kill("SIGKILL");
+        finish(new Error(`${name} prompt context output exceeds the local safety limit.`));
+        return;
+      }
+      stdout.push(Buffer.from(chunk));
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr.push(Buffer.from(chunk));
+      while (stderr.reduce((total, item) => total + item.length, 0) > 2_000) stderr.shift();
+    });
+    child.once("error", (error) => finish(new Error(`Could not launch ${name}: ${error.message}`)));
+    child.once("close", (code) => {
+      if (code === 0) finish(undefined, Buffer.concat(stdout));
+      else finish(new Error(`${name} could not prepare prompt context${stderr.length ? `: ${Buffer.concat(stderr).toString("utf8").trim()}` : "."}`));
+    });
+  });
+}
+
+function promptFrameTimestamps(duration: number) {
+  if (!Number.isFinite(duration) || duration <= 0 || duration > 21_600) {
+    throw new Error("The prompt context video has an invalid duration.");
+  }
+  return [duration * 0.05, duration * 0.5, duration * 0.95] as const;
+}
+
+async function promptVideoDuration(asset: BridgeAsset, path: string) {
+  if (typeof asset.duration === "number" && Number.isFinite(asset.duration) && asset.duration > 0) return asset.duration;
+  const output = await captureMediaTool("ffprobe", [
+    "-v", "error",
+    "-show_entries", "format=duration",
+    "-of", "default=noprint_wrappers=1:nokey=1",
+    path,
+  ], 10_000);
+  return Number(output.toString("utf8").trim());
+}
+
+async function promptImageSource(asset: BridgeAsset) {
+  const source = asset.localPath ?? asset.externalUrl;
+  if (!source) throw new Error(`${asset.name} has no readable prompt enhancement source.`);
+  if (/^(?:data:|https?:\/\/)/i.test(source)) return source;
+  const path = await validateLocalAssetSource(source);
+  const metadata = await stat(path);
+  if (!metadata.size || metadata.size > 30 * 1024 * 1024) {
+    throw new Error(`${asset.name} exceeds the 30 MB prompt enhancement input limit.`);
+  }
+  return `data:${asset.mimeType};base64,${(await readFile(path)).toString("base64")}`;
+}
+
+async function hydrateAgentPromptVisuals(
+  session: BridgeSession,
+  thread: GenerationThread,
+  draft: GenerationDraftState,
+): Promise<PromptEnhancementVisual[]> {
+  const visuals: PromptEnhancementVisual[] = [];
+  for (const reference of draft.references.toSorted((left, right) => left.slot - right.slot)) {
+    const asset = session.assets.find((item) => item.id === reference.assetId);
+    if (!asset) throw new Error(`Asset ${reference.assetId} does not exist in this session.`);
+    if (asset.kind === "image") {
+      const editTarget = thread.mode === "image"
+        && draft.imageEditMode
+        && `#${reference.slot}` === draft.imageEditTarget.trim();
+      visuals.push({
+        id: asset.id,
+        kind: editTarget ? "edit_target" : "reference",
+        source: await promptImageSource(asset),
+        slot: reference.slot,
+        name: asset.name,
+        role: reference.role,
+      });
+      continue;
+    }
+    if (!asset.localPath) continue;
+    let path: string;
+    let duration: number;
+    try {
+      path = await validateLocalAssetSource(asset.localPath);
+      duration = await promptVideoDuration(asset, path);
+    } catch {
+      continue;
+    }
+    const positions = ["beginning", "middle", "end"] as const;
+    for (const [index, timestamp] of promptFrameTimestamps(duration).entries()) {
+      const frame = await captureMediaTool("ffmpeg", [
+        "-hide_banner", "-loglevel", "error", "-nostdin",
+        "-ss", timestamp.toFixed(3),
+        "-i", path,
+        "-frames:v", "1",
+        "-vf", "scale=w='min(1280,iw)':h='min(1280,ih)':force_original_aspect_ratio=decrease",
+        "-q:v", "3",
+        "-f", "image2pipe",
+        "-vcodec", "mjpeg",
+        "pipe:1",
+      ], 10 * 1024 * 1024).catch(() => Buffer.alloc(0));
+      if (!frame.length) continue;
+      visuals.push({
+        id: `${asset.id}:${positions[index]}`,
+        kind: "video_frame",
+        source: `data:image/jpeg;base64,${frame.toString("base64")}`,
+        slot: reference.slot,
+        name: asset.name,
+        role: reference.role,
+        framePosition: positions[index],
+        timestampSeconds: timestamp,
+      });
+    }
+  }
+  return visuals;
 }
 
 function hasUserApprovedThreadModel(session: BridgeSession, thread: GenerationThread, modelId: string) {
@@ -1110,7 +1442,10 @@ function validatePreparedThread(
   if (thread.archivedAt) throw new Error(`${thread.name} is archived.`);
   if (runningThreadAttempt(thread)) throw new Error(`${thread.name} already has an active generation.`);
   const draft = resolvedThreadDraft(session, thread);
-  if (!draft.prompt.trim()) throw new Error(`${thread.name} has no prompt.`);
+  const hasMask = thread.mode === "image" && draft.imageEditMode && draft.maskStrokes.length > 0;
+  if (!hasGenerationInstructions({ prompt: draft.prompt, hasMask, maskInstructions: draft.maskInstructions })) {
+    throw new Error(`${thread.name} has no generation instructions.`);
+  }
   const assetIds = new Set(session.assets.map((asset) => asset.id));
   const missing = draft.references.find((reference) => !assetIds.has(reference.assetId));
   if (missing) throw new Error(`${thread.name} references a missing asset.`);
@@ -1130,17 +1465,35 @@ function validatePreparedThread(
   return { draft, model, modelId };
 }
 
-function estimateCatalogCost(mode: "image" | "video", model: GenerationModel | undefined, options: Record<string, unknown>) {
-  if (!model) return mode === "image" ? 0 : undefined;
-  if (mode === "image") {
-    const pricing = Array.isArray((model as { pricing?: unknown[] }).pricing) ? (model as { pricing: Array<{ cost_usd?: unknown }> }).pricing : [];
-    const costs = pricing.map((item) => item.cost_usd).filter((value): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0);
-    const count = typeof options.n === "number" && options.n > 0 ? options.n : 1;
-    return costs.length ? Math.min(...costs) * count : undefined;
-  }
-  const skus = (model as { pricing_skus?: Record<string, unknown> }).pricing_skus ?? {};
-  const costs = Object.values(skus).map((value) => Number(String(value).replace(/[^0-9.eE+-]/g, ""))).filter((value) => Number.isFinite(value) && value >= 0);
-  return costs.length ? Math.min(...costs) : undefined;
+function estimateCatalogCost(
+  mode: "image" | "video",
+  model: GenerationModel | undefined,
+  options: DraftOptions,
+  context: { videoWorkflow?: "generate" | "edit"; imageInputCount?: number } = {},
+) {
+  return model ? estimateGenerationCost(mode, model, options, context) : undefined;
+}
+
+async function hydrateImageCatalogPricing(models: ImageModel[], selectedIds?: Set<string>) {
+  const targets = models.filter((model) => !selectedIds || selectedIds.has(model.id));
+  const hydrated = new Map<string, ImageModel>();
+  let nextIndex = 0;
+  const worker = async () => {
+    while (nextIndex < targets.length) {
+      const model = targets[nextIndex++];
+      const [author, ...slugParts] = model.id.split("/");
+      if (!author || !slugParts.length) continue;
+      try {
+        const response = await openRouter(`/images/models/${encodeURIComponent(author)}/${encodeURIComponent(slugParts.join("/"))}/endpoints`);
+        const endpoints = Array.isArray(response.endpoints) ? response.endpoints as ImageModelEndpoint[] : [];
+        hydrated.set(model.id, applyImageModelEndpoints(model, endpoints));
+      } catch {
+        // Pricing is advisory; discovery and generation remain available.
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(6, targets.length) }, worker));
+  return models.map((model) => hydrated.get(model.id) ?? model);
 }
 
 async function enhanceThreadText(session: BridgeSession, thread: GenerationThread, draft: GenerationDraftState) {
@@ -1148,30 +1501,37 @@ async function enhanceThreadText(session: BridgeSession, thread: GenerationThrea
     const asset = session.assets.find((item) => item.id === reference.assetId);
     return asset ? [{ slot: reference.slot, name: asset.name, mediaType: asset.mimeType, role: reference.role }] : [];
   });
-  const catalog = references.length ? `\n\nAvailable references:\n${references.map((reference) => `#${reference.slot}: ${reference.name} (${reference.mediaType}, ${reference.role})`).join("\n")}` : "";
+  const hasMask = thread.mode === "image" && draft.imageEditMode && draft.maskStrokes.length > 0;
+  const visuals = await hydrateAgentPromptVisuals(session, thread, draft);
   const input = {
+    promptModel: "openai/gpt-5.6-luna",
     mode: thread.mode,
     videoWorkflow: thread.videoWorkflow,
     editMode: draft.imageEditMode,
     editTarget: draft.imageEditTarget,
+    prompt: draft.prompt,
+    maskInstructions: draft.maskInstructions,
+    hasMask,
     references,
+    visuals,
   };
   const response = await openRouter("/chat/completions", "POST", {
     model: "openai/gpt-5.6-luna",
     reasoning: { effort: "xhigh" },
     messages: [
       { role: "system", content: productSystemInstruction(input) },
-      { role: "system", content: promptEnhancerInstruction() },
-      { role: "user", content: `${draft.prompt.trim()}${catalog}` },
+      { role: "system", content: promptEnhancerInstruction(visuals.map((visual) => visual.kind)) },
+      { role: "user", content: promptEnhancementUserContent(input) },
     ],
   });
   const choices = Array.isArray(response.choices) ? response.choices as Array<Record<string, unknown>> : [];
   const message = choices[0]?.message as Record<string, unknown> | undefined;
   const content = message?.content;
   const text = typeof content === "string" ? content : Array.isArray(content) ? content.map((part) => typeof part === "object" && part && "text" in part ? String((part as { text?: unknown }).text ?? "") : "").join("") : "";
-  const validationError = validateEnhancedPrompt(draft.prompt, text, draft.imageEditTarget);
+  const originalIntent = [draft.prompt.trim(), hasMask ? draft.maskInstructions.trim() : ""].filter(Boolean).join("\n");
+  const validationError = validateEnhancedPrompt(originalIntent, text, draft.imageEditTarget);
   if (validationError) throw new Error(validationError);
-  return text.trim();
+  return { text: text.trim(), visualCount: visuals.length };
 }
 
 function responseCost(response: Record<string, unknown>) {
@@ -1198,7 +1558,10 @@ async function executeOpenRouterThread(sessionId: string, threadId: string, atte
     if (!thread || !attempt?.snapshot) throw new Error(`Generation attempt ${attemptId} has no immutable request snapshot.`);
     const snapshot = structuredClone(attempt.snapshot);
     let prompt = snapshot.enhancedPrompt.trim() || snapshot.prompt.trim();
-    if (snapshot.enhancePrompt && !prompt) throw new Error("The generation prompt is empty.");
+    const hasMask = snapshot.mode === "image" && snapshot.imageEditMode && snapshot.maskStrokes.length > 0;
+    if (!hasGenerationInstructions({ prompt: snapshot.prompt, hasMask, maskInstructions: snapshot.maskInstructions })) {
+      throw new Error("The generation instructions are empty.");
+    }
     if (snapshot.enhancePrompt && !snapshot.enhancedPrompt.trim()) {
       await mutateSession(sessionId, (current) => { updateThreadAttempt(current, threadId, attemptId, { status: "enhancing" }); });
       const draft: GenerationDraftState = {
@@ -1209,24 +1572,36 @@ async function executeOpenRouterThread(sessionId: string, threadId: string, atte
         enhancePrompt: true,
         enhancedPrompt: "",
         enhancedPromptDirty: false,
+        enhancedVisualCount: 0,
         imageEditMode: snapshot.imageEditMode,
         imageEditTarget: snapshot.imageEditTarget,
         maskInstructions: snapshot.maskInstructions,
         maskStrokes: snapshot.maskStrokes,
       };
-      prompt = await enhanceThreadText(session, thread, draft);
+      prompt = (await enhanceThreadText(session, thread, draft)).text;
       await mutateSession(sessionId, (current) => {
         const currentAttempt = findGenerationThread(current, threadId)?.attempts.find((item) => item.id === attemptId);
         if (!currentAttempt || currentAttempt.status === "canceled") throw new Error("Generation was canceled before provider submission.");
         updateThreadAttempt(current, threadId, attemptId, { status: "submitting", enhancedPrompt: prompt });
       });
     }
+    if (snapshot.mode === "image" && snapshot.imageEditMode) {
+      prompt = composeEditPrompt({
+        prompt,
+        target: snapshot.imageEditTarget.trim(),
+        hasMask,
+        maskInstructions: snapshot.maskInstructions,
+      });
+    }
     const modelResponse = await openRouter(snapshot.mode === "image" ? "/images/models" : "/videos/models");
     const models = Array.isArray(modelResponse.data) ? modelResponse.data as GenerationModel[] : [];
     const model = models.find((item) => item.id === snapshot.modelId);
     if (!model) throw new Error(`The selected ${snapshot.mode} model is no longer available.`);
-    const bindings = snapshot.assetBindings.map(({ assetId, role }) => ({ assetId, role }));
-    const references = await hydrateGenerationAssets(session, bindings);
+    const bindings = snapshot.assetBindings.map(({ assetId, role, slot }) => ({ assetId, role, slot }));
+    const targetSlot = Number(snapshot.imageEditTarget.match(/^#(\d+)$/)?.[1]);
+    const references = await hydrateGenerationAssets(session, bindings, hasMask && Number.isInteger(targetSlot)
+      ? { targetSlot, strokes: snapshot.maskStrokes }
+      : undefined);
     const payload = buildRequest({
       mode: snapshot.mode,
       videoWorkflow: snapshot.videoWorkflow,
@@ -1828,6 +2203,7 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
       }
       thread.draft.enhancedPrompt = "";
       thread.draft.enhancedPromptDirty = false;
+      thread.draft.enhancedVisualCount = 0;
       thread.revision += 1;
       thread.updatedAt = new Date().toISOString();
     });
@@ -1933,9 +2309,10 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
             record.error = `${target.name} changed while its prompt was being enhanced.`;
           } else {
             record.status = "completed";
-            record.enhancedPrompt = enhanced;
-            current.draft.enhancedPrompt = enhanced;
+            record.enhancedPrompt = enhanced.text;
+            current.draft.enhancedPrompt = enhanced.text;
             current.draft.enhancedPromptDirty = false;
+            current.draft.enhancedVisualCount = enhanced.visualCount;
             current.updatedAt = new Date().toISOString();
           }
           record.updatedAt = new Date().toISOString();
@@ -1976,8 +2353,15 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
       needsImageCatalog ? openRouter("/images/models") : Promise.resolve({ data: [] }),
       needsVideoCatalog ? openRouter("/videos/models") : Promise.resolve({ data: [] }),
     ]);
+    const selectedImageModelIds = new Set(targets
+      .filter((target) => target.mode === "image" && !usesCodexImage)
+      .map((target) => resolvedThreadModel(snapshot, target)));
+    const pricedImageModels = await hydrateImageCatalogPricing(
+      Array.isArray(imageModels.data) ? imageModels.data as ImageModel[] : [],
+      selectedImageModelIds,
+    );
     const modelCatalogs = {
-      image: Array.isArray(imageModels.data) ? imageModels.data as GenerationModel[] : [],
+      image: pricedImageModels as GenerationModel[],
       video: Array.isArray(videoModels.data) ? videoModels.data as GenerationModel[] : [],
     };
     let attempts: Array<{ threadId: string; attempt: GenerationAttempt }> = [];
@@ -2020,7 +2404,12 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
           updatedAt: createdAt,
           modelId: requestSnapshot.modelId,
           snapshot: requestSnapshot,
-          estimatedCostUsd: estimateCatalogCost(target.mode, catalogModel, requestSnapshot.options),
+          estimatedCostUsd: estimateCatalogCost(target.mode, catalogModel, requestSnapshot.options, {
+            videoWorkflow: target.videoWorkflow,
+            imageInputCount: requestSnapshot.assetBindings.filter((binding) =>
+              session.assets.find((asset) => asset.id === binding.assetId)?.kind === "image"
+            ).length,
+          }),
           inputAssetIds: requestSnapshot.assetBindings.map((reference) => reference.assetId),
           assetIds: [],
         };
@@ -2100,7 +2489,8 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
     const mode = args.mode === "video" ? "video" : "image";
     const path = mode === "image" ? "/images/models" : "/videos/models";
     const result = await openRouter(path);
-    const models = Array.isArray(result.data) ? result.data : [];
+    const rawModels = Array.isArray(result.data) ? result.data : [];
+    const models = mode === "image" ? await hydrateImageCatalogPricing(rawModels as ImageModel[]) : rawModels;
     return models.map((model) => {
       const value = model as Record<string, unknown>;
       return {
