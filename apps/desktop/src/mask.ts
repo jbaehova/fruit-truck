@@ -111,6 +111,18 @@ export async function applyAlphaMaskBlob(source: string, strokes: MaskStroke[]):
   });
 }
 
+export function hasGenerationInstructions({
+  prompt,
+  hasMask,
+  maskInstructions,
+}: {
+  prompt: string;
+  hasMask: boolean;
+  maskInstructions: string;
+}) {
+  return Boolean(prompt.trim() || (hasMask && maskInstructions.trim()));
+}
+
 export function composeEditPrompt({
   prompt,
   target,
@@ -137,6 +149,6 @@ export function composeEditPrompt({
       maskInstructions.trim() || "Apply the user prompt inside the selected region.",
     );
   }
-  sections.push("", "[USER PROMPT]", prompt.trim());
+  if (prompt.trim()) sections.push("", "[USER PROMPT]", prompt.trim());
   return sections.join("\n");
 }

@@ -61,7 +61,7 @@ import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "@/components/ui/toast-manager";
 import { useI18n, type MessageKey } from "@/i18n";
-import { applyAlphaMaskBlob, composeEditPrompt } from "@/mask";
+import { applyAlphaMaskBlob, composeEditPrompt, hasGenerationInstructions } from "@/mask";
 import { invoke } from "@tauri-apps/api/core";
 import {
   allowedAssetRoles,
@@ -167,6 +167,14 @@ function summarizeBatchAttempts(attempts: GenerationAttempt[]): BatchSummary {
 const SESSION_SIDEBAR_OPEN_KEY = "fruit-truck.session-sidebar.open";
 const SESSION_SIDEBAR_WIDTH_KEY = "fruit-truck.session-sidebar.width";
 const DEFAULT_SESSION_SIDEBAR_WIDTH = 256;
+
+function hasRunnableInstructions(mode: GenerationMode, draft: GenerationDraftState) {
+  return hasGenerationInstructions({
+    prompt: draft.prompt,
+    hasMask: mode === "image" && draft.imageEditMode && draft.maskStrokes.length > 0,
+    maskInstructions: draft.maskInstructions,
+  });
+}
 
 export default function App() {
   const { language, t } = useI18n();
@@ -1118,7 +1126,7 @@ export default function App() {
     }] : [];
   }), [assetMap, draft.imageEditMode, draft.imageEditTarget, draft.maskStrokes.length, draft.references, mode]);
 
-  const effectivePrompt = draft.enhancePrompt && draft.enhancedPrompt.trim()
+  const effectivePrompt = draft.enhancePrompt && draft.prompt.trim() && draft.enhancedPrompt.trim()
     ? draft.enhancedPrompt
     : draft.prompt;
   const prepareGenerationPrompt = (prompt: string) => {
@@ -1284,7 +1292,11 @@ export default function App() {
     const available = catalogs[targetThread.mode];
     const model = available.find((item) => item.id === modelId) ?? null;
     if (!model) return "Choose a compatible model.";
-    if (!targetDraft.prompt.trim()) return t("enterPromptFirst");
+    if (!hasRunnableInstructions(targetThread.mode, targetDraft)) {
+      return targetThread.mode === "image" && targetDraft.imageEditMode && targetDraft.maskStrokes.length
+        ? t("enterPromptOrMaskInstructions")
+        : t("enterPromptFirst");
+    }
     if (targetDraft.providerJson.trim()) {
       try {
         const value = JSON.parse(targetDraft.providerJson) as unknown;
@@ -1343,10 +1355,11 @@ export default function App() {
     if (!targetModel) throw new Error("Choose a compatible model.");
     const attemptId = crypto.randomUUID();
     const createdAt = new Date().toISOString();
+    const shouldEnhancePrompt = targetDraft.enhancePrompt && Boolean(targetDraft.prompt.trim());
     const attempt: GenerationAttempt = {
       id: attemptId,
       requestKey,
-      status: targetDraft.enhancePrompt ? "enhancing" : "submitting",
+      status: shouldEnhancePrompt ? "enhancing" : "submitting",
       backend: "openrouter",
       draftRevision: targetThread.revision,
       requestedBy: "human",
@@ -1384,7 +1397,7 @@ export default function App() {
     setGenerationError(null);
     try {
       let prompt = targetDraft.prompt.trim();
-      if (targetDraft.enhancePrompt) {
+      if (shouldEnhancePrompt) {
         if (targetDraft.enhancedPromptDirty && targetDraft.enhancedPrompt.trim()) {
           prompt = targetDraft.enhancedPrompt.trim();
           const enhancedError = validateEnhancedPrompt(targetDraft.prompt, prompt, targetDraft.imageEditMode ? targetDraft.imageEditTarget : undefined);
@@ -1766,7 +1779,8 @@ export default function App() {
     : [];
   const agentModelConfirmed = session.agent.controlMode === "human"
     || (session.agent.modelSelections[mode].status === "selected" && session.agent.modelSelections[mode].modelId === selectedId);
-  const canGenerate = Boolean(selectedModel && draft.prompt.trim() && !providerError && !generationValidationError && credential?.configured && !generating && !enhancing && !activeAttempt && agentModelConfirmed && session.agent.controlMode === "human");
+  const hasMask = mode === "image" && draft.imageEditMode && draft.maskStrokes.length > 0;
+  const canGenerate = Boolean(selectedModel && hasRunnableInstructions(mode, draft) && !providerError && !generationValidationError && credential?.configured && !generating && !enhancing && !activeAttempt && agentModelConfirmed && session.agent.controlMode === "human");
   const showResult = Boolean(lastAssets.length || visibleJob || generating || generationError);
   const resultSignal = [
     generating ? "generating" : "",
@@ -2122,14 +2136,19 @@ export default function App() {
               </>
             ) : null}
             <Field.Root className="prompt-field" invalid={Boolean(promptReferenceError)}>
-              <Field.Label className="section-label-row"><span className="section-label">{t("prompt")}</span><small>{t("characters", { count: draft.prompt.length.toLocaleString(language === "ko" ? "ko-KR" : "en-US") })}</small></Field.Label>
+              <Field.Label className="section-label-row"><span className="section-label">{t("prompt")}{hasMask ? <> <em>{t("optional")}</em></> : null}</span><small>{t("characters", { count: draft.prompt.length.toLocaleString(language === "ko" ? "ko-KR" : "en-US") })}</small></Field.Label>
               <div className="prompt-input-wrap">
                 <Textarea
                   autoFocus
                   rows={7}
                   value={draft.prompt}
                   placeholder={mode === "image" ? t("imagePromptPlaceholder") : t("videoPromptPlaceholder")}
-                  onChange={(event) => patchDraft({ prompt: event.target.value, enhancedPrompt: "", enhancedPromptDirty: false })}
+                  onChange={(event) => patchDraft({
+                    prompt: event.target.value,
+                    enhancePrompt: event.target.value.trim() ? draft.enhancePrompt : false,
+                    enhancedPrompt: "",
+                    enhancedPromptDirty: false,
+                  })}
                   onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") void runGeneration(); }}
                 />
                 {mentionSuggestions.length ? (
@@ -2159,7 +2178,7 @@ export default function App() {
 
             <Field.Root className="enhance-row">
               <Field.Label className="enhance-label" nativeLabel={false} render={<div />}><span><Sparkles /><span><strong>{t("promptEnhancement")}</strong><small>{studio.promptModel.endsWith("luna") ? "GPT-5.6 Luna · xhigh" : "GPT-5.6 Terra · high"}</small></span></span></Field.Label>
-              <div><Button size="xs" variant="ghost" disabled={enhancing || !draft.prompt.trim()} onClick={() => void runEnhancement().catch((error) => setGenerationError(errorMessage(error)))}>{enhancing ? <LoaderCircle className="spin" /> : <RefreshCw />} {draft.enhancedPrompt ? t("reEnhance") : t("preview")}</Button><Switch checked={draft.enhancePrompt} onCheckedChange={(value) => patchDraft({ enhancePrompt: value })} /></div>
+              <div><Button size="xs" variant="ghost" disabled={enhancing || !draft.prompt.trim()} onClick={() => void runEnhancement().catch((error) => setGenerationError(errorMessage(error)))}>{enhancing ? <LoaderCircle className="spin" /> : <RefreshCw />} {draft.enhancedPrompt ? t("reEnhance") : t("preview")}</Button><Switch checked={draft.enhancePrompt && Boolean(draft.prompt.trim())} disabled={!draft.prompt.trim()} onCheckedChange={(value) => patchDraft({ enhancePrompt: value })} /></div>
             </Field.Root>
             {draft.enhancedPrompt ? (
               <Collapsible.Root className="enhanced-prompt">

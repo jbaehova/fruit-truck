@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { composeEditPrompt } from "./mask.ts";
+import { composeEditPrompt, hasGenerationInstructions } from "./mask.ts";
 
 test("masked edit prompts use explicit, separated semantics", () => {
   const prompt = composeEditPrompt({
@@ -27,4 +27,24 @@ test("unmasked image edits do not invent mask instructions", () => {
 
   assert.doesNotMatch(prompt, /MASK SEMANTICS/);
   assert.match(prompt, /\[USER PROMPT\]\nMake it cinematic\.$/);
+});
+
+test("mask instructions can be the sole edit instruction", () => {
+  assert.equal(hasGenerationInstructions({
+    prompt: "",
+    hasMask: true,
+    maskInstructions: "Turn the selected feathers black.",
+  }), true);
+  assert.equal(hasGenerationInstructions({ prompt: "", hasMask: true, maskInstructions: "  " }), false);
+  assert.equal(hasGenerationInstructions({ prompt: "", hasMask: false, maskInstructions: "Change it." }), false);
+
+  const prompt = composeEditPrompt({
+    prompt: "",
+    target: "#1",
+    hasMask: true,
+    maskInstructions: "Turn the selected feathers black.",
+  });
+
+  assert.match(prompt, /\[MASK INSTRUCTIONS\]\nTurn the selected feathers black\.$/);
+  assert.doesNotMatch(prompt, /\[USER PROMPT\]/);
 });
