@@ -27,8 +27,8 @@ export function RightPanel({
           if (next === "agent" || next === "assets") onTabChange(next);
         }}
       >
-        <Toggle value="agent"><Bot /> {t("agent")}</Toggle>
-        <Toggle value="assets"><Images /> {t("assets")}</Toggle>
+        <Toggle value="agent" aria-keyshortcuts="Meta+Alt+1"><Bot /> {t("agent")}</Toggle>
+        <Toggle value="assets" aria-keyshortcuts="Meta+Alt+2"><Images /> {t("assets")}</Toggle>
       </ToggleGroup>
       <div className="right-panel-content">
         {tab === "agent" ? agent : assets}

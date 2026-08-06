@@ -1,21 +1,17 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { Collapsible } from "@base-ui/react/collapsible";
 import { Field } from "@base-ui/react/field";
-import { Progress } from "@base-ui/react/progress";
 import { Toggle } from "@base-ui/react/toggle";
 import { ToggleGroup } from "@base-ui/react/toggle-group";
 import { Tooltip } from "@base-ui/react/tooltip";
 import {
-  Check,
   ChevronRight,
   CircleAlert,
-  Clock3,
-  Film,
   ImageIcon,
   LoaderCircle,
   PanelLeftOpen,
+  PanelRightOpen,
   Play,
-  Pencil,
   RefreshCw,
   Settings,
   Sparkles,
@@ -43,25 +39,29 @@ import {
 } from "@/agentBridge";
 import { mergeBridgeSession } from "@/bridgeMerge";
 import { AgentPanel, type BatchSummary } from "@/components/AgentPanel";
+import { AttemptHistoryPopover } from "@/components/AttemptHistoryPopover";
 import { AssetLibrary } from "@/components/AssetLibrary";
 import { AssetPreview } from "@/components/AssetPreview";
 import { ConfirmDialog, type Confirmation } from "@/components/ConfirmDialog";
 import { EditMediaPanel } from "@/components/EditMediaPanel";
 import { GenerationThreadRail } from "@/components/GenerationThreadRail";
+import { GenerationResultDialog, type GenerationResultNotice } from "@/components/GenerationResultDialog";
 import { InputTray } from "@/components/InputTray";
 import { ModelSelector } from "@/components/ModelSelector";
 import { OptionsFields } from "@/components/OptionsFields";
 import { RequestPreviewDialog } from "@/components/RequestPreviewDialog";
 import { RightPanel } from "@/components/RightPanel";
 import { SessionSidebar } from "@/components/SessionSidebar";
+import { ShortcutHelpDialog } from "@/components/ShortcutHelpDialog";
 import { UpdatePrompt } from "@/components/UpdatePrompt";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "@/components/ui/toast-manager";
-import { useI18n, type MessageKey } from "@/i18n";
-import { applyAlphaMaskBlob, composeEditPrompt, hasGenerationInstructions } from "@/mask";
+import { useI18n } from "@/i18n";
+import { createNativeAppMenu, type NativeAppMenu, type NativeMenuState } from "@/appMenu";
+import { applyAlphaMaskBlob, composeEditPrompt, hasGenerationInstructions, renderMaskGuide } from "@/mask";
 import { invoke } from "@tauri-apps/api/core";
 import {
   allowedAssetRoles,
@@ -73,6 +73,7 @@ import {
   generateImage,
   getCredentialStatus,
   imageReferenceLimit,
+  hydrateImageModelPricing,
   isTauriRuntime,
   loadModels,
   loadImageModelEndpoints,
@@ -89,6 +90,7 @@ import {
   type GenerationModel,
   type ImageModel,
   type ImageModelEndpoint,
+  type PromptEnhancementVisual,
   type ReferenceAsset,
   type VideoModel,
 } from "@/openrouter";
@@ -101,11 +103,13 @@ import {
   importFileAsset,
   importGeneratedImage,
   importGeneratedVideo,
+  initializeSessionCatalogDefaults,
   loadStudioState,
   managedDroppedAssets,
   materializeRequestBlob,
   migrateLegacyAsset,
   nextReferenceSlot,
+  nextAvailableSessionName,
   pickManagedAssets,
   resolveAssetMaskSource,
   saveStudioState,
@@ -113,8 +117,9 @@ import {
   activeVideoJobsFromAttempts,
   effectiveThreadDraft,
   effectiveThreadModelId,
+  exportAssetToDownloads,
+  extractPromptContextFrames,
   generationDefaultKey,
-  latestGenerationAttempt,
   optionOverridesFromDefaults,
   type NativeManagedAsset,
   type GenerationDraftState,
@@ -123,6 +128,7 @@ import {
   type SessionAsset,
   type StudioSession,
 } from "@/studio";
+import { NATIVE_MENU_COMMAND_IDS, commandForKeyboardEvent, type AppCommandId } from "@/shortcuts";
 
 const AssemblyDialog = lazy(() => import("@/components/AssemblyDialog").then((module) => ({ default: module.AssemblyDialog })));
 const DecisionWorkspace = lazy(() => import("@/components/DecisionWorkspace").then((module) => ({ default: module.DecisionWorkspace })));
@@ -140,13 +146,6 @@ function FruitTruckMark() {
 function providerLabel(model: GenerationModel | null) {
   return model?.name.split(":", 1)[0] ?? "OpenRouter";
 }
-
-const JOB_STATUS_KEYS: Record<string, MessageKey> = {
-  pending: "statusPending",
-  in_progress: "statusInProgress",
-  failed: "statusFailed",
-  completed: "statusCompleted",
-};
 
 function summarizeBatchAttempts(attempts: GenerationAttempt[]): BatchSummary {
   const estimatedCosts = attempts.flatMap((attempt) => attempt.estimatedCostUsd == null ? [] : [attempt.estimatedCostUsd]);
@@ -166,6 +165,7 @@ function summarizeBatchAttempts(attempts: GenerationAttempt[]): BatchSummary {
 
 const SESSION_SIDEBAR_OPEN_KEY = "fruit-truck.session-sidebar.open";
 const SESSION_SIDEBAR_WIDTH_KEY = "fruit-truck.session-sidebar.width";
+const RIGHT_PANEL_OPEN_KEY = "fruit-truck.right-panel.open";
 const DEFAULT_SESSION_SIDEBAR_WIDTH = 256;
 
 function hasRunnableInstructions(mode: GenerationMode, draft: GenerationDraftState) {
@@ -174,6 +174,11 @@ function hasRunnableInstructions(mode: GenerationMode, draft: GenerationDraftSta
     hasMask: mode === "image" && draft.imageEditMode && draft.maskStrokes.length > 0,
     maskInstructions: draft.maskInstructions,
   });
+}
+
+function enhancementOriginalIntent(mode: GenerationMode, draft: GenerationDraftState) {
+  const hasMask = mode === "image" && draft.imageEditMode && draft.maskStrokes.length > 0;
+  return [draft.prompt.trim(), hasMask ? draft.maskInstructions.trim() : ""].filter(Boolean).join("\n");
 }
 
 export default function App() {
@@ -185,14 +190,23 @@ export default function App() {
   const [imageEndpoints, setImageEndpoints] = useState<Record<string, ImageModelEndpoint[]>>({});
   const [credential, setCredential] = useState<CredentialStatus | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [shortcutHelpOpen, setShortcutHelpOpen] = useState(false);
   const [executingThreadIds, setExecutingThreadIds] = useState<Set<string>>(new Set());
   const [enhancingThreadIds, setEnhancingThreadIds] = useState<Set<string>>(new Set());
-  const [selectedThreadIds, setSelectedThreadIds] = useState<Set<string>>(new Set());
-  const [generationErrors, setGenerationErrors] = useState<Record<string, string>>({});
-  const [batchSummary, setBatchSummary] = useState<BatchSummary | null>(null);
   const [selectedAssetIds, setSelectedAssetIds] = useState<Set<string>>(new Set());
+  const [resultQueue, setResultQueue] = useState<GenerationResultNotice[]>([]);
+  const [resultDialogOpen, setResultDialogOpen] = useState(false);
+  const [resultHandingOff, setResultHandingOff] = useState(false);
+  const [resultQueuePaused, setResultQueuePaused] = useState(false);
+  const [otherDialogOpen, setOtherDialogOpen] = useState(false);
+  const [highlightedAssetIds, setHighlightedAssetIds] = useState<Set<string>>(new Set());
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
   const [rightPanelTab, setRightPanelTab] = useState<"agent" | "assets">("assets");
+  const [rightPanelOpen, setRightPanelOpen] = useState(() =>
+    typeof localStorage === "undefined" || localStorage.getItem(RIGHT_PANEL_OPEN_KEY) !== "false",
+  );
+  const [focusedAssetId, setFocusedAssetId] = useState<string | null>(null);
+  const [previewAssetId, setPreviewAssetId] = useState<string | null>(null);
   const [assemblyOpen, setAssemblyOpen] = useState(false);
   const [decisionOpen, setDecisionOpen] = useState(false);
   const [sessionSidebarOpen, setSessionSidebarOpen] = useState(() =>
@@ -204,19 +218,38 @@ export default function App() {
     return Number.isFinite(stored) && stored >= 210 && stored <= 420 ? stored : DEFAULT_SESSION_SIDEBAR_WIDTH;
   });
   const composerViewportRef = useRef<HTMLDivElement>(null);
+  const promptRef = useRef<HTMLTextAreaElement>(null);
+  const sessionSearchRef = useRef<HTMLInputElement>(null);
+  const nativeMenuRef = useRef<NativeAppMenu | null>(null);
+  const nativeMenuStateRef = useRef<NativeMenuState>({ enabled: {}, checked: {} });
+  const nativeMenuBuildQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const dispatchCommandRef = useRef<(id: AppCommandId) => boolean>(() => false);
+  const createNewSessionRef = useRef<() => void>(() => {});
+  const duplicateThreadRef = useRef<(id: string) => void>(() => {});
+  const restoreThreadRef = useRef<(id: string) => void>(() => {});
+  const switchModeRef = useRef<(mode: GenerationMode) => void>(() => {});
+  const pickFilesRef = useRef<() => Promise<SessionAsset[]>>(async () => []);
+  const runGenerationRef = useRef<() => void>(() => {});
+  const dismissGenerationResultRef = useRef<() => void>(() => {});
   const polling = useRef(false);
+  const catalogHydrationRevision = useRef(0);
+  const attemptStatuses = useRef<Map<string, GenerationAttempt["status"]> | null>(null);
+  const resultHandoffTimer = useRef<number | undefined>(undefined);
+  const resultCooldownTimer = useRef<number | undefined>(undefined);
+  const assetHighlightTimer = useRef<number | undefined>(undefined);
   const studioRef = useRef(studio);
   studioRef.current = studio;
   const migratingAssetIds = useRef(new Set<string>());
   const bridgeRevisions = useRef(new Map<string, number>());
   const bridgeSnapshots = useRef(new Map<string, AgentBridgeSession>());
+  const quitConfirmationPending = useRef(false);
+  const confirmationRef = useRef<Confirmation | null>(null);
 
   const session = studio.sessions.find((item) => item.id === studio.activeSessionId) ?? studio.sessions[0];
   const pendingUiDecision = session.agent.decisions.find((decision) =>
     decision.status === "pending" && decision.channel === "fruit_truck_ui"
   );
   const mode = session.mode;
-  useEffect(() => setBatchSummary(null), [session.id, mode]);
   const modeThreads = session.threads[mode].filter((item) => !item.archivedAt);
   const thread = modeThreads.find((item) => item.id === session.activeThreadIds[mode]) ?? modeThreads[0];
   const workflow = thread.videoWorkflow;
@@ -240,11 +273,6 @@ export default function App() {
       + ((selectedModel as VideoModel | null)?.supported_frame_images?.length ?? 0),
     );
   const assetMap = useMemo(() => new Map(session.assets.map((asset) => [asset.id, asset])), [session.assets]);
-  const latestAttempt = latestGenerationAttempt(thread);
-  const lastAssets = (latestAttempt?.assetIds ?? []).flatMap((id) => {
-    const asset = assetMap.get(id);
-    return asset ? [asset] : [];
-  });
   const sessionVideoJobs = activeVideoJobsFromAttempts(session);
   const persistedBatchSummary = useMemo<BatchSummary | null>(() => {
     const attempts = [...session.threads.image, ...session.threads.video].flatMap((item) => item.attempts);
@@ -253,29 +281,102 @@ export default function App() {
     const batch = attempts.filter((attempt) => attempt.requestKey === requestKey);
     return summarizeBatchAttempts(batch);
   }, [session.threads]);
-  const currentJob = sessionVideoJobs.findLast((job) => !job.threadId || job.threadId === thread.id);
-  const visibleJob = mode === "video" ? currentJob : undefined;
   const activeAttempt = activeGenerationAttempt(thread);
-  const generationError = latestAttempt?.error ?? generationErrors[thread.id] ?? null;
-  const setGenerationError = useCallback((message: string | null) => {
-    const currentStudio = studioRef.current;
-    const currentSession = currentStudio.sessions.find((item) => item.id === currentStudio.activeSessionId) ?? currentStudio.sessions[0];
-    const currentThreadId = currentSession.activeThreadIds[currentSession.mode];
-    setGenerationErrors((current) => {
-      const next = { ...current };
-      if (message) next[currentThreadId] = message;
-      else delete next[currentThreadId];
-      return next;
-    });
-  }, []);
+  const hasActiveAttempt = Boolean(activeAttempt);
   const generating = executingThreadIds.has(thread.id) || Boolean(activeAttempt && activeAttempt.status !== "enhancing");
   const enhancing = enhancingThreadIds.has(thread.id) || activeAttempt?.status === "enhancing";
 
   useEffect(() => {
+    const previous = attemptStatuses.current;
+    const next = new Map<string, GenerationAttempt["status"]>();
+    const completed: GenerationResultNotice[] = [];
+    const failed: Array<{ sessionId: string; sessionName: string; threadName: string; message: string }> = [];
+
+    for (const candidateSession of studio.sessions) {
+      for (const candidateThread of [...candidateSession.threads.image, ...candidateSession.threads.video]) {
+        for (const attempt of candidateThread.attempts) {
+          const key = `${candidateSession.id}:${candidateThread.id}:${attempt.id}`;
+          next.set(key, attempt.status);
+          const previousStatus = previous?.get(key);
+          if (previousStatus === attempt.status) continue;
+          if (attempt.status === "completed" && attempt.assetIds.length) {
+            completed.push({
+              sessionId: candidateSession.id,
+              sessionName: candidateSession.name,
+              threadId: candidateThread.id,
+              threadName: candidateThread.name,
+              attemptId: attempt.id,
+              assetIds: [...attempt.assetIds],
+              completedAt: attempt.completedAt ?? attempt.updatedAt,
+            });
+          } else if (attempt.status === "failed" || attempt.status === "uncertain") {
+            failed.push({
+              sessionId: candidateSession.id,
+              sessionName: candidateSession.name,
+              threadName: candidateThread.name,
+              message: attempt.error ?? t("generationFailed"),
+            });
+          }
+        }
+      }
+    }
+
+    attemptStatuses.current = next;
+    if (!previous) return;
+
+    const activeResults = completed
+      .filter((notice) => notice.sessionId === studio.activeSessionId)
+      .toSorted((left, right) => left.completedAt.localeCompare(right.completedAt));
+    if (activeResults.length) {
+      setResultQueue((current) => {
+        const known = new Set(current.map((notice) => `${notice.sessionId}:${notice.attemptId}`));
+        return [...current, ...activeResults.filter((notice) => !known.has(`${notice.sessionId}:${notice.attemptId}`))];
+      });
+    }
+    for (const notice of completed.filter((item) => item.sessionId !== studio.activeSessionId)) {
+      toast.info(t("backgroundResultSaved", { session: notice.sessionName, count: notice.assetIds.length }));
+    }
+    for (const failure of failed) {
+      toast.error(failure.sessionId === studio.activeSessionId
+        ? `${failure.threadName}: ${failure.message}`
+        : t("backgroundGenerationFailed", { session: failure.sessionName, thread: failure.threadName }));
+    }
+  }, [studio, t]);
+
+  useEffect(() => {
+    if (resultQueue.length && !resultDialogOpen && !resultHandingOff && !resultQueuePaused && !otherDialogOpen) setResultDialogOpen(true);
+  }, [otherDialogOpen, resultDialogOpen, resultHandingOff, resultQueue.length, resultQueuePaused]);
+
+  useEffect(() => {
+    if (!resultQueue.length) {
+      if (resultQueuePaused) setResultQueuePaused(false);
+      if (resultDialogOpen) setResultDialogOpen(false);
+    }
+  }, [resultDialogOpen, resultQueue.length, resultQueuePaused]);
+
+  useEffect(() => {
+    setResultQueue((current) => current.filter((notice) => notice.sessionId === studio.activeSessionId));
+  }, [studio.activeSessionId]);
+
+  useEffect(() => {
+    const sync = () => setOtherDialogOpen(Boolean(document.querySelector(
+      '[role="dialog"]:not(.generation-result-dialog), [role="alertdialog"]',
+    )));
+    sync();
+    const observer = new MutationObserver(sync);
+    observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["role"] });
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => () => {
+    if (resultHandoffTimer.current) window.clearTimeout(resultHandoffTimer.current);
+    if (resultCooldownTimer.current) window.clearTimeout(resultCooldownTimer.current);
+    if (assetHighlightTimer.current) window.clearTimeout(assetHighlightTimer.current);
+  }, []);
+
+  useEffect(() => {
     composerViewportRef.current?.scrollTo({ top: 0, left: 0 });
   }, [mode, workflow, selectedId, studio.activeSessionId, thread.id]);
-
-  useEffect(() => { setSelectedThreadIds(new Set()); }, [mode, studio.activeSessionId]);
 
   const patchSession = useCallback((id: string, update: (current: StudioSession) => StudioSession) => {
     setStudio((current) => ({
@@ -313,11 +414,14 @@ export default function App() {
               ? patch.providerJson === current.generationDefaults.providerJson[defaultKey] ? undefined : patch.providerJson
               : item.providerJsonOverride;
             const { options: _options, providerJson: _providerJson, ...draftPatch } = patch;
+            const normalizedDraftPatch = draftPatch.enhancedPrompt === ""
+              ? { ...draftPatch, enhancedVisualCount: 0 }
+              : draftPatch;
             return {
               ...item,
               optionOverrides,
               providerJsonOverride,
-              draft: { ...item.draft, ...draftPatch },
+              draft: { ...item.draft, ...normalizedDraftPatch },
               revision: item.revision + 1,
               updatedAt: new Date().toISOString(),
             };
@@ -339,7 +443,20 @@ export default function App() {
   }, [patchActive]);
 
   const confirmAction = useCallback((title: string, description: string, confirmLabel?: string) =>
-    new Promise<boolean>((resolve) => setConfirmation({ title, description, confirmLabel, resolve })), []);
+    new Promise<boolean>((resolve) => {
+      if (confirmationRef.current) {
+        resolve(false);
+        return;
+      }
+      const next = { title, description, confirmLabel, resolve };
+      confirmationRef.current = next;
+      setConfirmation(next);
+    }), []);
+
+  const closeConfirmation = useCallback(() => {
+    confirmationRef.current = null;
+    setConfirmation(null);
+  }, []);
 
   useEffect(() => {
     if (studio.sessions.some((item) => item.assets.some((asset) => asset.externalUrl?.startsWith("data:")))) {
@@ -499,6 +616,10 @@ export default function App() {
   }, [sessionSidebarOpen, sessionSidebarWidth]);
 
   useEffect(() => {
+    localStorage.setItem(RIGHT_PANEL_OPEN_KEY, String(rightPanelOpen));
+  }, [rightPanelOpen]);
+
+  useEffect(() => {
     if (!isTauriRuntime()) return;
     const report = () => void invoke("report_desktop_runtime", {
       activeSessionId: studioRef.current.activeSessionId,
@@ -506,16 +627,6 @@ export default function App() {
     report();
     const timer = window.setInterval(report, 3_000);
     return () => window.clearInterval(timer);
-  }, []);
-
-  useEffect(() => {
-    const openSettings = (event: KeyboardEvent) => {
-      if (!(event.metaKey || event.ctrlKey) || event.key !== ",") return;
-      event.preventDefault();
-      setSettingsOpen(true);
-    };
-    window.addEventListener("keydown", openSettings, true);
-    return () => window.removeEventListener("keydown", openSettings, true);
   }, []);
 
   useEffect(() => {
@@ -528,11 +639,13 @@ export default function App() {
 
   const refreshCatalog = useCallback(async () => {
     if (!credential?.configured) return;
+    const hydrationRevision = ++catalogHydrationRevision.current;
     setCatalogLoading(true);
     setCatalogError(null);
     try {
       const [images, videos] = await Promise.all([loadModels("image"), loadModels("video")]);
       setCatalogs({ image: images, video: videos });
+      setImageEndpoints({});
       setStudio((current) => ({
         ...current,
         sessions: current.sessions.map((item) => {
@@ -558,6 +671,14 @@ export default function App() {
           };
         }),
       }));
+      void hydrateImageModelPricing(images, (hydrated, endpoints) => {
+        if (catalogHydrationRevision.current !== hydrationRevision) return;
+        setCatalogs((current) => ({
+          ...current,
+          image: current.image.map((model) => model.id === hydrated.id ? hydrated : model),
+        }));
+        setImageEndpoints((current) => ({ ...current, [hydrated.id]: endpoints }));
+      });
     } catch (error) {
       setCatalogError(errorMessage(error));
     } finally {
@@ -566,6 +687,10 @@ export default function App() {
   }, [credential?.configured]);
 
   useEffect(() => { void refreshCatalog(); }, [refreshCatalog]);
+
+  useEffect(() => {
+    if (!credential?.configured) catalogHydrationRevision.current += 1;
+  }, [credential?.configured]);
 
   useEffect(() => {
     if (mode !== "image" || !selectedId || imageEndpoints[selectedId] || !credential?.configured) return;
@@ -886,22 +1011,66 @@ export default function App() {
     };
   }, [commitImportedAssets]);
 
-  const addAssetAsReference = (assetId: string) => {
-    const asset = assetMap.get(assetId);
-    if (!asset || draft.references.some((reference) => reference.assetId === assetId) || draft.references.length >= referenceLimit) return;
-    const validRole = asset.kind === "video"
-      ? roles.includes("video_reference") ? "video_reference" : null
-      : roles.includes("reference") ? "reference" : roles.find((role) => role !== "video_reference") ?? null;
+  const addAssetAsReference = (assetId: string, notice?: GenerationResultNotice) => {
+    const targetSession = notice
+      ? studioRef.current.sessions.find((item) => item.id === notice.sessionId)
+      : session;
+    const targetThread = notice
+      ? targetSession && [...targetSession.threads.image, ...targetSession.threads.video].find((item) => item.id === notice.threadId)
+      : thread;
+    if (!targetSession || !targetThread) return;
+    const targetAsset = targetSession.assets.find((item) => item.id === assetId);
+    const targetDraft = effectiveThreadDraft(targetSession, targetThread);
+    const targetModelId = effectiveThreadModelId(targetSession, targetThread);
+    const targetModel = catalogs[targetThread.mode].find((item) => item.id === targetModelId) ?? null;
+    const targetRoles = allowedAssetRoles(targetThread.mode, targetModel, targetThread.videoWorkflow);
+    const targetReferenceLimit = targetThread.mode === "image"
+      ? imageReferenceLimit(targetModel as ImageModel | null)
+      : Math.max(
+        targetRoles.length,
+        videoReferenceLimit(targetModel as VideoModel | null)
+        + ((targetModel as VideoModel | null)?.supported_frame_images?.length ?? 0),
+      );
+    if (!targetAsset || targetDraft.references.some((reference) => reference.assetId === assetId) || targetDraft.references.length >= targetReferenceLimit) return;
+    const validRole = targetAsset.kind === "video"
+      ? targetRoles.includes("video_reference") ? "video_reference" : null
+      : targetRoles.includes("reference") ? "reference" : targetRoles.find((role) => role !== "video_reference") ?? null;
     if (!validRole) {
       toast.error(t("unsupportedAssetInput"));
       return;
     }
-    patchDraft({ references: [...draft.references, { assetId, role: validRole, slot: nextReferenceSlot(draft.references) }], enhancedPrompt: "", enhancedPromptDirty: false });
+    if (!notice) {
+      patchDraft({ references: [...targetDraft.references, { assetId, role: validRole, slot: nextReferenceSlot(targetDraft.references) }], enhancedPrompt: "", enhancedPromptDirty: false });
+      return;
+    }
+    patchSession(notice.sessionId, (current) => ({
+      ...current,
+      mode: targetThread.mode,
+      activeThreadIds: { ...current.activeThreadIds, [targetThread.mode]: targetThread.id },
+      threads: {
+        ...current.threads,
+        [targetThread.mode]: current.threads[targetThread.mode].map((item) => item.id === targetThread.id ? {
+          ...item,
+          revision: item.revision + 1,
+          updatedAt: new Date().toISOString(),
+          draft: {
+            ...item.draft,
+            references: [...item.draft.references, { assetId, role: validRole, slot: nextReferenceSlot(item.draft.references) }],
+            enhancedPrompt: "",
+            enhancedPromptDirty: false,
+          },
+        } : item),
+      },
+    }));
+    setStudio((current) => ({ ...current, activeSessionId: notice.sessionId }));
   };
 
-  const editImageAsset = (assetId: string) => {
-    patchActive((current) => {
-      const targetId = current.activeThreadIds.image;
+  const editImageAsset = (assetId: string, notice?: GenerationResultNotice) => {
+    const patchTarget = notice
+      ? (update: (current: StudioSession) => StudioSession) => patchSession(notice.sessionId, update)
+      : patchActive;
+    patchTarget((current) => {
+      const targetId = notice?.threadId ?? current.activeThreadIds.image;
       const imageThread = current.threads.image.find((item) => item.id === targetId) ?? current.threads.image[0];
       const imageDraft = imageThread.draft;
       const existing = imageDraft.references.find((reference) => reference.assetId === assetId);
@@ -910,6 +1079,7 @@ export default function App() {
       return {
         ...current,
         mode: "image",
+        activeThreadIds: { ...current.activeThreadIds, image: imageThread.id },
         threads: {
           ...current.threads,
           image: current.threads.image.map((item) => item.id === imageThread.id ? {
@@ -930,6 +1100,7 @@ export default function App() {
         },
       };
     });
+    if (notice) setStudio((current) => ({ ...current, activeSessionId: notice.sessionId }));
   };
 
   const setEditTargetAsset = (assetId: string, incomingAsset?: SessionAsset) => {
@@ -988,9 +1159,13 @@ export default function App() {
   const importEditTarget = async (files: FileList | File[]) => applyImportedEditTarget(await importFiles(files));
   const pickEditTarget = async () => applyImportedEditTarget(await pickFiles());
 
-  const routeImageToVideo = (assetId: string) => {
-    const targetThread = session.threads.video.find((item) => item.id === session.activeThreadIds.video) ?? session.threads.video[0];
-    const videoId = effectiveThreadModelId(session, targetThread);
+  const routeImageToVideo = (assetId: string, notice?: GenerationResultNotice) => {
+    const targetSession = notice
+      ? studioRef.current.sessions.find((item) => item.id === notice.sessionId)
+      : session;
+    if (!targetSession) return;
+    const targetThread = targetSession.threads.video.find((item) => item.id === targetSession.activeThreadIds.video) ?? targetSession.threads.video[0];
+    const videoId = effectiveThreadModelId(targetSession, targetThread);
     const videoModel = catalogs.video.find((model) => model.id === videoId) ?? null;
     const videoRoles = allowedAssetRoles("video", videoModel, "generate");
     const role = videoRoles.includes("reference")
@@ -998,10 +1173,18 @@ export default function App() {
       : videoRoles.includes("first_frame") ? "first_frame" : null;
     if (!role) {
       toast.error(t("chooseVideoImageInput"));
-      switchMode("video");
+      if (notice) {
+        patchSession(notice.sessionId, (current) => ({ ...current, mode: "video" }));
+        setStudio((current) => ({ ...current, activeSessionId: notice.sessionId }));
+      } else {
+        switchMode("video");
+      }
       return;
     }
-    patchActive((current) => {
+    const patchTarget = notice
+      ? (update: (current: StudioSession) => StudioSession) => patchSession(notice.sessionId, update)
+      : patchActive;
+    patchTarget((current) => {
       const targetId = current.activeThreadIds.video;
       const videoThread = current.threads.video.find((item) => item.id === targetId) ?? current.threads.video[0];
       const videoDraft = videoThread.draft;
@@ -1030,6 +1213,7 @@ export default function App() {
         },
       };
     });
+    if (notice) setStudio((current) => ({ ...current, activeSessionId: notice.sessionId }));
   };
 
   const selectStageModel = (targetMode: GenerationMode, id: string) => {
@@ -1070,13 +1254,11 @@ export default function App() {
         },
       };
     });
-    setGenerationError(null);
   };
   const selectModel = (id: string) => selectStageModel(mode, id);
 
   const switchMode = (next: GenerationMode) => {
     patchActive((current) => ({ ...current, mode: next }));
-    setGenerationError(null);
   };
 
   const switchWorkflow = (next: "generate" | "edit") => {
@@ -1097,7 +1279,6 @@ export default function App() {
         } : item),
       },
     }));
-    setGenerationError(null);
   };
 
   const providerError = useMemo(() => {
@@ -1126,7 +1307,7 @@ export default function App() {
     }] : [];
   }), [assetMap, draft.imageEditMode, draft.imageEditTarget, draft.maskStrokes.length, draft.references, mode]);
 
-  const effectivePrompt = draft.enhancePrompt && draft.prompt.trim() && draft.enhancedPrompt.trim()
+  const effectivePrompt = draft.enhancePrompt && draft.enhancedPrompt.trim()
     ? draft.enhancedPrompt
     : draft.prompt;
   const prepareGenerationPrompt = (prompt: string) => {
@@ -1213,12 +1394,74 @@ export default function App() {
     ?? promptReferenceError
     ?? maskReferenceError;
 
+  const hydratePromptEnhancementVisuals = async (
+    targetSession: StudioSession,
+    targetThread: GenerationThread,
+    targetDraft: GenerationDraftState,
+  ): Promise<PromptEnhancementVisual[]> => {
+    const targetAssetMap = new Map(targetSession.assets.map((asset) => [asset.id, asset]));
+    const visuals: PromptEnhancementVisual[] = [];
+    for (const reference of targetDraft.references.toSorted((left, right) => left.slot - right.slot)) {
+      const asset = targetAssetMap.get(reference.assetId);
+      if (!asset) throw new Error(t("missingReference", { slot: reference.slot }));
+      if (asset.kind === "video") {
+        const frames = await extractPromptContextFrames(asset).catch(() => []);
+        visuals.push(...frames.map((frame) => ({
+          id: `${asset.id}:${frame.position}`,
+          kind: "video_frame" as const,
+          source: frame.dataUrl,
+          slot: reference.slot,
+          name: asset.name,
+          role: reference.role,
+          framePosition: frame.position,
+          timestampSeconds: frame.timestampSeconds,
+        })));
+        continue;
+      }
+
+      const isEditTarget = targetThread.mode === "image"
+        && targetDraft.imageEditMode
+        && `#${reference.slot}` === targetDraft.imageEditTarget.trim();
+      visuals.push({
+        id: asset.id,
+        kind: isEditTarget ? "edit_target" : "reference",
+        source: await assetRequestUrl(asset),
+        slot: reference.slot,
+        name: asset.name,
+        role: reference.role,
+      });
+      if (isEditTarget && targetDraft.maskStrokes.length > 0) {
+        const maskSource = await resolveAssetMaskSource(asset);
+        if (!maskSource) throw new Error("The edit image could not be loaded for mask analysis.");
+        try {
+          visuals.push({
+            id: `${asset.id}:mask-guide`,
+            kind: "mask_guide",
+            source: await renderMaskGuide(maskSource, targetDraft.maskStrokes),
+            slot: reference.slot,
+            name: `${asset.name} mask guide`,
+            role: reference.role,
+          });
+        } finally {
+          if (maskSource.startsWith("blob:")) URL.revokeObjectURL(maskSource);
+        }
+      }
+    }
+    return visuals;
+  };
+
   const enhanceThreadPrompt = async (targetSession: StudioSession, targetThread: GenerationThread) => {
     const targetDraft = effectiveThreadDraft(targetSession, targetThread);
-    if (!targetDraft.prompt.trim()) throw new Error(t("enterPromptFirst"));
+    if (!hasRunnableInstructions(targetThread.mode, targetDraft)) {
+      throw new Error(targetThread.mode === "image" && targetDraft.imageEditMode && targetDraft.maskStrokes.length
+        ? t("enterPromptOrMaskInstructions")
+        : t("enterPromptFirst"));
+    }
     setEnhancingThreadIds((current) => new Set(current).add(targetThread.id));
     try {
       const targetAssetMap = new Map(targetSession.assets.map((asset) => [asset.id, asset]));
+      const hasMask = targetThread.mode === "image" && targetDraft.imageEditMode && targetDraft.maskStrokes.length > 0;
+      const visuals = await hydratePromptEnhancementVisuals(targetSession, targetThread, targetDraft);
       const text = await enhancePrompt({
         promptModel: studioRef.current.promptModel,
         mode: targetThread.mode,
@@ -1226,10 +1469,13 @@ export default function App() {
         editMode: targetDraft.imageEditMode,
         editTarget: targetDraft.imageEditTarget,
         prompt: targetDraft.prompt,
+        maskInstructions: targetDraft.maskInstructions,
+        hasMask,
         references: targetDraft.references.flatMap((reference) => {
           const asset = targetAssetMap.get(reference.assetId);
           return asset ? [{ slot: reference.slot, name: asset.name, mediaType: asset.mimeType, role: reference.role }] : [];
         }),
+        visuals,
       });
       patchSession(targetSession.id, (current) => ({
         ...current,
@@ -1237,7 +1483,7 @@ export default function App() {
           ...current.threads,
           [targetThread.mode]: current.threads[targetThread.mode].map((item) => item.id === targetThread.id && item.revision === targetThread.revision ? {
             ...item,
-            draft: { ...item.draft, enhancedPrompt: text, enhancedPromptDirty: false },
+            draft: { ...item.draft, enhancedPrompt: text, enhancedPromptDirty: false, enhancedVisualCount: visuals.length },
             updatedAt: new Date().toISOString(),
           } : item),
         },
@@ -1355,7 +1601,7 @@ export default function App() {
     if (!targetModel) throw new Error("Choose a compatible model.");
     const attemptId = crypto.randomUUID();
     const createdAt = new Date().toISOString();
-    const shouldEnhancePrompt = targetDraft.enhancePrompt && Boolean(targetDraft.prompt.trim());
+    const shouldEnhancePrompt = targetDraft.enhancePrompt && hasRunnableInstructions(targetThread.mode, targetDraft);
     const attempt: GenerationAttempt = {
       id: attemptId,
       requestKey,
@@ -1366,7 +1612,12 @@ export default function App() {
       createdAt,
       updatedAt: createdAt,
       modelId: targetModelId,
-      estimatedCostUsd: estimateGenerationCost(targetThread.mode, targetModel, targetDraft.options),
+      estimatedCostUsd: estimateGenerationCost(targetThread.mode, targetModel, targetDraft.options, {
+        videoWorkflow: targetThread.videoWorkflow,
+        imageInputCount: targetDraft.references.filter((reference) =>
+          targetSession.assets.find((asset) => asset.id === reference.assetId)?.kind === "image"
+        ).length,
+      }),
       snapshot: {
         mode: targetThread.mode,
         videoWorkflow: targetThread.videoWorkflow,
@@ -1394,13 +1645,16 @@ export default function App() {
       },
     }));
     setExecutingThreadIds((current) => new Set(current).add(targetThread.id));
-    setGenerationError(null);
     try {
       let prompt = targetDraft.prompt.trim();
       if (shouldEnhancePrompt) {
         if (targetDraft.enhancedPromptDirty && targetDraft.enhancedPrompt.trim()) {
           prompt = targetDraft.enhancedPrompt.trim();
-          const enhancedError = validateEnhancedPrompt(targetDraft.prompt, prompt, targetDraft.imageEditMode ? targetDraft.imageEditTarget : undefined);
+          const enhancedError = validateEnhancedPrompt(
+            enhancementOriginalIntent(targetThread.mode, targetDraft),
+            prompt,
+            targetDraft.imageEditMode ? targetDraft.imageEditTarget : undefined,
+          );
           if (enhancedError) throw new Error(enhancedError);
         } else {
           try {
@@ -1551,19 +1805,24 @@ export default function App() {
 
   const activateThread = (id: string) => {
     patchActive((current) => ({ ...current, activeThreadIds: { ...current.activeThreadIds, [current.mode]: id } }));
-    setGenerationError(null);
   };
 
-  const createThread = () => {
+  const createThread = useCallback(() => {
     patchActive((current) => {
-      const next = createGenerationThread(current.mode, current.threads[current.mode].length + 1, current.mode === "video" ? workflow : "generate");
+      if (current.agent.controlMode === "agent") return current;
+      const active = current.threads[current.mode].find((item) => item.id === current.activeThreadIds[current.mode]);
+      const next = createGenerationThread(
+        current.mode,
+        current.threads[current.mode].length + 1,
+        current.mode === "video" ? active?.videoWorkflow ?? "generate" : "generate",
+      );
       return {
         ...current,
         threads: { ...current.threads, [current.mode]: [...current.threads[current.mode], next] },
         activeThreadIds: { ...current.activeThreadIds, [current.mode]: next.id },
       };
     });
-  };
+  }, [patchActive]);
 
   const duplicateThread = (id: string) => {
     patchActive((current) => {
@@ -1607,28 +1866,56 @@ export default function App() {
     }));
   };
 
-  const archiveThread = (id: string) => {
+  const archiveThread = useCallback((id: string) => {
     patchActive((current) => {
+      if (current.agent.controlMode === "agent") return current;
       const visible = current.threads[current.mode].filter((item) => !item.archivedAt);
-      if (visible.length <= 1) return current;
+      const target = visible.find((item) => item.id === id);
+      if (!target || activeGenerationAttempt(target)) return current;
       const remaining = visible.filter((item) => item.id !== id);
+      const replacement = remaining.length ? null : createGenerationThread(
+        current.mode,
+        current.threads[current.mode].length + 1,
+        current.mode === "video" ? target.videoWorkflow : "generate",
+      );
+      const nextVisible = replacement ? [replacement] : remaining;
+      const targetIndex = visible.findIndex((item) => item.id === id);
+      const nextActive = nextVisible[Math.min(targetIndex, nextVisible.length - 1)];
       return {
         ...current,
         threads: {
           ...current.threads,
-          [current.mode]: current.threads[current.mode].map((item) => item.id === id ? { ...item, archivedAt: new Date().toISOString() } : item),
+          [current.mode]: [
+            ...current.threads[current.mode].map((item) => item.id === id ? { ...item, archivedAt: new Date().toISOString() } : item),
+            ...(replacement ? [replacement] : []),
+          ],
         },
         activeThreadIds: current.activeThreadIds[current.mode] === id
-          ? { ...current.activeThreadIds, [current.mode]: remaining[0].id }
+          ? { ...current.activeThreadIds, [current.mode]: nextActive.id }
           : current.activeThreadIds,
       };
     });
-    setSelectedThreadIds((current) => {
-      const next = new Set(current);
-      next.delete(id);
-      return next;
-    });
-  };
+  }, [patchActive]);
+
+  const requestAppQuit = useCallback(() => void (async () => {
+    if (quitConfirmationPending.current || confirmationRef.current) return;
+    quitConfirmationPending.current = true;
+    try {
+      const confirmed = await confirmAction(
+        t("quitAppTitle"),
+        t("quitAppHint"),
+        t("quitApp"),
+      );
+      if (confirmed && isTauriRuntime()) {
+        saveStudioState(studioRef.current);
+        await invoke("quit_app");
+      }
+    } catch (error) {
+      toast.error(errorMessage(error));
+    } finally {
+      quitConfirmationPending.current = false;
+    }
+  })(), [confirmAction, t]);
 
   const restoreThread = (id: string) => {
     patchActive((current) => {
@@ -1643,23 +1930,6 @@ export default function App() {
         activeThreadIds: { ...current.activeThreadIds, [current.mode]: id },
       };
     });
-  };
-
-  const runSelectedThreads = async () => {
-    const targets = modeThreads.filter((item) => selectedThreadIds.has(item.id));
-    if (targets.length < 2) return;
-    const invalid = targets.flatMap((item) => {
-      const message = validateThreadForRun(session, item);
-      return message ? [`${item.name}: ${message}`] : [];
-    });
-    if (invalid.length) {
-      setBatchSummary({ total: targets.length, queued: 0, running: 0, completed: 0, failed: invalid.length, uncertain: 0, canceled: 0 });
-      toast.error(invalid[0]);
-      return;
-    }
-    const requestKey = `human-batch-${crypto.randomUUID()}`;
-    setBatchSummary(null);
-    await Promise.allSettled(targets.map((item) => runGenerationThread(item.id, requestKey)));
   };
 
   const cancelQueuedAttempts = (current: StudioSession) => ({
@@ -1781,31 +2051,50 @@ export default function App() {
     || (session.agent.modelSelections[mode].status === "selected" && session.agent.modelSelections[mode].modelId === selectedId);
   const hasMask = mode === "image" && draft.imageEditMode && draft.maskStrokes.length > 0;
   const canGenerate = Boolean(selectedModel && hasRunnableInstructions(mode, draft) && !providerError && !generationValidationError && credential?.configured && !generating && !enhancing && !activeAttempt && agentModelConfirmed && session.agent.controlMode === "human");
-  const showResult = Boolean(lastAssets.length || visibleJob || generating || generationError);
-  const resultSignal = [
-    generating ? "generating" : "",
-    generationError ?? "",
-    ...(latestAttempt?.assetIds ?? []),
-    visibleJob ? `${visibleJob.jobId}:${visibleJob.status}:${visibleJob.progress ?? ""}` : "",
-  ].join("|");
-  const previousResultSignal = useRef("");
-  useEffect(() => {
-    if (!showResult || !resultSignal || resultSignal === previousResultSignal.current) return;
-    previousResultSignal.current = resultSignal;
-    const frame = window.requestAnimationFrame(() => {
-      const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-      composerViewportRef.current?.scrollTo({ top: 0, left: 0, behavior: reduceMotion ? "auto" : "smooth" });
-    });
-    return () => window.cancelAnimationFrame(frame);
-  }, [resultSignal, showResult]);
+  const currentResult = resultQueue[0] ?? null;
+  const currentResultSession = currentResult
+    ? studio.sessions.find((item) => item.id === currentResult.sessionId) ?? null
+    : null;
+  const dismissGenerationResult = (action?: () => void) => {
+    if (!currentResult || resultHandingOff) return;
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const exitDelay = reduceMotion ? 0 : 280;
+    if (action) setResultQueuePaused(true);
+    setResultHandingOff(true);
+    setResultDialogOpen(false);
+    if (resultHandoffTimer.current) window.clearTimeout(resultHandoffTimer.current);
+    if (resultCooldownTimer.current) window.clearTimeout(resultCooldownTimer.current);
+    resultHandoffTimer.current = window.setTimeout(() => {
+      if (action) {
+        action();
+      } else {
+        setRightPanelTab("assets");
+        setHighlightedAssetIds(new Set(currentResult.assetIds));
+        if (assetHighlightTimer.current) window.clearTimeout(assetHighlightTimer.current);
+        assetHighlightTimer.current = window.setTimeout(() => setHighlightedAssetIds(new Set()), reduceMotion ? 20 : 1_400);
+      }
+      setResultQueue((current) => current.slice(1));
+    }, exitDelay);
+    resultCooldownTimer.current = window.setTimeout(() => setResultHandingOff(false), exitDelay + (reduceMotion ? 20 : 420));
+  };
   const selectSession = (id: string) => {
     setStudio((current) => ({ ...current, activeSessionId: id }));
     setSelectedAssetIds(new Set());
+    setFocusedAssetId(null);
+    setPreviewAssetId(null);
     setDecisionOpen(false);
   };
   const createNewSession = () => {
-    const created = createSession(t("newSessionName", { count: studio.sessions.length + 1 }));
-    setStudio((current) => ({ ...current, activeSessionId: created.id, sessions: [...current.sessions, created] }));
+    setStudio((current) => {
+      const created = initializeSessionCatalogDefaults(
+        createSession(nextAvailableSessionName(
+          current.sessions,
+          (count) => t("newSessionName", { count }),
+        )),
+        catalogs,
+      );
+      return { ...current, activeSessionId: created.id, sessions: [...current.sessions, created] };
+    });
   };
   const deleteStudioSession = (id: string) => void (async () => {
     const deleting = studio.sessions.find((item) => item.id === id);
@@ -1843,6 +2132,227 @@ export default function App() {
       return { ...current, agent: seeded, agentBridge: true };
     });
   };
+
+  createNewSessionRef.current = createNewSession;
+  duplicateThreadRef.current = duplicateThread;
+  restoreThreadRef.current = restoreThread;
+  switchModeRef.current = switchMode;
+  pickFilesRef.current = pickFiles;
+  runGenerationRef.current = runGeneration;
+  dismissGenerationResultRef.current = () => dismissGenerationResult();
+
+  const modalOpen = otherDialogOpen || resultDialogOpen || Boolean(confirmation)
+    || settingsOpen || shortcutHelpOpen || assemblyOpen || decisionOpen;
+  const previewAsset = session.assets.find((asset) => asset.id === previewAssetId);
+  const focusedAsset = previewAsset ?? session.assets.find((asset) => asset.id === focusedAssetId)
+    ?? (selectedAssetIds.size === 1 ? session.assets.find((asset) => selectedAssetIds.has(asset.id)) : undefined);
+
+  const focusPrompt = useCallback(() => {
+    window.requestAnimationFrame(() => {
+      promptRef.current?.scrollIntoView({ block: "center", behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+      promptRef.current?.focus();
+    });
+  }, []);
+
+  const closeTopmostDialog = useCallback(() => {
+    if (confirmation) {
+      confirmation.resolve(false);
+      closeConfirmation();
+      return true;
+    }
+    if (shortcutHelpOpen) { setShortcutHelpOpen(false); return true; }
+    if (resultDialogOpen) { dismissGenerationResultRef.current(); return true; }
+    if (decisionOpen) { setDecisionOpen(false); return true; }
+    if (assemblyOpen) { setAssemblyOpen(false); return true; }
+    if (settingsOpen) { setSettingsOpen(false); return true; }
+    const dialogs = [...document.querySelectorAll<HTMLElement>('[role="dialog"], [role="alertdialog"]')];
+    const dialog = dialogs.at(-1);
+    if (!dialog) return false;
+    const close = dialog.querySelector<HTMLElement>('[data-base-ui-dialog-close], [data-base-ui-alert-dialog-close], button[aria-label*="Close"], button[aria-label*="닫기"]');
+    if (close) close.click();
+    else dialog.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    return true;
+  }, [assemblyOpen, closeConfirmation, confirmation, decisionOpen, resultDialogOpen, settingsOpen, shortcutHelpOpen]);
+
+  const cycleThread = useCallback((direction: -1 | 1) => {
+    patchActive((current) => {
+      const visible = current.threads[current.mode].filter((candidate) => !candidate.archivedAt);
+      if (visible.length < 2) return current;
+      const index = visible.findIndex((candidate) => candidate.id === current.activeThreadIds[current.mode]);
+      const next = visible[(Math.max(0, index) + direction + visible.length) % visible.length];
+      return { ...current, activeThreadIds: { ...current.activeThreadIds, [current.mode]: next.id } };
+    });
+  }, [patchActive]);
+
+  const dispatchAppCommand = useCallback((id: AppCommandId): boolean => {
+    if (id === "quit") {
+      requestAppQuit();
+      return true;
+    }
+    if (id === "archiveThread" && modalOpen) return closeTopmostDialog();
+    if (confirmation) return false;
+    if (id === "generate" && (decisionOpen || assemblyOpen)) {
+      const target = document.querySelector<HTMLElement>(decisionOpen ? ".decision-workspace" : ".assembly-dialog");
+      target?.dispatchEvent(new KeyboardEvent("keydown", {
+        key: "Enter",
+        metaKey: navigator.platform.toLowerCase().includes("mac"),
+        ctrlKey: !navigator.platform.toLowerCase().includes("mac"),
+        bubbles: true,
+        cancelable: true,
+      }));
+      return Boolean(target);
+    }
+    if (modalOpen && id !== "settings" && id !== "shortcutHelp" && !(id === "exportAsset" && previewAsset)) return false;
+    switch (id) {
+      case "newSession":
+        createNewSessionRef.current();
+        focusPrompt();
+        return true;
+      case "newThread":
+        if (session.agent.controlMode === "agent") return false;
+        createThread();
+        focusPrompt();
+        return true;
+      case "duplicateThread":
+        if (session.agent.controlMode === "agent") return false;
+        duplicateThreadRef.current(thread.id);
+        focusPrompt();
+        return true;
+      case "archiveThread":
+        if (session.agent.controlMode === "agent" || hasActiveAttempt) return false;
+        archiveThread(thread.id);
+        return true;
+      case "restoreThread": {
+        const latest = session.threads[mode]
+          .filter((candidate) => candidate.archivedAt)
+          .toSorted((left, right) => (right.archivedAt ?? "").localeCompare(left.archivedAt ?? ""))[0];
+        if (!latest || session.agent.controlMode === "agent") return false;
+        restoreThreadRef.current(latest.id);
+        return true;
+      }
+      case "nextThread": cycleThread(1); return true;
+      case "previousThread": cycleThread(-1); return true;
+      case "findSessions":
+        setSessionSidebarOpen(true);
+        window.requestAnimationFrame(() => sessionSearchRef.current?.focus());
+        return true;
+      case "importAssets": void pickFilesRef.current(); return true;
+      case "exportAsset": {
+        const hasAssetPanelContext = rightPanelOpen && rightPanelTab === "assets";
+        if (!focusedAsset || (!previewAsset && !hasAssetPanelContext)) return false;
+        void exportAssetToDownloads(focusedAsset)
+          .then((path) => toast.success(t("downloadComplete", { name: focusedAsset.name, path })))
+          .catch((error) => toast.error(errorMessage(error)));
+        return true;
+      }
+      case "imageMode": switchModeRef.current("image"); return true;
+      case "videoMode": switchModeRef.current("video"); return true;
+      case "toggleSessionSidebar": setSessionSidebarOpen((open) => !open); return true;
+      case "toggleInspector": setRightPanelOpen((open) => !open); return true;
+      case "showAgent": setRightPanelOpen(true); setRightPanelTab("agent"); return true;
+      case "showAssets": setRightPanelOpen(true); setRightPanelTab("assets"); return true;
+      case "focusPrompt": focusPrompt(); return true;
+      case "generate":
+        if (!canGenerate) return false;
+        runGenerationRef.current();
+        return true;
+      case "settings":
+        if (modalOpen && !settingsOpen) return false;
+        setSettingsOpen(true);
+        return true;
+      case "shortcutHelp":
+        if (modalOpen && !shortcutHelpOpen) return false;
+        setShortcutHelpOpen(true);
+        return true;
+      default: return false;
+    }
+  }, [archiveThread, assemblyOpen, canGenerate, closeTopmostDialog, confirmation, createThread, cycleThread, decisionOpen, focusPrompt, focusedAsset, hasActiveAttempt, modalOpen, mode, previewAsset, requestAppQuit, rightPanelOpen, rightPanelTab, session.agent.controlMode, session.threads, settingsOpen, shortcutHelpOpen, t, thread.id]);
+  dispatchCommandRef.current = dispatchAppCommand;
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void import("@tauri-apps/api/event").then(async ({ listen }) => {
+      const stop = await listen("app-quit-requested", () => dispatchCommandRef.current("quit"));
+      if (disposed) stop();
+      else unlisten = stop;
+    }).catch((error) => toast.error(errorMessage(error)));
+    return () => { disposed = true; unlisten?.(); };
+  }, []);
+
+  useEffect(() => {
+    const handleShortcut = (event: KeyboardEvent) => {
+      if (event.isComposing || event.repeat) return;
+      const command = commandForKeyboardEvent(event);
+      if (!command) return;
+      if (command.id === "generate" && (decisionOpen || assemblyOpen)) return;
+      if (nativeMenuRef.current && NATIVE_MENU_COMMAND_IDS.has(command.id)) return;
+      if (!dispatchCommandRef.current(command.id)) return;
+      event.preventDefault();
+      event.stopPropagation();
+    };
+    window.addEventListener("keydown", handleShortcut, true);
+    return () => window.removeEventListener("keydown", handleShortcut, true);
+  }, [assemblyOpen, decisionOpen]);
+
+  const hasArchivedThread = session.threads[mode].some((candidate) => candidate.archivedAt);
+  const nativeMenuState = useMemo<NativeMenuState>(() => ({
+    enabled: {
+      newSession: !modalOpen,
+      newThread: !modalOpen && session.agent.controlMode === "human",
+      duplicateThread: !modalOpen && session.agent.controlMode === "human",
+      archiveThread: modalOpen || (session.agent.controlMode === "human" && !hasActiveAttempt),
+      restoreThread: !modalOpen && session.agent.controlMode === "human" && hasArchivedThread,
+      nextThread: !modalOpen && modeThreads.length > 1,
+      previousThread: !modalOpen && modeThreads.length > 1,
+      findSessions: !modalOpen,
+      importAssets: !modalOpen,
+      exportAsset: !confirmation && (Boolean(previewAsset) || (!modalOpen && rightPanelOpen && rightPanelTab === "assets" && Boolean(focusedAsset))),
+      imageMode: !modalOpen,
+      videoMode: !modalOpen,
+      toggleSessionSidebar: !modalOpen,
+      toggleInspector: !modalOpen,
+      showAgent: !modalOpen,
+      showAssets: !modalOpen,
+      generate: !confirmation && ((!modalOpen && canGenerate) || decisionOpen || assemblyOpen),
+      settings: !modalOpen || settingsOpen,
+      shortcutHelp: !modalOpen || shortcutHelpOpen,
+      quit: true,
+    },
+    checked: {
+      toggleSessionSidebar: sessionSidebarOpen,
+      toggleInspector: rightPanelOpen,
+      imageMode: mode === "image",
+      videoMode: mode === "video",
+      showAgent: rightPanelOpen && rightPanelTab === "agent",
+      showAssets: rightPanelOpen && rightPanelTab === "assets",
+    },
+  }), [assemblyOpen, canGenerate, confirmation, decisionOpen, focusedAsset, hasActiveAttempt, hasArchivedThread, modalOpen, mode, modeThreads.length, previewAsset, rightPanelOpen, rightPanelTab, session.agent.controlMode, sessionSidebarOpen, settingsOpen, shortcutHelpOpen]);
+  nativeMenuStateRef.current = nativeMenuState;
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let disposed = false;
+    const timer = window.setTimeout(() => {
+      const build = nativeMenuBuildQueueRef.current.catch(() => undefined).then(async () => {
+        if (disposed) return;
+        const menu = await createNativeAppMenu(t, (id) => { dispatchCommandRef.current(id); });
+        nativeMenuRef.current = menu;
+        await menu.update(nativeMenuStateRef.current);
+      });
+      nativeMenuBuildQueueRef.current = build;
+      void build.catch((error) => toast.error(errorMessage(error)));
+    }, 0);
+    return () => {
+      disposed = true;
+      window.clearTimeout(timer);
+    };
+  }, [language, t]);
+
+  useEffect(() => {
+    void nativeMenuRef.current?.update(nativeMenuState).catch((error) => console.warn("Could not update app menu", error));
+  }, [nativeMenuState]);
 
   const resolveUiDecision = async (
     selectedOptionIds: string[],
@@ -1993,24 +2503,25 @@ export default function App() {
     <div className="app-shell">
       <header className="topbar" data-tauri-drag-region>
         <div className="brand" data-tauri-drag-region><span className="brand-mark"><FruitTruckMark /></span><strong>Fruit Truck</strong><button type="button" className={`brand-badge ${session.agent.controlMode}`} onClick={() => {
+          setRightPanelOpen(true);
           setRightPanelTab("agent");
         }}>{session.agent.controlMode === "agent" ? t("agent") : t("humanDriven")}</button></div>
-        <ModelSelector mode={mode} models={models} selectedId={selectedId} loading={catalogLoading} disabled={session.agent.controlMode === "agent"} onSelect={selectModel} inherited={!thread.modelOverrideId} onUseDefault={useModeDefaults} onSetDefault={setCurrentAsModeDefault} />
+        <ModelSelector mode={mode} models={models} selectedId={selectedId} loading={catalogLoading} catalogCount={mode === "video" && workflow === "edit" ? allModels.length : undefined} disabled={session.agent.controlMode === "agent"} onSelect={selectModel} inherited={!thread.modelOverrideId} onUseDefault={useModeDefaults} onSetDefault={setCurrentAsModeDefault} />
         <ToggleGroup className="mode-switcher" aria-label={t("generationMode")} value={[mode]} onValueChange={(value) => {
           const next = value[0];
           if (next === "image" || next === "video") switchMode(next);
         }}>
-          <Toggle value="image" aria-label={t("image")}><ImageIcon /> {t("image")}</Toggle>
-          <Toggle value="video" aria-label={t("video")}><Video /> {t("video")}</Toggle>
+          <Toggle value="image" aria-label={t("image")} aria-keyshortcuts="Meta+1"><ImageIcon /> {t("image")}</Toggle>
+          <Toggle value="video" aria-label={t("video")} aria-keyshortcuts="Meta+2"><Video /> {t("video")}</Toggle>
         </ToggleGroup>
         <div className="topbar-actions">
           <div className="connection-pill" role="status"><i className={credential?.configured ? "online" : ""} />{credential?.configured ? credential.maskedKey : t("addApiKey")}</div>
-          <Button type="button" variant="ghost" size="icon" aria-label={t("settings")} onClick={() => setSettingsOpen(true)}><Settings /></Button>
+          <Button type="button" variant="ghost" size="icon" aria-label={t("settings")} aria-keyshortcuts="Meta+," onClick={() => setSettingsOpen(true)}><Settings /></Button>
         </div>
       </header>
 
       <main
-        className={`workspace ${sessionSidebarOpen ? "session-sidebar-open" : "session-sidebar-closed"}`}
+        className={`workspace ${sessionSidebarOpen ? "session-sidebar-open" : "session-sidebar-closed"} ${rightPanelOpen ? "right-panel-open" : "right-panel-closed"}`}
         style={{ "--sessions-width": `${sessionSidebarWidth}px` } as CSSProperties}
       >
         {!sessionSidebarOpen ? (
@@ -2020,6 +2531,7 @@ export default function App() {
             size="icon"
             className="session-sidebar-reopen"
             aria-label={t("openSessionSidebar")}
+            aria-keyshortcuts="Control+Meta+S"
             onClick={() => setSessionSidebarOpen(true)}
           ><PanelLeftOpen /></Button>
         ) : null}
@@ -2034,22 +2546,31 @@ export default function App() {
             onCreate={createNewSession}
             onRename={(id, name) => patchSession(id, (current) => ({ ...current, name }))}
             onDelete={deleteStudioSession}
+            searchInputRef={sessionSearchRef}
           />
+        ) : null}
+        {!rightPanelOpen ? (
+          <Button
+            type="button"
+            variant="outline"
+            size="icon"
+            className="right-panel-reopen"
+            aria-label={t("commandToggleInspector")}
+            aria-keyshortcuts="Meta+Alt+I"
+            onClick={() => setRightPanelOpen(true)}
+          ><PanelRightOpen /></Button>
         ) : null}
         <section className="composer">
           <GenerationThreadRail
             threads={session.threads[mode]}
             activeId={thread.id}
-            selectedIds={selectedThreadIds}
             disabled={session.agent.controlMode === "agent"}
             onActivate={activateThread}
-            onSelectionChange={setSelectedThreadIds}
             onCreate={createThread}
             onDuplicate={duplicateThread}
             onRename={renameThread}
             onArchive={archiveThread}
             onRestore={restoreThread}
-            onRunSelected={() => void runSelectedThreads()}
           />
           <ScrollArea className="composer-scroll" viewportRef={composerViewportRef}>
           {catalogError ? <div className="catalog-error"><CircleAlert /><span><strong>{t("catalogLoadFailed")}</strong><small>{catalogError}</small></span><Button variant="outline" size="sm" onClick={() => void refreshCatalog()}><RefreshCw /> {t("retry")}</Button></div> : null}
@@ -2058,41 +2579,14 @@ export default function App() {
               <p>{mode === "image" ? draft.imageEditMode ? t("imageEdit") : t("imageGeneration") : workflow === "edit" ? t("videoEdit") : t("videoGeneration")}</p>
               <h1>{selectedModel?.name ?? (catalogLoading ? t("loadingModels") : t("chooseModel"))}</h1>
             </div>
-            {selectedModel ? <div className="model-meta"><span>{providerLabel(selectedModel)}</span>{mode === "image" && imageEndpoints[selectedId] ? <span>{t("endpointsVerified", { count: imageEndpoints[selectedId].length })}</span> : null}</div> : null}
-          </header>
-          {showResult ? <section className={`result-canvas ${lastAssets.length || visibleJob || generating ? "active" : ""}`}>
-            <header className="result-canvas-header">
-              <div><span className="panel-eyebrow">{t("latestOutput")}</span><strong>{lastAssets.length ? t("savedResults", { count: lastAssets.length }) : t("generationCanvas")}</strong></div>
-            </header>
-            <div className="result-view">
-              {generationError ? <div className="generation-error"><CircleAlert /><div><strong>{t("generationFailed")}</strong><p>{generationError}</p></div></div> : null}
-              {generating && !lastAssets.length ? <div className="result-loading"><span><LoaderCircle className="spin" /></span><strong>{t("submittingRequest")}</strong><small>{t("processingPrompt")}</small></div> : null}
-              {lastAssets.length ? <div className={`result-assets count-${lastAssets.length}`}>{lastAssets.map((asset) => <div className="result-asset" key={asset.id}><AssetPreview asset={asset} controls /><div>{asset.kind === "image" ? <><Button size="sm" variant="outline" onClick={() => editImageAsset(asset.id)}><Pencil /> {t("editThisImage")}</Button><Button size="sm" variant="outline" onClick={() => routeImageToVideo(asset.id)}><Film /> {t("useInVideo")}</Button></> : null}<Button size="sm" variant="outline" onClick={() => addAssetAsReference(asset.id)}>{t("useAsInput")}</Button></div></div>)}<div className="result-details"><span><Check /> {t("completedSaved")}</span></div></div> : null}
-              {visibleJob ? (
-                <Progress.Root className="video-progress" value={visibleJob.progress ?? null}>
-                  <span className="progress-orbit"><Video /></span>
-                  <Progress.Label className="progress-heading">{visibleJob.status === "failed" ? t("videoJobFailed") : t("generatingVideo")}</Progress.Label>
-                  <p>{visibleJob.error ?? t("jobResumeHint")}</p>
-                  <Progress.Track className="progress-track"><Progress.Indicator /></Progress.Track>
-                  <div className="job-timeline"><span className="done"><Check /> {t("submitted")}</span><i /><span className={visibleJob.status === "failed" ? "failed" : "active"}><Clock3 /> {t(JOB_STATUS_KEYS[visibleJob.status] ?? "statusPending")}</span></div>
-                  <code className="job-id">{visibleJob.jobId}</code>
-                </Progress.Root>
-              ) : null}
-              <Collapsible.Root className="attempt-history">
-                <Collapsible.Trigger>{t("attemptHistory")} <ChevronRight /></Collapsible.Trigger>
-                <Collapsible.Panel>
-                  {thread.attempts.length ? thread.attempts.toReversed().map((attempt) => (
-                    <div key={attempt.id}>
-                      <span>{new Date(attempt.createdAt).toLocaleString(language === "ko" ? "ko-KR" : "en-US")}</span>
-                      <strong>{t(JOB_STATUS_KEYS[attempt.status] ?? (attempt.status === "canceled" ? "statusCanceled" : "statusInProgress"))}</strong>
-                      <small>{attempt.modelId ?? attempt.snapshot?.modelId}{attempt.actualCostUsd != null || attempt.estimatedCostUsd != null ? ` · $${(attempt.actualCostUsd ?? attempt.estimatedCostUsd ?? 0).toFixed(2)}` : ""}</small>
-                      {attempt.error ? <p>{attempt.error}</p> : null}
-                    </div>
-                  )) : <p>{t("noAttempts")}</p>}
-                </Collapsible.Panel>
-              </Collapsible.Root>
+            <div className="composer-header-meta">
+              {selectedModel ? <div className="model-meta"><span>{providerLabel(selectedModel)}</span>{mode === "image" && imageEndpoints[selectedId] ? <span>{t("endpointsVerified", { count: imageEndpoints[selectedId].length })}</span> : null}</div> : null}
+              <div className="composer-header-utilities">
+                {resultQueuePaused && resultQueue.length ? <Button type="button" className="pending-results-trigger" variant="outline" size="xs" onClick={() => setResultQueuePaused(false)}><ImageIcon /> {t("pendingResults", { count: resultQueue.length })}</Button> : null}
+                <AttemptHistoryPopover attempts={thread.attempts} />
+              </div>
             </div>
-          </section> : null}
+          </header>
           {mode === "video" ? (
             <div className="workflow-row">
               <ToggleGroup className="workflow-switch" aria-label={t("videoWorkflow")} value={[workflow]} onValueChange={(value) => {
@@ -2139,17 +2633,17 @@ export default function App() {
               <Field.Label className="section-label-row"><span className="section-label">{t("prompt")}{hasMask ? <> <em>{t("optional")}</em></> : null}</span><small>{t("characters", { count: draft.prompt.length.toLocaleString(language === "ko" ? "ko-KR" : "en-US") })}</small></Field.Label>
               <div className="prompt-input-wrap">
                 <Textarea
+                  ref={promptRef}
                   autoFocus
+                  aria-keyshortcuts="Meta+Enter Shift+Escape"
                   rows={7}
                   value={draft.prompt}
                   placeholder={mode === "image" ? t("imagePromptPlaceholder") : t("videoPromptPlaceholder")}
                   onChange={(event) => patchDraft({
                     prompt: event.target.value,
-                    enhancePrompt: event.target.value.trim() ? draft.enhancePrompt : false,
                     enhancedPrompt: "",
                     enhancedPromptDirty: false,
                   })}
-                  onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") void runGeneration(); }}
                 />
                 {mentionSuggestions.length ? (
                   <div className="mention-menu" role="listbox" aria-label={t("numberedInputs")}>
@@ -2177,8 +2671,8 @@ export default function App() {
             </Field.Root>
 
             <Field.Root className="enhance-row">
-              <Field.Label className="enhance-label" nativeLabel={false} render={<div />}><span><Sparkles /><span><strong>{t("promptEnhancement")}</strong><small>{studio.promptModel.endsWith("luna") ? "GPT-5.6 Luna · xhigh" : "GPT-5.6 Terra · high"}</small></span></span></Field.Label>
-              <div><Button size="xs" variant="ghost" disabled={enhancing || !draft.prompt.trim()} onClick={() => void runEnhancement().catch((error) => setGenerationError(errorMessage(error)))}>{enhancing ? <LoaderCircle className="spin" /> : <RefreshCw />} {draft.enhancedPrompt ? t("reEnhance") : t("preview")}</Button><Switch checked={draft.enhancePrompt && Boolean(draft.prompt.trim())} disabled={!draft.prompt.trim()} onCheckedChange={(value) => patchDraft({ enhancePrompt: value })} /></div>
+              <Field.Label className="enhance-label" nativeLabel={false} render={<div />}><span><Sparkles /><span><strong>{t("promptEnhancement")}</strong><small>{studio.promptModel.endsWith("luna") ? "GPT-5.6 Luna · xhigh" : "GPT-5.6 Terra · high"}{draft.enhancedPrompt && draft.enhancedVisualCount > 0 ? ` · ${t("visualContextIncluded")}` : ""}</small></span></span></Field.Label>
+              <div><Button size="xs" variant="ghost" disabled={enhancing || !hasRunnableInstructions(mode, draft)} onClick={() => void runEnhancement().catch((error) => toast.error(errorMessage(error)))}>{enhancing ? <LoaderCircle className="spin" /> : <RefreshCw />} {draft.enhancedPrompt ? t("reEnhance") : t("preview")}</Button><Switch checked={draft.enhancePrompt && hasRunnableInstructions(mode, draft)} disabled={!hasRunnableInstructions(mode, draft)} onCheckedChange={(value) => patchDraft({ enhancePrompt: value })} /></div>
             </Field.Root>
             {draft.enhancedPrompt ? (
               <Collapsible.Root className="enhanced-prompt">
@@ -2212,7 +2706,7 @@ export default function App() {
               <div><span>{selectedModel ? t("requestFields", { count: Object.keys(requestPayload).length }) : t("noModelSelected")}</span><small>{mode === "video" ? t("backgroundJobs", { count: sessionVideoJobs.length }) : t("commandGenerate")}</small></div>
               <RequestPreviewDialog mode={mode} request={prettyRequest(requestPayload)} references={previewReferences} />
             </div>
-            <Button size="lg" className="generate-button" disabled={!canGenerate} onClick={() => void runGeneration()}>
+            <Button size="lg" className="generate-button" aria-keyshortcuts="Meta+Enter" disabled={!canGenerate} onClick={() => void runGeneration()}>
               {generating || enhancing ? <LoaderCircle className="spin" /> : mode === "image" ? <Sparkles /> : <Play />}
               {generating || enhancing
                 ? t("preparing")
@@ -2225,7 +2719,7 @@ export default function App() {
           </ScrollArea>
         </section>
 
-        <RightPanel
+        {rightPanelOpen ? <RightPanel
           tab={rightPanelTab}
           onTabChange={setRightPanelTab}
           agent={(
@@ -2233,7 +2727,7 @@ export default function App() {
               state={session.agent}
               threads={session.threads}
               currentMode={mode}
-              batchSummary={batchSummary ?? persistedBatchSummary}
+              batchSummary={persistedBatchSummary}
               onOpenThread={(targetMode, threadId) => {
                 patchActive((current) => ({ ...current, mode: targetMode, activeThreadIds: { ...current.activeThreadIds, [targetMode]: threadId } }));
               }}
@@ -2254,10 +2748,23 @@ export default function App() {
             />
           )}
           assets={(
-            <AssetLibrary assets={session.assets} jobs={sessionVideoJobs} artifacts={session.agent.artifacts} approvedVideoCount={approvedVideoCount} onOpenAssembly={() => setAssemblyOpen(true)} selectedIds={selectedAssetIds} onSelectedIdsChange={setSelectedAssetIds} onImport={async (files) => { await importFiles(files); }} onPick={async () => { await pickFiles(); }} onUse={addAssetAsReference} onDelete={(ids) => void deleteAssets(ids)} />
+            <AssetLibrary assets={session.assets} jobs={sessionVideoJobs} artifacts={session.agent.artifacts} approvedVideoCount={approvedVideoCount} onOpenAssembly={() => setAssemblyOpen(true)} selectedIds={selectedAssetIds} onSelectedIdsChange={setSelectedAssetIds} highlightedIds={highlightedAssetIds} onFocusedAssetChange={setFocusedAssetId} onPreviewAssetChange={setPreviewAssetId} onImport={async (files) => { await importFiles(files); }} onPick={async () => { await pickFiles(); }} onUse={addAssetAsReference} onDelete={(ids) => void deleteAssets(ids)} />
           )}
-        />
+        /> : null}
       </main>
+
+      <GenerationResultDialog
+        notice={currentResult}
+        assets={currentResultSession?.assets ?? []}
+        open={resultDialogOpen && Boolean(currentResultSession)}
+        handingOff={resultHandingOff}
+        onDismiss={() => dismissGenerationResult()}
+        onEditImage={(assetId) => currentResult && dismissGenerationResult(() => editImageAsset(assetId, currentResult))}
+        onUseInVideo={(assetId) => currentResult && dismissGenerationResult(() => routeImageToVideo(assetId, currentResult))}
+        onUseAsInput={(assetId) => currentResult && dismissGenerationResult(() => addAssetAsReference(assetId, currentResult))}
+      />
+
+      <ShortcutHelpDialog open={shortcutHelpOpen} onClose={() => setShortcutHelpOpen(false)} />
 
       <Suspense fallback={null}>
       <SettingsDialog
@@ -2289,7 +2796,7 @@ export default function App() {
         onResolve={resolveUiDecision}
       />
       </Suspense>
-      <ConfirmDialog confirmation={confirmation} onClose={() => setConfirmation(null)} />
+      <ConfirmDialog confirmation={confirmation} onClose={closeConfirmation} />
       <UpdatePrompt />
     </div>
     </Tooltip.Provider>

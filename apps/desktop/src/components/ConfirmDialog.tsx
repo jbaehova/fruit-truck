@@ -1,4 +1,5 @@
 import { AlertDialog } from "@base-ui/react/alert-dialog";
+import { useRef } from "react";
 import { AlertTriangle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useI18n } from "@/i18n";
@@ -18,8 +19,11 @@ export function ConfirmDialog({
   onClose: () => void;
 }) {
   const { t } = useI18n();
+  const resolved = useRef<Confirmation | null>(null);
   const finish = (confirmed: boolean) => {
-    confirmation?.resolve(confirmed);
+    if (!confirmation || resolved.current === confirmation) return;
+    resolved.current = confirmation;
+    confirmation.resolve(confirmed);
     onClose();
   };
 

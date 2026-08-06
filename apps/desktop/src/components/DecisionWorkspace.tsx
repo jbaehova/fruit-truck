@@ -112,7 +112,15 @@ export function DecisionWorkspace({
       <Dialog.Portal>
         <Dialog.Backdrop className="decision-workspace-backdrop" />
         <Dialog.Viewport className="decision-workspace-viewport">
-          <Dialog.Popup className="decision-workspace">
+          <Dialog.Popup
+            className="decision-workspace"
+            onKeyDown={(event) => {
+              if (!(event.metaKey || event.ctrlKey) || event.key !== "Enter" || busy || !canSubmit) return;
+              event.preventDefault();
+              event.stopPropagation();
+              void submit();
+            }}
+          >
             <header className="decision-workspace-header">
               <span className="decision-workspace-mark"><Sparkles /></span>
               <span>

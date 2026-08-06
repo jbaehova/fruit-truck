@@ -1,7 +1,7 @@
 import { Dialog } from "@base-ui/react/dialog";
 import { Field } from "@base-ui/react/field";
 import { Form } from "@base-ui/react/form";
-import { useEffect, useMemo, useState, type KeyboardEvent, type PointerEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent, type RefObject } from "react";
 import { Check, PanelLeftClose, Pencil, Plus, Search, Trash2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -26,6 +26,7 @@ export function SessionSidebar({
   onCreate,
   onRename,
   onDelete,
+  searchInputRef,
 }: {
   sessions: StudioSession[];
   activeId: string;
@@ -36,17 +37,22 @@ export function SessionSidebar({
   onCreate: () => void;
   onRename: (id: string, name: string) => void;
   onDelete: (id: string) => void;
+  searchInputRef?: RefObject<HTMLInputElement | null>;
 }) {
   const { locale, t } = useI18n();
   const [query, setQuery] = useState("");
   const [renameId, setRenameId] = useState<string | null>(null);
   const renaming = sessions.find((session) => session.id === renameId) ?? null;
   const [name, setName] = useState("");
+  const sessionButtonRefs = useRef(new Map<string, HTMLButtonElement>());
   const filtered = useMemo(() => {
     const value = query.trim().toLowerCase();
     if (!value) return sessions;
     return sessions.filter((session) => session.name.toLowerCase().includes(value));
   }, [query, sessions]);
+  const tabbableSessionId = filtered.some((session) => session.id === activeId)
+    ? activeId
+    : filtered[0]?.id;
 
   useEffect(() => {
     if (renaming) setName(renaming.name);
@@ -81,7 +87,7 @@ export function SessionSidebar({
             <span>{t("sessions")}</span>
             <small>{t("sessionCount", { count: sessions.length })}</small>
           </div>
-          <Button type="button" variant="ghost" size="icon-sm" aria-label={t("closeSessionSidebar")} onClick={onClose}>
+          <Button type="button" variant="ghost" size="icon-sm" aria-label={t("closeSessionSidebar")} aria-keyshortcuts="Control+Meta+S" onClick={onClose}>
             <PanelLeftClose />
           </Button>
         </header>
@@ -90,13 +96,19 @@ export function SessionSidebar({
             <Field.Label className="sr-only">{t("searchSessions")}</Field.Label>
             <Search aria-hidden="true" />
             <Input
+              ref={searchInputRef}
               aria-label={t("searchSessions")}
               placeholder={t("searchSessions")}
               value={query}
               onChange={(event) => setQuery(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key !== "Escape") return;
+                if (query) setQuery("");
+                else event.currentTarget.blur();
+              }}
             />
           </Field.Root>
-          <Button type="button" variant="default" size="icon" aria-label={t("newSession")} onClick={onCreate}><Plus /></Button>
+          <Button type="button" variant="default" size="icon" aria-label={t("newSession")} aria-keyshortcuts="Meta+N" onClick={onCreate}><Plus /></Button>
         </div>
         <ScrollArea className="session-list" aria-label={t("recentSessions")}>
           {!filtered.length ? <p className="session-empty">{t("noMatchingSessions")}</p> : null}
@@ -109,7 +121,29 @@ export function SessionSidebar({
               .filter((thread) => Boolean(activeGenerationAttempt(thread))).length;
             return (
               <div className={`session-row ${active ? "active" : ""}`} key={session.id}>
-                <button type="button" className="session-row-main" onClick={() => onSelect(session.id)}>
+                <button
+                  type="button"
+                  className="session-row-main"
+                  ref={(element) => {
+                    if (element) sessionButtonRefs.current.set(session.id, element);
+                    else sessionButtonRefs.current.delete(session.id);
+                  }}
+                  tabIndex={session.id === tabbableSessionId ? 0 : -1}
+                  aria-current={active ? "page" : undefined}
+                  onClick={() => onSelect(session.id)}
+                  onKeyDown={(event) => {
+                    if (!event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
+                      event.preventDefault();
+                      const index = filtered.findIndex((item) => item.id === session.id);
+                      const offset = event.key === "ArrowDown" ? 1 : -1;
+                      const next = filtered[(index + offset + filtered.length) % filtered.length];
+                      if (next) sessionButtonRefs.current.get(next.id)?.focus();
+                    } else if ((event.metaKey || event.ctrlKey) && event.key === "Backspace" && sessions.length > 1) {
+                      event.preventDefault();
+                      onDelete(session.id);
+                    }
+                  }}
+                >
                   <span className="session-state">{active ? <Check /> : null}</span>
                   <span>
                     <strong>{session.name}</strong>

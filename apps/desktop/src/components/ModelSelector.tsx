@@ -13,6 +13,7 @@ type Props = {
   models: GenerationModel[];
   selectedId: string;
   loading: boolean;
+  catalogCount?: number;
   disabled?: boolean;
   onSelect: (id: string) => void;
   inherited?: boolean;
@@ -39,7 +40,7 @@ function localizedInputSignature(mode: GenerationMode, model: GenerationModel, l
     .replaceAll("video", t("inputVideo"));
 }
 
-export function ModelSelector({ mode, models, selectedId, loading, disabled, onSelect, inherited, onUseDefault, onSetDefault }: Props) {
+export function ModelSelector({ mode, models, selectedId, loading, catalogCount, disabled, onSelect, inherited, onUseDefault, onSetDefault }: Props) {
   const { language, t } = useI18n();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -81,7 +82,11 @@ export function ModelSelector({ mode, models, selectedId, loading, disabled, onS
             <header className="model-selector-header">
               <div>
                 <strong>{t("chooseModel")}</strong>
-                <small>{loading ? t("loadingModels") : t("availableModels", { count: models.length })}</small>
+                <small>{loading
+                  ? t("loadingModels")
+                  : catalogCount != null && catalogCount > models.length
+                    ? t("filteredVideoModels", { shown: models.length, total: catalogCount })
+                    : t("availableModels", { count: models.length })}</small>
               </div>
             </header>
             <div className="model-default-actions">

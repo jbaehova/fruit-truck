@@ -60,13 +60,34 @@ export function AssemblyDialog({
       || clip.endSeconds <= clip.startSeconds
       || (duration != null && clip.endSeconds > duration);
   });
+  const renderFinal = async () => {
+    if (busy || !clips.length || invalidClip) return;
+    setBusy(true);
+    setError(undefined);
+    try {
+      await onRender(clips);
+      onClose();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   return (
     <Dialog.Root open={open} onOpenChange={(next) => { if (!next) onClose(); }}>
       <Dialog.Portal>
         <Dialog.Backdrop className="dialog-backdrop" />
         <Dialog.Viewport className="assembly-dialog-viewport">
-          <Dialog.Popup className="assembly-dialog">
+          <Dialog.Popup
+            className="assembly-dialog"
+            onKeyDown={(event) => {
+              if (!(event.metaKey || event.ctrlKey) || event.key !== "Enter" || busy || !clips.length || invalidClip) return;
+              event.preventDefault();
+              event.stopPropagation();
+              void renderFinal();
+            }}
+          >
             <header>
               <div><Film /><span><Dialog.Title>{t("makeFinalVideo")}</Dialog.Title><Dialog.Description>{t("assemblyDialogHint")}</Dialog.Description></span></div>
               <Dialog.Close render={<Button variant="ghost" size="icon" />} aria-label={t("closeAssembly")}><X /></Dialog.Close>
@@ -121,18 +142,7 @@ export function AssemblyDialog({
             </div>
             <footer>
               <span>{t("assemblySummary", { count: clips.length, duration: clips.reduce((sum, clip) => sum + Math.max(0, clip.endSeconds - clip.startSeconds), 0).toFixed(1) })}</span>
-              <Button disabled={busy || !clips.length || Boolean(invalidClip)} onClick={() => void (async () => {
-                setBusy(true);
-                setError(undefined);
-                try {
-                  await onRender(clips);
-                  onClose();
-                } catch (cause) {
-                  setError(cause instanceof Error ? cause.message : String(cause));
-                } finally {
-                  setBusy(false);
-                }
-              })()}>{busy ? t("rendering") : t("renderFinal")} <Play /></Button>
+              <Button disabled={busy || !clips.length || Boolean(invalidClip)} onClick={() => void renderFinal()}>{busy ? t("rendering") : t("renderFinal")} <Play /></Button>
             </footer>
           </Dialog.Popup>
         </Dialog.Viewport>
