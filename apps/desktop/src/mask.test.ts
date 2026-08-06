@@ -1,6 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { composeEditPrompt, hasGenerationInstructions } from "./mask.ts";
+import { composeEditPrompt, hasGenerationInstructions, promptGuideDimensions } from "./mask.ts";
+
+test("prompt mask guides are bounded without changing aspect ratio", () => {
+  assert.deepEqual(promptGuideDimensions(4096, 2048), { width: 1536, height: 768 });
+  assert.deepEqual(promptGuideDimensions(800, 600), { width: 800, height: 600 });
+  assert.deepEqual(promptGuideDimensions(0, 600), { width: 0, height: 0 });
+});
 
 test("masked edit prompts use explicit, separated semantics", () => {
   const prompt = composeEditPrompt({
@@ -11,7 +17,8 @@ test("masked edit prompts use explicit, separated semantics", () => {
   });
 
   assert.match(prompt, /^\[EDIT TASK\]\nTarget image: #2/);
-  assert.match(prompt, /\[MASK SEMANTICS\]\nTransparent pixels in #2 are the editable mask\./);
+  assert.match(prompt, /\[MASK SEMANTICS\]\nTransparent pixels in #2 are a coarse semantic selection cue/);
+  assert.match(prompt, /Never create a new object that follows the brush-stroke silhouette/);
   assert.match(prompt, /\[MASK INSTRUCTIONS\]\nKeep the embossed logo\./);
   assert.match(prompt, /\[USER PROMPT\]\nTurn the selected panel blue\.$/);
   assert.doesNotMatch(prompt, /red overlay/i);
