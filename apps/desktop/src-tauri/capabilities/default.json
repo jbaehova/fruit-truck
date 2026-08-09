@@ -5,5 +5,21 @@
   "windows": [
     "main"
   ],
-  "permissions": ["core:default", "updater:default", "process:default", "dialog:default"]
+  "permissions": [
+    "core:default",
+    "updater:default",
+    "process:default",
+    "dialog:default",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        {
+          "url": "https://openrouter.ai/models"
+        },
+        {
+          "url": "https://openrouter.ai/settings/keys"
+        }
+      ]
+    }
+  ]
 }

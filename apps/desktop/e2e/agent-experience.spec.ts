@@ -3,14 +3,21 @@ import type { StudioState } from "../src/studio";
 
 const STORAGE_KEY = "fruit-truck.studio.v1";
 
-async function mockImageGeneration(page: Page, imageGate?: Promise<void>, resultCount = 1) {
+async function mockImageGeneration(page: Page, imageGate?: Promise<void>, resultCount = 1, inputReferenceLimit = 0) {
   await page.route("https://openrouter.ai/api/v1/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
     if (path === "/api/v1/images/models") {
       await route.fulfill({
         contentType: "application/json",
-        body: JSON.stringify({ data: [{ id: "test/image", name: "Test image model", supported_parameters: { n: { type: "range", min: 1, max: 2 } } }] }),
+        body: JSON.stringify({ data: [{
+          id: "test/image",
+          name: "Test image model",
+          supported_parameters: {
+            n: { type: "range", min: 1, max: 2 },
+            ...(inputReferenceLimit > 0 ? { input_references: { type: "range", min: 0, max: inputReferenceLimit } } : {}),
+          },
+        }] }),
       });
       return;
     }
@@ -242,7 +249,87 @@ test.beforeEach(async ({ page }) => {
     localStorage.setItem("fruit-truck.dev-key", "test-key-for-e2e");
   }, [STORAGE_KEY, studioFixture()] as const);
   await page.goto("/");
-  await expect.poll(() => page.evaluate((key) => JSON.parse(localStorage.getItem(key) ?? "{}").schemaVersion, STORAGE_KEY)).toBe(3);
+  await expect.poll(() => page.evaluate((key) => JSON.parse(localStorage.getItem(key) ?? "{}").schemaVersion, STORAGE_KEY)).toBe(5);
+});
+
+test("top bar shows the active session's exact tracked spend", async ({ page }) => {
+  await page.evaluate((key) => {
+    const state = JSON.parse(localStorage.getItem(key) ?? "{}") as StudioState;
+    const [active, waiting] = state.sessions;
+    const recordedAt = new Date().toISOString();
+    active.agent.execution.costLedger = [
+      { id: "generation:e2e", category: "generation", actualCostUsd: 0.12, recordedAt },
+      { id: "prompt-enhancement:e2e", category: "prompt_enhancement", actualCostUsd: 0.00345678, recordedAt },
+    ];
+    active.agent.execution.spentUsd = 0.12345678;
+    waiting.agent.execution.costLedger = [
+      { id: "generation:waiting", category: "generation", actualCostUsd: 2.5, recordedAt },
+    ];
+    waiting.agent.execution.spentUsd = 2.5;
+    localStorage.setItem(key, JSON.stringify(state));
+  }, STORAGE_KEY);
+  await page.reload();
+
+  await expect(page.locator(".app-shell")).toHaveJSProperty("clientWidth", 1920);
+  await expect(page.locator(".app-shell")).toHaveJSProperty("clientHeight", 1080);
+  await expect(page.locator(".session-spend")).toHaveAttribute("aria-label", "Session spend: $0.12345678");
+  await expect(page.locator(".session-spend strong")).toHaveText("$0.12345678");
+
+  await page.getByText("Waiting connection", { exact: true }).click();
+  await expect(page.locator(".session-spend")).toHaveAttribute("aria-label", "Session spend: $2.50");
+  await expect(page.locator(".session-spend strong")).toHaveText("$2.50");
+});
+
+test("video polling survives a not-yet-due heartbeat and collects the completed result", async ({ page }) => {
+  let polls = 0;
+  await page.evaluate((key) => {
+    const state = JSON.parse(localStorage.getItem(key) ?? "{}") as StudioState;
+    const activeSession = state.sessions.find((session) => session.id === state.activeSessionId)!;
+    const attempt = activeSession.threads.video
+      .flatMap((thread) => thread.attempts)
+      .find((candidate) => candidate.jobId === "job-e2e");
+    if (!attempt) throw new Error("video fixture did not migrate");
+    attempt.status = "in_progress";
+    attempt.pollAttempts = 0;
+    attempt.lastPolledAt = undefined;
+    attempt.nextPollAt = undefined;
+    attempt.completedAt = undefined;
+    attempt.error = undefined;
+    for (const session of state.sessions.filter((candidate) => candidate.id !== state.activeSessionId)) {
+      for (const duplicate of session.threads.video.flatMap((thread) => thread.attempts).filter((candidate) => candidate.jobId === "job-e2e")) {
+        duplicate.status = "canceled";
+        duplicate.completedAt = new Date().toISOString();
+      }
+    }
+    localStorage.setItem(key, JSON.stringify(state));
+  }, STORAGE_KEY);
+  await page.goto("about:blank");
+  await page.route(/\/api\/v1\/videos\/job-e2e\/content\?index=0$/, async (route) => {
+    await route.fulfill({ contentType: "video/mp4", body: "video-e2e-result" });
+  });
+  await page.route(/\/api\/v1\/videos\/job-e2e$/, async (route) => {
+    polls += 1;
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify(polls === 1
+        ? { id: "job-e2e", status: "in_progress" }
+        : { id: "job-e2e", status: "completed", unsigned_urls: ["unused"], usage: { cost: 0.3 } }),
+    });
+  });
+  await page.clock.install({ time: Date.now() });
+  await page.goto("/");
+
+  await expect.poll(() => polls).toBe(1);
+  await expect(page.getByText(/elapsed · checked/).first()).toBeVisible();
+  await page.clock.fastForward(5_000);
+  await expect.poll(() => polls).toBe(1);
+  await page.clock.fastForward(6_000);
+  await expect.poll(() => polls).toBe(2);
+  await expect.poll(() => page.evaluate((key) => {
+    const state = JSON.parse(localStorage.getItem(key) ?? "{}") as StudioState;
+    return state.sessions.some((session) => session.assets.some((asset) => asset.jobId === "job-e2e"));
+  }, STORAGE_KEY)).toBe(true);
+  await expect(page.locator(".session-spend strong")).toHaveText("$0.30");
 });
 
 test("keyboard shortcuts cover workspace navigation and keep modal close scoped", async ({ page }) => {
@@ -263,6 +350,12 @@ test("keyboard shortcuts cover workspace navigation and keep modal close scoped"
   await page.keyboard.press("Meta+W");
   await expect(page.getByRole("heading", { name: "Keyboard Shortcuts" })).toHaveCount(0);
   await expect(threadRail.locator(".thread-tab")).toHaveCount(initialThreads);
+
+  const onlyThreadName = await threadRail.locator(".thread-tab strong").textContent();
+  await page.keyboard.press("Meta+W");
+  await expect(threadRail.locator(".thread-tab")).toHaveCount(1);
+  await expect(threadRail.locator(".thread-tab strong")).toHaveText(onlyThreadName ?? "");
+  await expect(page.getByText("Archived (1)")).toHaveCount(0);
 
   await page.keyboard.press("Meta+T");
   await expect(threadRail.locator(".thread-tab")).toHaveCount(initialThreads + 1);
@@ -376,6 +469,82 @@ test("full-window experience uses Agent/Assets without the removed dashboard", a
   await page.getByLabel("Agent and assets panel").getByRole("button", { name: "Assets" }).click();
   const widthAfter = await page.locator(".composer").evaluate((element) => element.getBoundingClientRect().width);
   expect(widthAfter).toBe(widthBefore);
+});
+
+test("model selector exposes its final row and provider options use compact typography", async ({ page }) => {
+  await page.route("https://openrouter.ai/api/v1/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/v1/images/models") {
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: Array.from({ length: 12 }, (_, index) => ({
+            id: `test/image-${index + 1}`,
+            name: `Test Provider: Model ${String(index + 1).padStart(2, "0")}`,
+            supported_parameters: {
+              aspect_ratio: { type: "enum", values: ["1:1", "9:16"] },
+              n: { type: "range", min: 1, max: 4 },
+              resolution: { type: "enum", values: ["1K", "2K"] },
+            },
+          })),
+        }),
+      });
+      return;
+    }
+    if (path.startsWith("/api/v1/images/models/") && path.endsWith("/endpoints")) {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ endpoints: [] }) });
+      return;
+    }
+    if (path === "/api/v1/videos/models" || path === "/api/v1/models") {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ data: [] }) });
+      return;
+    }
+    await route.fulfill({ status: 404, body: "Not mocked" });
+  });
+  await page.evaluate((key) => {
+    const state = JSON.parse(localStorage.getItem(key) ?? "{}") as StudioState;
+    const session = state.sessions.find((item) => item.id === state.activeSessionId)!;
+    session.agent.controlMode = "human";
+    session.generationDefaults.modelIds.image = "test/image-1";
+    localStorage.setItem(key, JSON.stringify(state));
+  }, STORAGE_KEY);
+  await page.reload();
+
+  await page.locator(".model-selector-trigger").click();
+  await expect.poll(() => page.locator(".model-selector-popup").evaluate((element) => getComputedStyle(element).transform)).toBe("none");
+  const viewport = page.locator(".model-dropdown-list .base-scroll-viewport");
+  await viewport.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+  const finalRow = page.locator(".model-dropdown-row").last();
+  await expect(finalRow).toContainText("Model 12");
+  const rowBounds = await finalRow.evaluate((element) => {
+    const row = element.getBoundingClientRect();
+    const scrollViewport = element.closest(".base-scroll-viewport")?.getBoundingClientRect();
+    if (!scrollViewport) throw new Error("Missing model scroll viewport");
+    return {
+      height: row.height,
+      bottom: row.bottom,
+      viewportBottom: scrollViewport.bottom,
+    };
+  });
+  expect(rowBounds.height).toBeGreaterThanOrEqual(52);
+  expect(rowBounds.bottom).toBeLessThanOrEqual(rowBounds.viewportBottom + 0.5);
+  await finalRow.click();
+
+  const advanced = page.getByRole("button", { name: "Advanced" });
+  await advanced.scrollIntoViewIfNeeded();
+  await advanced.click();
+  const typography = await page.locator(".provider-options-field").evaluate((element) => {
+    const label = element.querySelector("label");
+    const description = element.querySelector("p");
+    const textarea = element.querySelector("textarea");
+    if (!label || !description || !textarea) throw new Error("Missing provider option field parts");
+    return {
+      label: getComputedStyle(label).fontSize,
+      description: getComputedStyle(description).fontSize,
+      textarea: getComputedStyle(textarea).fontSize,
+    };
+  });
+  expect(typography).toEqual({ label: "12px", description: "10.5px", textarea: "11px" });
 });
 
 test("a published session stays connection-waiting without an app-authored plan", async ({ page }) => {
@@ -512,8 +681,10 @@ test("Human mode exposes independently runnable generation threads without batch
 
   const second = page.locator(".thread-tab").filter({ hasText: "Image 2" });
   await second.hover();
-  page.once("dialog", (dialog) => dialog.accept("Keyframe wide"));
   await page.getByRole("button", { name: "Rename Image 2" }).click();
+  const renameDialog = page.getByRole("dialog", { name: "Rename thread" });
+  await renameDialog.getByRole("textbox", { name: "Rename thread" }).fill("Keyframe wide");
+  await renameDialog.getByRole("button", { name: "Save name" }).click();
   await expect(page.getByText("Keyframe wide", { exact: true })).toBeVisible();
 
   const threadRail = page.getByLabel("Generation threads");
@@ -521,6 +692,80 @@ test("Human mode exposes independently runnable generation threads without batch
   await expect(threadRail.getByRole("button", { name: /Run parallel/ })).toHaveCount(0);
   await threadRail.locator(".thread-tab").filter({ hasText: "Image 1" }).locator(".thread-tab-main").click();
   await expect(threadRail.locator(".thread-tab.active")).toContainText("Image 1");
+});
+
+test("legacy input mentions migrate visibly and new image and video tabs keep following mode defaults", async ({ page }) => {
+  await page.route("https://openrouter.ai/api/v1/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/v1/images/models") {
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({ data: [{ id: "test/default-image", name: "Test default image", supported_parameters: {} }] }),
+      });
+      return;
+    }
+    if (path === "/api/v1/images/models/test/default-image/endpoints") {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ endpoints: [] }) });
+      return;
+    }
+    if (path === "/api/v1/videos/models") {
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({ data: [{ id: "test/default-video", name: "Test default video" }] }),
+      });
+      return;
+    }
+    if (path === "/api/v1/models") {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ data: [] }) });
+      return;
+    }
+    await route.fulfill({ status: 404, body: "Not mocked" });
+  });
+  await page.evaluate((key) => {
+    const state = JSON.parse(localStorage.getItem(key) ?? "{}") as StudioState;
+    (state as { schemaVersion: number }).schemaVersion = 3;
+    const session = state.sessions.find((item) => item.id === state.activeSessionId)!;
+    session.agent.controlMode = "human";
+    session.mode = "image";
+    session.generationDefaults.modelIds = { image: "test/default-image", video: "test/default-video" };
+    const imageThread = session.threads.image.find((item) => item.id === session.activeThreadIds.image)!;
+    imageThread.modelOverrideId = undefined;
+    imageThread.draft.prompt = "Use #1 and leave @2 plain.";
+    imageThread.draft.references = [{ assetId: "asset-final", slot: 1, role: "reference" }];
+    const videoThread = session.threads.video.find((item) => item.id === session.activeThreadIds.video)!;
+    videoThread.modelOverrideId = undefined;
+    localStorage.setItem(key, JSON.stringify(state));
+  }, STORAGE_KEY);
+  await page.reload();
+
+  const prompt = page.locator(".prompt-field textarea");
+  await expect(prompt).toHaveValue("Use @1 and leave @2 plain.");
+  await expect(page.locator(".prompt-highlight mark")).toHaveText("@1");
+  await expect(page.locator(".prompt-highlight mark")).toHaveCount(1);
+  await expect(page.locator(".prompt-reference-chip")).toHaveText("@1 mentioned");
+  await expect(page.getByText("Mention an input in your prompt with @1, @2…")).toBeVisible();
+  await expect.poll(() => page.evaluate((key) => {
+    const state = JSON.parse(localStorage.getItem(key) ?? "{}") as StudioState;
+    const session = state.sessions.find((item) => item.id === state.activeSessionId)!;
+    return { schemaVersion: state.schemaVersion, prompt: session.threads.image[0].draft.prompt };
+  }, STORAGE_KEY)).toEqual({ schemaVersion: 5, prompt: "Use @1 and leave @2 plain." });
+
+  await page.getByRole("button", { name: "New thread" }).click();
+  await expect.poll(() => page.evaluate((key) => {
+    const state = JSON.parse(localStorage.getItem(key) ?? "{}") as StudioState;
+    const session = state.sessions.find((item) => item.id === state.activeSessionId)!;
+    const active = session.threads.image.find((item) => item.id === session.activeThreadIds.image)!;
+    return { defaultModel: session.generationDefaults.modelIds.image, override: active.modelOverrideId ?? null };
+  }, STORAGE_KEY)).toEqual({ defaultModel: "test/default-image", override: null });
+
+  await page.getByRole("button", { name: "Video", exact: true }).click();
+  await page.getByRole("button", { name: "New thread" }).click();
+  await expect.poll(() => page.evaluate((key) => {
+    const state = JSON.parse(localStorage.getItem(key) ?? "{}") as StudioState;
+    const session = state.sessions.find((item) => item.id === state.activeSessionId)!;
+    const active = session.threads.video.find((item) => item.id === session.activeThreadIds.video)!;
+    return { defaultModel: session.generationDefaults.modelIds.video, override: active.modelOverrideId ?? null };
+  }, STORAGE_KEY)).toEqual({ defaultModel: "test/default-video", override: null });
 });
 
 test("asset-library image drags set the edit target through the pointer drop path", async ({ page }) => {
@@ -561,7 +806,7 @@ test("asset-library image drags set the edit target through the pointer drop pat
       target: draft?.imageEditTarget,
       assetId: draft?.references[0]?.assetId,
     };
-  }, STORAGE_KEY)).toEqual({ target: "#1", assetId: "asset-final" });
+  }, STORAGE_KEY)).toEqual({ target: "@1", assetId: "asset-final" });
 });
 
 test("asset export downloads without navigating the workspace into the image", async ({ page }) => {
@@ -662,7 +907,8 @@ test("mask-only enhancement analyzes the original image and a semantic mask guid
     await route.fulfill({
       contentType: "application/json",
       body: JSON.stringify({
-        choices: [{ message: { content: "Recolor the existing semantically selected part of #1 black while preserving its natural structure, texture, lighting, and surrounding scene." } }],
+        choices: [{ message: { content: "Recolor the existing semantically selected part of @1 black while preserving its natural structure, texture, lighting, and surrounding scene." } }],
+        usage: { cost: 0.001234 },
       }),
     });
   });
@@ -680,7 +926,7 @@ test("mask-only enhancement analyzes the original image and a semantic mask guid
       enhancedPrompt: "",
       enhancedPromptDirty: false,
       imageEditMode: true,
-      imageEditTarget: "#1",
+      imageEditTarget: "@1",
       maskInstructions: "Turn the selected part black.",
       maskStrokes: [{
         operation: "paint",
@@ -694,7 +940,7 @@ test("mask-only enhancement analyzes the original image and a semantic mask guid
 
   await expect(page.locator(".app-shell")).toHaveJSProperty("clientWidth", 1920);
   await expect(page.locator(".app-shell")).toHaveJSProperty("clientHeight", 1080);
-  await expect(page.locator(".enhance-row")).not.toContainText("images / video frames analyzed");
+  await expect(page.locator(".enhance-row")).not.toContainText("images analyzed");
   await page.locator(".enhance-row").getByRole("button", { name: "Preview" }).click();
   await expect.poll(() => captured.body).toBeDefined();
 
@@ -707,47 +953,56 @@ test("mask-only enhancement analyzes the original image and a semantic mask guid
   expect(parts[1]?.image_url?.url).toContain("fruit-truck-icon.png");
   expect(parts[2]?.image_url?.url).toMatch(/^data:image\/(?:webp|png);base64,/);
   await expect(page.getByText("Enhanced prompt · inspect or edit")).toBeVisible();
-  await expect(page.locator(".enhance-row")).toContainText("images / video frames analyzed");
+  await expect(page.locator(".enhance-row")).toContainText("images analyzed");
+  await expect(page.locator(".session-spend strong")).toHaveText("$0.001234");
 });
 
-test("remote video references fall back to text enhancement when local frames are unavailable", async ({ page }) => {
-  const captured: { body?: Record<string, unknown> } = {};
-  await page.route("https://openrouter.ai/api/v1/chat/completions", async (route) => {
-    captured.body = route.request().postDataJSON() as Record<string, unknown>;
+test("legacy video edit threads disappear while video generation and library assets remain", async ({ page }) => {
+  await page.route("https://openrouter.ai/api/v1/videos/models", async (route) => {
     await route.fulfill({
       contentType: "application/json",
-      body: JSON.stringify({ choices: [{ message: { content: "Preserve the timing and identity of #1 while applying a restrained monochrome grade." } }] }),
+      body: JSON.stringify({ data: [{ id: "test/video", name: "Test video", architecture: { input_modalities: ["text", "image"] } }] }),
     });
   });
   await page.evaluate((key) => {
     const state = JSON.parse(localStorage.getItem(key) ?? "{}") as StudioState;
+    (state as unknown as { schemaVersion: number }).schemaVersion = 4;
     const session = state.sessions.find((item) => item.id === state.activeSessionId)!;
     session.agent.controlMode = "human";
     session.mode = "video";
-    const thread = session.threads.video.find((item) => item.id === session.activeThreadIds.video)!;
-    thread.videoWorkflow = "edit";
-    thread.draft = {
-      ...thread.draft,
-      prompt: "Preserve #1 and apply a restrained monochrome grade.",
-      references: [{ assetId: "asset-video", slot: 1, role: "video_reference" }],
-      enhancePrompt: true,
-      enhancedPrompt: "",
-      enhancedPromptDirty: false,
-      enhancedVisualCount: 0,
+    const generate = session.threads.video.find((item) => item.id === session.activeThreadIds.video)!;
+    for (const attempt of session.threads.video.flatMap((thread) => thread.attempts)) attempt.status = "canceled";
+    const edit = {
+      ...structuredClone(generate),
+      id: "legacy-video-edit",
+      name: "Legacy video edit",
+      videoWorkflow: "edit",
+      draft: {
+        ...structuredClone(generate.draft),
+        prompt: "Edit the source video",
+        references: [{ assetId: "asset-video", slot: 1, role: "video_reference" }],
+      },
     };
+    (session.threads.video as unknown[]).push(edit);
+    session.activeThreadIds.video = edit.id;
     localStorage.setItem(key, JSON.stringify(state));
   }, STORAGE_KEY);
   await page.reload();
 
-  await page.locator(".enhance-row").getByRole("button", { name: "Preview" }).click();
-  await expect.poll(() => captured.body).toBeDefined();
-  const messages = captured.body!.messages as Array<{ role: string; content: unknown }>;
-  const user = messages.find((message) => message.role === "user");
-  const parts = user?.content as Array<{ type: string; text?: string }>;
-  expect(parts).toHaveLength(1);
-  expect(parts[0]?.text).toContain("#1: approved-shot.mp4");
-  await expect(page.getByText("Enhanced prompt · inspect or edit")).toBeVisible();
-  await expect(page.locator(".enhance-row")).not.toContainText("images / video frames analyzed");
+  await expect(page.locator(".composer-header p")).toHaveText("Video generation");
+  await expect(page.getByRole("button", { name: "Generate Video" })).toBeVisible();
+  await expect(page.getByText("Legacy video edit")).toHaveCount(0);
+  await expect(page.getByText("approved-shot.mp4")).toBeVisible();
+  await expect(page.getByRole("button", { name: /Edit Video/i })).toHaveCount(0);
+  await expect.poll(() => page.evaluate((key) => {
+    const state = JSON.parse(localStorage.getItem(key) ?? "{}") as StudioState;
+    const session = state.sessions.find((item) => item.id === state.activeSessionId)!;
+    return {
+      schemaVersion: state.schemaVersion,
+      editThreadPresent: session.threads.video.some((thread) => thread.id === "legacy-video-edit"),
+      assetPresent: session.assets.some((asset) => asset.id === "asset-video"),
+    };
+  }, STORAGE_KEY)).toEqual({ schemaVersion: 5, editThreadPresent: false, assetPresent: true });
 });
 
 test("completed generation opens a queued result modal without moving the editor and hands assets to the library", async ({ page }) => {
@@ -819,6 +1074,7 @@ test("completed generation opens a queued result modal without moving the editor
     const attempt = session.threads.image.find((item) => item.id === session.activeThreadIds.image)!.attempts.at(-1);
     return { status: attempt?.status, resultCount: attempt?.assetIds.length, assetCount: session.assets.length };
   }, STORAGE_KEY)).toEqual({ status: "completed", resultCount: 2, assetCount: 4 });
+  await expect(page.locator(".session-spend strong")).toHaveText("$0.08");
 
   await expect(resultDialog.getByRole("button", { name: /Done/ })).toBeVisible();
   await page.keyboard.press("Escape");
@@ -835,7 +1091,7 @@ test("completed generation opens a queued result modal without moving the editor
 test("result actions return to the originating thread and pause the remaining completion queue", async ({ page }) => {
   let releaseImages!: () => void;
   const imageGate = new Promise<void>((resolve) => { releaseImages = resolve; });
-  await mockImageGeneration(page, imageGate);
+  await mockImageGeneration(page, imageGate, 1, 14);
   await page.evaluate((key) => {
     const state = JSON.parse(localStorage.getItem(key) ?? "{}") as StudioState;
     const session = state.sessions.find((item) => item.id === state.activeSessionId)!;
@@ -845,7 +1101,18 @@ test("result actions return to the originating thread and pause the remaining co
     const source = session.threads.image[0];
     source.name = "Origin one";
     source.modelOverrideId = "test/image";
-    source.draft = { ...source.draft, prompt: "Create origin one.", enhancePrompt: false };
+    const firstReference = session.assets.find((asset) => asset.id === "asset-final")!;
+    const secondReference = { ...firstReference, id: "asset-context-two", name: "context-two.png" };
+    session.assets.push(secondReference);
+    source.draft = {
+      ...source.draft,
+      prompt: "Create origin one.",
+      enhancePrompt: false,
+      references: [
+        { assetId: firstReference.id, slot: 1, role: "reference" },
+        { assetId: secondReference.id, slot: 2, role: "reference" },
+      ],
+    };
     source.optionOverrides = {};
     source.attempts = [];
     const second = structuredClone(source);
@@ -882,8 +1149,22 @@ test("result actions return to the originating thread and pause the remaining co
     const state = JSON.parse(localStorage.getItem(key) ?? "{}") as StudioState;
     const session = state.sessions.find((item) => item.id === state.activeSessionId)!;
     const active = session.threads.image.find((item) => item.id === session.activeThreadIds.image)!;
-    return { name: active.name, editMode: active.draft.imageEditMode, references: active.draft.references.length };
-  }, STORAGE_KEY)).toEqual({ name: firstThreadName, editMode: true, references: 1 });
+    return {
+      name: active.name,
+      editMode: active.draft.imageEditMode,
+      target: active.draft.imageEditTarget,
+      references: active.draft.references.length,
+      slot: active.draft.references[0]?.slot,
+      retainedOldReference: active.draft.references.some((reference) => ["asset-final", "asset-context-two"].includes(reference.assetId)),
+    };
+  }, STORAGE_KEY)).toEqual({
+    name: firstThreadName,
+    editMode: true,
+    target: "@1",
+    references: 1,
+    slot: 1,
+    retainedOldReference: false,
+  });
 
   await page.getByRole("button", { name: "Review 1 pending result(s)" }).click();
   await expect(resultDialog).toBeVisible();

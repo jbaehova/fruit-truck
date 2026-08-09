@@ -12,9 +12,9 @@ import {
   promptEnhancerInstruction,
   validateEnhancedPrompt,
   modelInputSignature,
+  normalizeVideoStatus,
   prettyRequest,
   retryDelayMs,
-  supportsVideoInput,
   type ImageModel,
   type ReferenceAsset,
   type VideoModel,
@@ -50,7 +50,7 @@ test("image request includes only discovered capabilities", () => {
 
   assert.deepEqual(request, {
     model: model.id,
-    prompt: "Attached input mapping: #1 = one.png (reference). Preserve these identities exactly.\n\nhello",
+    prompt: "Attached input mapping: @1 = one.png (reference). Preserve these identities exactly.\n\nhello",
     resolution: "2K",
     n: 1,
     input_references: [{ type: "image_url", image_url: { url: "data:image/png;base64,one" } }],
@@ -81,7 +81,7 @@ test("video request separates references from first and last frames", () => {
   }, model);
 
   assert.equal((request.input_references as unknown[]).length, 1);
-  assert.match(String(request.prompt), /#1 = reference.png/);
+  assert.match(String(request.prompt), /@1 = reference.png/);
   assert.deepEqual((request.frame_images as Array<{ frame_type: string }>).map((item) => item.frame_type), ["first_frame", "last_frame"]);
   assert.equal(request.quality, undefined);
   assert.equal(request.size, undefined);
@@ -89,11 +89,11 @@ test("video request separates references from first and last frames", () => {
   assert.deepEqual(request.provider, { order: ["Alibaba"] });
 });
 
-test("video edit support is fail-closed and comes only from structured metadata", () => {
+test("video generation ignores video inputs and exposes only image roles", () => {
   const proseOnly: VideoModel = {
     id: "example/prose",
     name: "Prose",
-    description: "Excellent video-to-video editing and reference images",
+    description: "Excellent video generation with reference images",
   };
   const declared: VideoModel = {
     id: "example/declared",
@@ -102,68 +102,69 @@ test("video edit support is fail-closed and comes only from structured metadata"
     max_input_references: 2,
   };
 
-  assert.equal(supportsVideoInput(proseOnly), false);
-  assert.deepEqual(allowedAssetRoles("video", proseOnly, "edit"), []);
-  assert.equal(supportsVideoInput(declared), true);
-  assert.deepEqual(allowedAssetRoles("video", declared, "edit"), ["reference", "video_reference"]);
-  assert.equal(modelInputSignature("video", declared), "Text + image + video");
+  assert.deepEqual(allowedAssetRoles("video", proseOnly), []);
+  assert.deepEqual(allowedAssetRoles("video", declared), ["reference"]);
+  assert.equal(modelInputSignature("video", declared), "Text + image");
 
   const request = buildRequest({
     mode: "video",
-    videoWorkflow: "edit",
     model: declared.id,
-    prompt: "turn it into dusk",
-    assets: [asset("video_reference", "source", "video/mp4")],
+    prompt: "generate a rainy night",
+    assets: [asset("reference", "source", "video/mp4")],
     options: {},
     providerJson: "",
   }, declared);
-  assert.deepEqual(request.input_references, [{
-    type: "video_url",
-    video_url: { url: "data:video/mp4;base64,source" },
-  }]);
+  assert.equal(request.input_references, undefined);
+});
+
+test("video statuses preserve every OpenRouter terminal state and fail safely", () => {
+  assert.equal(normalizeVideoStatus("completed"), "completed");
+  assert.equal(normalizeVideoStatus("cancelled"), "cancelled");
+  assert.equal(normalizeVideoStatus("canceled"), "cancelled");
+  assert.equal(normalizeVideoStatus("expired"), "expired");
+  assert.equal(normalizeVideoStatus("future-provider-state"), "in_progress");
+  assert.equal(normalizeVideoStatus(undefined, "pending"), "pending");
 });
 
 test("image edit enhancement distinguishes the target from context references", () => {
   const instruction = productSystemInstruction({
     mode: "image",
     editMode: true,
-    editTarget: "#2",
+    editTarget: "@2",
     hasMask: false,
     references: [],
     visuals: [],
   });
-  assert.match(instruction, /explicit edit target is "#2"/);
+  assert.match(instruction, /explicit edit target is "@2"/);
   assert.match(instruction, /other numbered images are context only/);
   assert.doesNotMatch(instruction, /Rewrite the user's request/);
   assert.match(promptEnhancerInstruction(), /instead of forcing a fixed schema/);
-  assert.equal(validateEnhancedPrompt("Keep #1, copy #2", "Keep #1 and copy #2"), null);
-  assert.match(validateEnhancedPrompt("Keep #1", "Keep #1 and use #3") ?? "", /invented #3/);
+  assert.equal(validateEnhancedPrompt("Keep @1, copy @2", "Keep @1 and copy @2"), null);
+  assert.match(validateEnhancedPrompt("Keep @1", "Keep @1 and use @3") ?? "", /invented @3/);
+  assert.equal(validateEnhancedPrompt("Keep @1; @4 is plain text", "Keep @1", undefined, [1]), null);
 });
 
-test("prompt enhancement sends text first and labels every visual input", () => {
+test("prompt enhancement sends text first and labels image visual inputs", () => {
   const content = promptEnhancementUserContent({
     promptModel: "openai/gpt-5.6-luna",
     mode: "video",
-    videoWorkflow: "edit",
-    prompt: "Turn #1 into a rainy night.",
+    prompt: "Use @1 to generate a rainy night.",
     maskInstructions: "",
     hasMask: false,
-    references: [{ slot: 1, name: "source.mp4", mediaType: "video/mp4", role: "video_reference" }],
-    visuals: ["beginning", "middle", "end"].map((position, index) => ({
-      id: `source:${position}`,
-      kind: "video_frame" as const,
-      source: `data:image/jpeg;base64,frame-${index}`,
+    references: [{ slot: 1, name: "source.png", mediaType: "image/png", role: "reference" }],
+    visuals: [{
+      id: "source",
+      kind: "reference" as const,
+      source: "data:image/png;base64,source",
       slot: 1,
-      name: "source.mp4",
-      role: "video_reference" as const,
-      framePosition: position as "beginning" | "middle" | "end",
-      timestampSeconds: index * 5,
-    })),
+      name: "source.png",
+      role: "reference" as const,
+    }],
   });
 
   assert.equal(content[0]?.type, "text");
-  assert.match(content[0]?.type === "text" ? content[0].text : "", /Visual 1: #1 source\.mp4 \(video_frame, video_reference, beginning at 0\.00s\)/);
-  assert.deepEqual(content.slice(1).map((part) => part.type), ["image_url", "image_url", "image_url"]);
+  assert.match(content[0]?.type === "text" ? content[0].text : "", /Visual 1: @1 source\.png \(reference, reference\)/);
+  assert.deepEqual(content.slice(1).map((part) => part.type), ["image_url"]);
   assert.doesNotMatch(JSON.stringify(content), /video_url/);
 });
 
@@ -171,7 +172,7 @@ test("masked enhancement does not claim a visual guide when only the target imag
   const instruction = productSystemInstruction({
     mode: "image",
     editMode: true,
-    editTarget: "#1",
+    editTarget: "@1",
     hasMask: true,
     maskInstructions: "Turn the selected feathers black.",
     references: [],
@@ -187,6 +188,14 @@ test("masked enhancement does not claim a visual guide when only the target imag
 
   assert.match(instruction, /No visual mask-guide image is supplied/);
   assert.doesNotMatch(instruction, /magenta mask-guide view are supplied/);
+});
+
+test("masked prompt enhancement preserves contact anatomy and keeps attribute edits narrow", () => {
+  const instruction = promptEnhancerInstruction(["edit_target", "mask_guide"]);
+  assert.match(instruction, /Keep simple color, material, or attribute changes attribute-only/);
+  assert.match(instruction, /do not add pose changes, gestures, finger placement, grasp angles, contact geometry, or limb restyling/);
+  assert.match(instruction, /Preserve exact overlaps and occlusions/);
+  assert.match(instruction, /limit any boundary blending to that subject's own edge/);
 });
 
 test("default options come directly from capability values", () => {
@@ -262,6 +271,7 @@ test("image pricing prefers output rates and preserves small token prices", () =
   assert.equal(modelPriceLabel("image", perToken), "$60/M output tokens");
   assert.equal(formatUsd(0), "$0.00");
   assert.equal(formatUsd(0.1), "$0.10");
+  assert.equal(formatUsd(0.000000004), "$0.000000004");
   assert.equal(estimateGenerationCost("image", perImage, { n: 2 }), 0.08);
   assert.equal(estimateGenerationCost("image", perToken, { n: 2 }), undefined);
 });
@@ -281,7 +291,7 @@ test("video pricing converts cent-denominated SKUs to dollars", () => {
   assert.equal(estimateGenerationCost("video", video, { duration: 5 }), 0.85);
 });
 
-test("video estimates select workflow, resolution, audio, and input-image SKUs", () => {
+test("video estimates select generation, resolution, audio, and input-image SKUs", () => {
   const flux: VideoModel = {
     id: "black-forest-labs/flux-3-video",
     name: "FLUX.3 Video",
@@ -309,8 +319,7 @@ test("video estimates select workflow, resolution, audio, and input-image SKUs",
     },
   };
 
-  assert.equal(estimateGenerationCost("video", flux, { duration: 5, resolution: "720p" }, { videoWorkflow: "generate" }), 0.85);
-  assert.equal(estimateGenerationCost("video", flux, { duration: 5, resolution: "720p" }, { videoWorkflow: "edit" }), 2.05);
+  assert.equal(estimateGenerationCost("video", flux, { duration: 5, resolution: "720p" }), 0.85);
   assert.equal(estimateGenerationCost("video", hailuo, { duration: 5 }, { imageInputCount: 2 }), 0.73);
   assert.equal(estimateGenerationCost("video", veo, { duration: 4, resolution: "720p", generate_audio: true }), 0.4);
   assert.equal(estimateGenerationCost("video", veo, { duration: 4, resolution: "720p", generate_audio: false }), 0.32);

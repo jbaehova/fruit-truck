@@ -41,37 +41,43 @@ Generation models rarely agree on inputs. One supports seed and aspect ratio; an
 
 ## Features
 
-- **Live model discovery** — loads image and video catalogs directly from OpenRouter.
-- **Capability-aware controls** — renders only the parameters supported by the selected model.
-- **Image and video workflows** — handles image results as well as asynchronous video jobs.
-- **Flexible references** — maps uploads to general references, first frames, or last frames when supported.
+- **Guided first run** — introduces the workflow and saves the OpenRouter key locally before loading the workspace.
+- **Live model and price discovery** — loads image and video catalogs and published pricing directly from OpenRouter.
+- **Capability-aware controls** — renders only supported parameters, clamps numeric ranges, and keeps advanced provider routing available.
+- **Image and video creation** — supports image and video generation, semantic-mask image editing, image-reference video generation, and image-aware prompt enhancement.
+- **Stable numbered inputs** — copies uploads into the session and lets prompts refer to them consistently as `@1`, `@2`, and so on.
+- **Independent generation threads** — keeps prompts, models, options, history, and background work isolated across parallel image and video generation tabs.
 - **Request inspector** — shows sanitized request JSON without embedding media bodies.
-- **Advanced routing** — accepts optional provider routing and passthrough settings as JSON.
-- **Job continuity** — remembers an active video job and resumes polling after a restart.
+- **Result review and follow-up** — reviews generated candidates, then starts an image edit, video generation, or new-input flow from the selected result.
+- **Job and cost continuity** — restores active jobs, polls videos to completion, and tracks attempt history with estimated or actual cost.
 - **Agent-first, visual decisions** — start in Codex, Claude Code, or Hermes; Fruit Truck stays in the background until you open rich media, model, upload, assembly, or approval checkpoints.
 - **Codex-native images** — Codex sessions choose once between built-in image generation/editing and OpenRouter; Claude Code and Hermes remain on OpenRouter.
 - **Shared control** — the right `Agent / Assets` panel keeps status, current action, progress, pause/stop, and handover controls beside the unchanged generation canvas.
+- **Native Mac controls** — keyboard shortcuts, menus, focused-item navigation, and modal-scoped commands keep the full-window workspace fast to operate.
 - **Traceable output** — provenance and evaluation stay available in each Asset preview without adding a dashboard to the main workspace.
-- **Managed local media** — desktop uploads live under `~/.fruit-truck/assets`; generated and assembled results live under `~/.fruit-truck/generated`.
+- **Managed local media** — uploads live under `~/.fruit-truck/assets`; generated and assembled results live under `~/.fruit-truck/generated`, with actual media formats and requested image dimensions preserved.
 - **Local credential storage** — keeps the OpenRouter API key in the desktop app's local data, outside request previews and logs.
 
 ## How it works
 
 ```mermaid
 flowchart LR
-    A[OpenRouter live catalog] --> B[Capability mapper]
-    B --> C[Model-specific controls]
-    C --> D[Request preview]
+    A[OpenRouter catalog and pricing] --> B[Capability mapper]
+    B --> C[Thread-specific controls]
+    C --> D[Sanitized request preview]
     D --> E[OpenRouter API]
-    E --> F[Image result]
-    E --> G[Video job polling]
+    E --> F[Candidate review]
+    E --> G[Persisted video polling]
+    F --> H[Managed local assets]
+    G --> H
 ```
 
-1. Fruit Truck fetches the live image and video model catalogs.
-2. The selected model's metadata determines which inputs, references, and options appear.
-3. Your prompt and settings are converted into a provider-valid request.
-4. You can inspect the sanitized request JSON before generating.
-5. Images render immediately; video jobs are persisted and polled until they finish.
+1. On first run, Fruit Truck guides you through adding an OpenRouter API key stored only on the device.
+2. It fetches live image and video catalogs, capabilities, endpoint availability, and published pricing.
+3. Each generation thread keeps its own mode, model, prompt, numbered `@inputs`, and options.
+4. Your settings are converted into a provider-valid request that you can inspect without embedded media bodies.
+5. Images enter candidate review immediately; video jobs persist and continue polling in the background.
+6. Selected results are saved as local assets and can flow directly into image edits, image-guided video generation, or later requests.
 
 ## Quick start
 
@@ -106,7 +112,7 @@ Source-tree desktop rendering uses `ffmpeg` and `ffprobe` from the developer's
 `PATH`. Homebrew is one optional way to obtain them, not a project requirement.
 Release DMGs bundle their own Universal executables.
 
-When the app opens, add your OpenRouter API key in **Settings**. The model catalogs will load automatically.
+On a fresh install, the first-run guide connects your OpenRouter API key before opening the workspace. You can change the key later in **Settings**; the model catalogs load automatically.
 
 ### Connect a local agent
 
@@ -127,7 +133,7 @@ Start from the local agent with a rough intent such as “Make a 15-second reel 
 
 In a Codex-controlled session, the first image task opens a Fruit Truck choice between Codex built-in image generation and OpenRouter; that choice lasts for the session. OpenRouter model choices include published price information when available. The agent prepares final clip order and ranges, then the user reviews and renders them in **Make final video**. Distributed macOS builds use the bundled LGPL FFmpeg/FFprobe executables for MP4, MOV, and WebM input, then encode the final H.264 file through Apple's VideoToolbox hardware path when available.
 
-Uploads are copied into `~/.fruit-truck/assets`; generated media and legacy IndexedDB-only assets are materialized into managed storage before the bridge publishes them. Session and bridge JSON store `localPath` metadata rather than Base64 media payloads.
+Uploads are copied into `~/.fruit-truck/assets`; generated media and legacy IndexedDB-only assets are materialized into managed storage before the bridge publishes them. Session and bridge JSON store `localPath` metadata rather than Base64 media payloads. Local imports reject empty files and enforce safety limits of 30 MB for images and 700 MB for videos.
 
 ## Security
 
@@ -157,7 +163,7 @@ npm run test:e2e
 cd src-tauri && cargo test
 ```
 
-Playwright runs headless at 1920×1080 and covers the full-window Agent/Assets layout, passive decision badges, visual review, Assembly, and Agent Skill management.
+Playwright runs headless at 1920×1080 and covers first-run onboarding in both app languages, the full-window Agent/Assets layout, passive decision badges, visual review, Assembly, and Agent Skill management.
 
 ### macOS media packaging
 

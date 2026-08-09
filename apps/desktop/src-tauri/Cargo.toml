@@ -15,12 +15,13 @@ tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
 base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tauri = { version = "2.11.3", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
 tauri-plugin-process = "2.3.1"
 tauri-plugin-shell = "2"
 tauri-plugin-updater = "2.10.1"
-tokio = { version = "1", features = ["macros", "time"] }

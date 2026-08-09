@@ -14,7 +14,6 @@ const ROLE_LABEL_KEYS: Record<ReferenceRole, MessageKey> = {
   reference: "referenceImage",
   first_frame: "firstFrame",
   last_frame: "lastFrame",
-  video_reference: "sourceVideo",
 };
 
 export function InputTray({
@@ -43,8 +42,8 @@ export function InputTray({
 
   const roleFor = useCallback((asset: SessionAsset) =>
     asset.kind === "video"
-      ? roles.includes("video_reference") ? "video_reference" : null
-      : roles.includes("reference") ? "reference" : roles.find((role) => role !== "video_reference") ?? null, [roles]);
+      ? null
+      : roles.includes("reference") ? "reference" : roles[0] ?? null, [roles]);
 
   const addAssets = useCallback((incoming: SessionAsset[]) => {
     const next = [...references];
@@ -135,11 +134,11 @@ export function InputTray({
           {references.map((reference) => {
             const asset = assetMap.get(reference.assetId);
             if (!asset) return null;
-            const validRoles = roles.filter((role) => asset.kind === "video" ? role === "video_reference" : role !== "video_reference");
+            const validRoles = asset.kind === "video" ? [] : roles;
             return (
               <div className="reference-row" key={reference.assetId}>
                 <AssetPreview asset={asset} />
-                <span className="reference-order">#{reference.slot}</span>
+                <span className="reference-order">@{reference.slot}</span>
                 <span className="reference-name"><strong>{asset.name}</strong><small>{asset.mimeType}</small></span>
                 {validRoles.length ? (
                   <Field.Root>

@@ -13,6 +13,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { useI18n, type MessageKey } from "@/i18n";
 import { exportAssetToDownloads, type SessionAsset, type SessionVideoJob } from "@/studio";
 import type { ArtifactNode } from "@/agent";
+import { formatElapsedClock } from "@/videoPolling";
 
 const ORIGIN_KEYS: Record<SessionAsset["origin"], MessageKey> = {
   upload: "originUpload",
@@ -63,10 +64,18 @@ export function AssetLibrary({
   const [filter, setFilter] = useState<"all" | "image" | "video">("all");
   const [draggingFiles, setDraggingFiles] = useState(false);
   const [rovingAssetId, setRovingAssetId] = useState<string | null>(null);
+  const [nowMs, setNowMs] = useState(() => Date.now());
   const tileRefs = useRef(new Map<string, HTMLElement>());
   const visibleAssets = assets
     .filter((asset) => filter === "all" || asset.kind === filter)
     .toSorted((a, b) => b.createdAt.localeCompare(a.createdAt));
+
+  useEffect(() => {
+    if (!jobs.length) return;
+    setNowMs(Date.now());
+    const timer = window.setInterval(() => setNowMs(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [jobs.length]);
 
   useEffect(() => {
     if (!visibleAssets.length) {
@@ -222,6 +231,13 @@ export function AssetLibrary({
             <span className="asset-job-icon"><Video /></span>
             <Progress.Label className="asset-job-label"><strong>{job.status === "failed" ? t("videoJobFailed") : t("generatingVideo")}</strong></Progress.Label>
             <Progress.Value className="asset-job-value">{() => job.progress == null ? t(STATUS_KEYS[job.status] ?? "statusPending") : `${job.progress}%`}</Progress.Value>
+            <small className="asset-job-timing">
+              {t("videoElapsed", { time: formatElapsedClock(job.submittedAt, nowMs) })}
+              {" · "}
+              {job.lastPolledAt
+                ? t("videoLastChecked", { time: formatElapsedClock(job.lastPolledAt, nowMs) })
+                : t("videoFirstCheckPending")}
+            </small>
             <Progress.Track className="asset-job-progress"><Progress.Indicator /></Progress.Track>
           </Progress.Root>
         ))}
@@ -313,7 +329,7 @@ export function AssetLibrary({
                   <Dialog.Close render={<Button variant="ghost" size="icon" />} aria-label={t("closePreview")}><X /></Dialog.Close>
                 </div>
               </header>
-              {preview ? <AssetPreview asset={preview} controls /> : null}
+              {preview ? <AssetPreview asset={preview} controls transparentControls /> : null}
               {preview ? (() => {
                 const artifact = artifacts.find((item) => item.assetId === preview.id);
                 return artifact ? (

@@ -3,10 +3,10 @@ import type {
   GenerationModel,
   GenerationMode,
   ReferenceRole,
-  VideoWorkflow,
   VideoResult,
 } from "./openrouter.ts";
-import { defaultOptions, isTauriRuntime, supportsVideoInput } from "./openrouter.ts";
+import { defaultOptions, isTauriRuntime } from "./openrouter.ts";
+import { migrateLegacyInputMentions } from "./inputMentions.ts";
 import { createAgentState, normalizeAgentState, type AgentSessionState } from "./agent.ts";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 
@@ -69,7 +69,6 @@ export type GenerationDraftState = {
 export type SessionVideoJob = VideoResult & {
   threadId?: string;
   attemptId?: string;
-  workflow: VideoWorkflow;
   model: string;
   submittedAt: string;
   pollAttempts?: number;
@@ -92,7 +91,6 @@ export type GenerationAttemptStatus =
 
 export type GenerationAttemptSnapshot = {
   mode: GenerationMode;
-  videoWorkflow: VideoWorkflow;
   modelId: string;
   outputRole: string;
   prompt: string;
@@ -153,7 +151,6 @@ export type GenerationThread = {
   requestKey?: string;
   name: string;
   mode: GenerationMode;
-  videoWorkflow: VideoWorkflow;
   createdAt: string;
   updatedAt: string;
   archivedAt?: string;
@@ -169,16 +166,8 @@ export type GenerationThread = {
 
 export type GenerationDefaults = {
   modelIds: Record<GenerationMode, string>;
-  options: {
-    image: DraftOptions;
-    videoGenerate: DraftOptions;
-    videoEdit: DraftOptions;
-  };
-  providerJson: {
-    image: string;
-    videoGenerate: string;
-    videoEdit: string;
-  };
+  options: Record<GenerationMode, DraftOptions>;
+  providerJson: Record<GenerationMode, string>;
 };
 
 export type StudioSession = {
@@ -196,7 +185,7 @@ export type StudioSession = {
 };
 
 export type StudioState = {
-  schemaVersion: 3;
+  schemaVersion: 5;
   activeSessionId: string;
   promptModel: PromptModel;
   sessions: StudioSession[];
@@ -209,6 +198,8 @@ const DB_VERSION = 1;
 const BLOB_STORE = "blobs";
 const memoryBlobs = new Map<string, Blob>();
 const LOCAL_MEDIA_MARKER = "fruit-truck-local:";
+export const MAX_IMAGE_BYTES = 30 * 1024 * 1024;
+export const MAX_VIDEO_BYTES = 700 * 1024 * 1024;
 
 export type NativeManagedAsset = {
   name: string;
@@ -216,12 +207,6 @@ export type NativeManagedAsset = {
   mimeType: string;
   localPath: string;
   byteSize: number;
-};
-
-export type PromptContextFrame = {
-  position: "beginning" | "middle" | "end";
-  timestampSeconds: number;
-  dataUrl: string;
 };
 
 export const PROMPT_MODELS: Array<{
@@ -250,6 +235,20 @@ export function emptyDraft(): GenerationDraftState {
   };
 }
 
+export function beginGeneratedImageEdit(draft: GenerationDraftState, assetId: string): GenerationDraftState {
+  return {
+    ...draft,
+    references: [{ assetId, slot: 1, role: "reference" }],
+    imageEditMode: true,
+    imageEditTarget: "@1",
+    maskInstructions: "",
+    maskStrokes: [],
+    enhancedPrompt: "",
+    enhancedPromptDirty: false,
+    enhancedVisualCount: 0,
+  };
+}
+
 function threadName(mode: GenerationMode, index = 1) {
   return `${mode === "image" ? "Image" : "Video"} ${index}`;
 }
@@ -257,7 +256,6 @@ function threadName(mode: GenerationMode, index = 1) {
 export function createGenerationThread(
   mode: GenerationMode,
   index = 1,
-  workflow: VideoWorkflow = "generate",
   draft: GenerationDraftState = emptyDraft(),
 ): GenerationThread {
   const createdAt = new Date().toISOString();
@@ -265,7 +263,6 @@ export function createGenerationThread(
     id: crypto.randomUUID(),
     name: threadName(mode, index),
     mode,
-    videoWorkflow: workflow,
     createdAt,
     updatedAt: createdAt,
     revision: 0,
@@ -278,22 +275,28 @@ export function createGenerationThread(
   };
 }
 
-export function generationDefaultKey(thread: Pick<GenerationThread, "mode" | "videoWorkflow">) {
-  if (thread.mode === "image") return "image" as const;
-  return thread.videoWorkflow === "generate" ? "videoGenerate" as const : "videoEdit" as const;
-}
-
 export function effectiveThreadDraft(session: StudioSession, thread: GenerationThread): GenerationDraftState {
-  const key = generationDefaultKey(thread);
   return {
     ...thread.draft,
-    options: { ...session.generationDefaults.options[key], ...thread.optionOverrides },
-    providerJson: thread.providerJsonOverride ?? session.generationDefaults.providerJson[key],
+    options: { ...session.generationDefaults.options[thread.mode], ...thread.optionOverrides },
+    providerJson: thread.providerJsonOverride ?? session.generationDefaults.providerJson[thread.mode],
   };
 }
 
 export function effectiveThreadModelId(session: StudioSession, thread: GenerationThread) {
   return thread.modelOverrideId ?? session.generationDefaults.modelIds[thread.mode];
+}
+
+export function createSiblingGenerationThread(
+  source: GenerationThread,
+  index: number,
+): GenerationThread {
+  const next = createGenerationThread(
+    source.mode,
+    index,
+  );
+  if (source.modelOverrideId) next.modelOverrideId = source.modelOverrideId;
+  return next;
 }
 
 export function optionOverridesFromDefaults(defaults: DraftOptions, effective: DraftOptions): DraftOptions {
@@ -320,7 +323,6 @@ export function activeVideoJobsFromAttempts(session: Pick<StudioSession, "thread
       error: attempt.error,
       threadId: thread.id,
       attemptId: attempt.id,
-      workflow: snapshot?.videoWorkflow ?? thread.videoWorkflow,
       model: snapshot?.modelId ?? attempt.modelId ?? "",
       submittedAt: attempt.submittedAt ?? attempt.createdAt,
       pollAttempts: attempt.pollAttempts,
@@ -345,8 +347,8 @@ export function createSession(name = "Untitled session"): StudioSession {
     assets: [],
     generationDefaults: {
       modelIds: { image: "", video: "" },
-      options: { image: {}, videoGenerate: {}, videoEdit: {} },
-      providerJson: { image: "", videoGenerate: "", videoEdit: "" },
+      options: { image: {}, video: {} },
+      providerJson: { image: "", video: "" },
     },
     threads: { image: [imageThread], video: [videoThread] },
     activeThreadIds: { image: imageThread.id, video: videoThread.id },
@@ -370,7 +372,6 @@ export function initializeSessionCatalogDefaults(
 ) {
   const imageModel = catalogs.image[0] ?? null;
   const videoModel = catalogs.video[0] ?? null;
-  const videoEditModel = catalogs.video.find((model) => supportsVideoInput(model)) ?? videoModel;
   return {
     ...session,
     generationDefaults: {
@@ -380,10 +381,9 @@ export function initializeSessionCatalogDefaults(
       },
       options: {
         image: defaultOptions("image", imageModel),
-        videoGenerate: defaultOptions("video", videoModel),
-        videoEdit: defaultOptions("video", videoEditModel),
+        video: defaultOptions("video", videoModel),
       },
-      providerJson: { image: "", videoGenerate: "", videoEdit: "" },
+      providerJson: { image: "", video: "" },
     },
   };
 }
@@ -391,31 +391,40 @@ export function initializeSessionCatalogDefaults(
 function createInitialStudioState(): StudioState {
   const session = createSession("First session");
   return {
-    schemaVersion: 3,
+    schemaVersion: 5,
     activeSessionId: session.id,
     promptModel: "openai/gpt-5.6-luna",
     sessions: [session],
   };
 }
 
-function validState(value: unknown): value is StudioState | (Omit<StudioState, "schemaVersion"> & { schemaVersion: 1 | 2 }) {
+function validState(value: unknown): value is StudioState | (Omit<StudioState, "schemaVersion"> & { schemaVersion: 1 | 2 | 3 | 4 }) {
   if (!value || typeof value !== "object") return false;
   const state = value as { schemaVersion?: number; activeSessionId?: unknown; sessions?: unknown };
-  return (state.schemaVersion === 1 || state.schemaVersion === 2 || state.schemaVersion === 3)
+  return (state.schemaVersion === 1 || state.schemaVersion === 2 || state.schemaVersion === 3 || state.schemaVersion === 4 || state.schemaVersion === 5)
     && typeof state.activeSessionId === "string"
     && Array.isArray(state.sessions)
     && state.sessions.length > 0;
 }
 
-function normalizeDraft(draft: GenerationDraftState | undefined): GenerationDraftState {
+function normalizeDraft(draft: GenerationDraftState | undefined, migrateLegacyMentions = false): GenerationDraftState {
   const value = draft ?? emptyDraft();
+  const references = Array.isArray(value.references) ? value.references : [];
+  const slots = references.map((reference) => reference.slot);
+  const migrate = (text: string | undefined) => migrateLegacyMentions
+    ? migrateLegacyInputMentions(text ?? "", slots)
+    : text ?? "";
   return {
     ...emptyDraft(),
     ...value,
+    prompt: migrate(value.prompt),
+    references,
+    enhancedPrompt: migrate(value.enhancedPrompt),
+    imageEditTarget: migrate(value.imageEditTarget),
     enhancedVisualCount: typeof value.enhancedVisualCount === "number" && value.enhancedVisualCount > 0
       ? Math.floor(value.enhancedVisualCount)
       : 0,
-    maskInstructions: value.maskInstructions ?? "",
+    maskInstructions: migrate(value.maskInstructions),
     maskStrokes: Array.isArray(value.maskStrokes)
       ? value.maskStrokes.map((stroke) => ({ ...stroke, operation: stroke.operation === "erase" ? "erase" as const : "paint" as const }))
       : [],
@@ -427,67 +436,140 @@ function hasDraftContent(draft: GenerationDraftState | undefined) {
   return Boolean(draft.prompt.trim() || draft.references.length || Object.keys(draft.options).length || draft.providerJson.trim());
 }
 
-function normalizeSession(session: StudioSession): StudioSession {
+function normalizeSession(session: StudioSession, migrateLegacyMentions = false): StudioSession {
+  type LegacyWorkflow = "generate" | "edit";
+  type LegacyThread = GenerationThread & Partial<{
+    videoWorkflow: LegacyWorkflow;
+    videoWorkflowStates: Record<string, unknown>;
+  }>;
+  type LegacyDefaults = Partial<GenerationDefaults> & {
+    options?: Partial<Record<GenerationMode | "videoGenerate" | "videoEdit", DraftOptions>>;
+    providerJson?: Partial<Record<GenerationMode | "videoGenerate" | "videoEdit", string>>;
+  };
+  type LegacyVideoJob = SessionVideoJob & { workflow?: LegacyWorkflow };
   const legacy = session as StudioSession & Partial<{
-    videoWorkflow: VideoWorkflow;
+    videoWorkflow: LegacyWorkflow;
     selectedModelIds: Record<GenerationMode, string>;
     drafts: { image: GenerationDraftState; videoGenerate: GenerationDraftState; videoEdit: GenerationDraftState };
-    activeVideoJobs: SessionVideoJob[];
+    activeVideoJobs: LegacyVideoJob[];
     lastResultAssetIds: Record<GenerationMode, string[]>;
+    generationDefaults: LegacyDefaults;
   }>;
   const legacyDrafts = legacy.drafts ?? { image: emptyDraft(), videoGenerate: emptyDraft(), videoEdit: emptyDraft() };
-  const imageDraft = normalizeDraft(legacyDrafts.image);
-  const videoGenerateDraft = normalizeDraft(legacyDrafts.videoGenerate);
-  const videoEditDraft = normalizeDraft(legacyDrafts.videoEdit);
-  const legacyWorkflow = legacy.videoWorkflow === "edit" ? "edit" : "generate";
+  const imageDraft = normalizeDraft(legacyDrafts.image, migrateLegacyMentions);
+  const videoGenerateDraft = normalizeDraft(legacyDrafts.videoGenerate, migrateLegacyMentions);
   const existingThreads = session.threads;
+  const normalizeThread = (thread: LegacyThread, mode: GenerationMode): GenerationThread => {
+    const { videoWorkflow: _threadWorkflow, videoWorkflowStates: _workflowStates, ...canonicalThread } = thread;
+    const draft = normalizeDraft(thread.draft, migrateLegacyMentions);
+    const references = draft.references.filter((reference) => (reference.role as string) !== "video_reference");
+    const attempts = (thread.attempts ?? []).flatMap((attempt) => {
+      const legacySnapshot = attempt.snapshot as (GenerationAttemptSnapshot & { videoWorkflow?: LegacyWorkflow }) | undefined;
+      const legacyEditAttempt = mode === "video" && (thread.videoWorkflow === "edit"
+        || legacySnapshot?.videoWorkflow === "edit"
+        || legacySnapshot?.assetBindings?.some((reference) => (reference.role as string) === "video_reference"));
+      if (legacyEditAttempt) return [];
+      if (!legacySnapshot) return [{ ...attempt }];
+      const { videoWorkflow: _snapshotWorkflow, ...snapshot } = legacySnapshot;
+      return [{
+        ...attempt,
+        snapshot: {
+          ...snapshot,
+          assetBindings: (snapshot.assetBindings ?? []).filter((reference) => (reference.role as string) !== "video_reference"),
+        },
+      }];
+    });
+    return {
+      ...canonicalThread,
+      mode,
+      draft: { ...draft, references },
+      optionOverrides: thread.optionOverrides ?? thread.draft.options ?? {},
+      attempts,
+      enhancementAttempts: thread.enhancementAttempts ?? [],
+      revision: thread.revision ?? 0,
+    };
+  };
   const imageThreads = existingThreads?.image?.length
-    ? existingThreads.image.map((thread) => ({ ...thread, draft: normalizeDraft(thread.draft), optionOverrides: thread.optionOverrides ?? thread.draft.options ?? {}, attempts: thread.attempts ?? [], enhancementAttempts: thread.enhancementAttempts ?? [], revision: thread.revision ?? 0 }))
-    : [createGenerationThread("image", 1, "generate", imageDraft)];
-  let videoThreads = existingThreads?.video?.length
-    ? existingThreads.video.map((thread) => ({ ...thread, draft: normalizeDraft(thread.draft), optionOverrides: thread.optionOverrides ?? thread.draft.options ?? {}, attempts: thread.attempts ?? [], enhancementAttempts: thread.enhancementAttempts ?? [], revision: thread.revision ?? 0 }))
-    : [createGenerationThread("video", 1, legacyWorkflow, legacyWorkflow === "edit" ? videoEditDraft : videoGenerateDraft)];
-  if (!existingThreads?.video?.length) {
-    const inactiveDraft = legacyWorkflow === "edit" ? videoGenerateDraft : videoEditDraft;
-    if (hasDraftContent(inactiveDraft)) {
-      videoThreads.push(createGenerationThread("video", 2, legacyWorkflow === "edit" ? "generate" : "edit", inactiveDraft));
+    ? existingThreads.image.map((thread) => normalizeThread(thread as LegacyThread, "image"))
+    : [createGenerationThread("image", 1, imageDraft)];
+  const legacyEditThreadIds = new Set((existingThreads?.video ?? [])
+    .filter((thread) => (thread as LegacyThread).videoWorkflow === "edit")
+    .map((thread) => thread.id));
+  const legacyEditJobIds = new Set<string>();
+  for (const thread of (existingThreads?.video ?? []) as LegacyThread[]) {
+    for (const attempt of thread.attempts ?? []) {
+      const snapshot = attempt.snapshot as (GenerationAttemptSnapshot & { videoWorkflow?: LegacyWorkflow }) | undefined;
+      const legacyEditAttempt = thread.videoWorkflow === "edit"
+        || snapshot?.videoWorkflow === "edit"
+        || snapshot?.assetBindings?.some((reference) => (reference.role as string) === "video_reference");
+      if (legacyEditAttempt && attempt.jobId) legacyEditJobIds.add(attempt.jobId);
     }
   }
   for (const job of legacy.activeVideoJobs ?? []) {
-      if (videoThreads.some((thread) => thread.attempts.some((attempt) => attempt.jobId === job.jobId))) continue;
-      let target = job.threadId ? videoThreads.find((thread) => thread.id === job.threadId) : undefined;
-      if (!target) {
-        target = !activeGenerationAttempt(videoThreads[0]) ? videoThreads[0] : createGenerationThread("video", videoThreads.length + 1, job.workflow);
-      }
-      const attempt: GenerationAttempt = {
-        id: job.attemptId ?? crypto.randomUUID(),
-        status: job.status === "completed" || job.status === "failed" ? job.status : "in_progress",
-        backend: "openrouter",
-        draftRevision: target.revision,
-        requestedBy: "human",
-        createdAt: job.submittedAt,
-        updatedAt: job.lastPolledAt ?? job.submittedAt,
-        submittedAt: job.submittedAt,
-        modelId: job.model,
-        request: job.request,
-        inputAssetIds: job.inputAssetIds ?? [],
-        assetIds: [],
-        jobId: job.jobId,
-        progress: job.progress,
-        error: job.error,
-      };
-      target.attempts = [...target.attempts, attempt];
-      if (!videoThreads.includes(target)) videoThreads.push(target);
+    if (job.workflow === "edit" || (job.threadId ? legacyEditThreadIds.has(job.threadId) : false)) {
+      legacyEditJobIds.add(job.jobId);
+    }
   }
-  const generationDefaults = session.generationDefaults ?? {
-    modelIds: { image: legacy.selectedModelIds?.image ?? "", video: legacy.selectedModelIds?.video ?? "" },
-    options: { image: {}, videoGenerate: {}, videoEdit: {} },
-    providerJson: { image: "", videoGenerate: "", videoEdit: "" },
+  let videoThreads = existingThreads?.video?.length
+    ? existingThreads.video
+      .filter((thread) => (thread as LegacyThread).videoWorkflow !== "edit")
+      .map((thread) => normalizeThread(thread as LegacyThread, "video"))
+    : hasDraftContent(videoGenerateDraft)
+      ? [createGenerationThread("video", 1, videoGenerateDraft)]
+      : [];
+  if (!videoThreads.length) videoThreads = [createGenerationThread("video")];
+  for (const job of legacy.activeVideoJobs ?? []) {
+    const legacyEditJob = job.workflow === "edit" || (job.threadId ? legacyEditThreadIds.has(job.threadId) : false);
+    if (legacyEditJob) continue;
+    if (videoThreads.some((thread) => thread.attempts.some((attempt) => attempt.jobId === job.jobId))) continue;
+    let target = job.threadId ? videoThreads.find((thread) => thread.id === job.threadId) : undefined;
+    if (!target) {
+      target = !activeGenerationAttempt(videoThreads[0]) ? videoThreads[0] : createGenerationThread("video", videoThreads.length + 1);
+    }
+    const attempt: GenerationAttempt = {
+      id: job.attemptId ?? crypto.randomUUID(),
+      status: job.status === "completed" || job.status === "failed" ? job.status : "in_progress",
+      backend: "openrouter",
+      draftRevision: target.revision,
+      requestedBy: "human",
+      createdAt: job.submittedAt,
+      updatedAt: job.lastPolledAt ?? job.submittedAt,
+      submittedAt: job.submittedAt,
+      modelId: job.model,
+      request: job.request,
+      inputAssetIds: job.inputAssetIds ?? [],
+      assetIds: [],
+      jobId: job.jobId,
+      progress: job.progress,
+      error: job.error,
+      pollAttempts: job.pollAttempts,
+      lastPolledAt: job.lastPolledAt,
+      nextPollAt: job.nextPollAt,
+    };
+    target.attempts = [...target.attempts, attempt];
+    if (!videoThreads.includes(target)) videoThreads.push(target);
+  }
+  const storedDefaults = legacy.generationDefaults;
+  const generationDefaults: GenerationDefaults = {
+    modelIds: {
+      image: storedDefaults?.modelIds?.image ?? legacy.selectedModelIds?.image ?? "",
+      video: storedDefaults?.modelIds?.video ?? legacy.selectedModelIds?.video ?? "",
+    },
+    options: {
+      image: storedDefaults?.options?.image ?? {},
+      video: storedDefaults?.options?.video ?? storedDefaults?.options?.videoGenerate ?? {},
+    },
+    providerJson: {
+      image: storedDefaults?.providerJson?.image ?? "",
+      video: storedDefaults?.providerJson?.video ?? storedDefaults?.providerJson?.videoGenerate ?? "",
+    },
   };
   const activeThreadIds = {
     image: imageThreads.some((thread) => thread.id === session.activeThreadIds?.image) ? session.activeThreadIds.image : imageThreads[0].id,
     video: videoThreads.some((thread) => thread.id === session.activeThreadIds?.video) ? session.activeThreadIds.video : videoThreads[0].id,
   };
+  const agent = session.agent ? normalizeAgentState(session.agent) : createAgentState();
+  agent.execution.currentJobIds = agent.execution.currentJobIds.filter((jobId) => !legacyEditJobIds.has(jobId));
   const { videoWorkflow: _videoWorkflow, selectedModelIds: _selectedModelIds, drafts: _drafts, activeVideoJobs: _activeVideoJobs, lastResultAssetIds: legacyResults, ...canonical } = legacy;
   for (const [mode, threads] of [["image", imageThreads], ["video", videoThreads]] as const) {
     const resultIds = legacyResults?.[mode]?.filter((id) => (session.assets ?? []).some((asset) => asset.id === id)) ?? [];
@@ -506,7 +588,7 @@ function normalizeSession(session: StudioSession): StudioSession {
     generationDefaults,
     threads: { image: imageThreads, video: videoThreads },
     activeThreadIds,
-    agent: session.agent ? normalizeAgentState(session.agent) : createAgentState(),
+    agent,
   };
 }
 
@@ -520,8 +602,8 @@ export function loadStudioState(): StudioState {
     if (!validState(parsed)) return createInitialStudioState();
     const state: StudioState = {
       ...parsed,
-      schemaVersion: 3,
-      sessions: parsed.sessions.map((session) => normalizeSession(session as StudioSession)),
+      schemaVersion: 5,
+      sessions: parsed.sessions.map((session) => normalizeSession(session as StudioSession, parsed.schemaVersion < 4)),
     };
     if (!state.sessions.some((session) => session.id === state.activeSessionId)) {
       state.activeSessionId = state.sessions[0].id;
@@ -651,6 +733,11 @@ export async function importFileAsset(file: File, origin: AssetOrigin = "upload"
       ? "video"
       : null;
   if (!kind) throw new Error(`${file.name} is not a supported image or video.`);
+  if (file.size === 0) throw new Error(`${file.name} is empty.`);
+  const limit = kind === "video" ? MAX_VIDEO_BYTES : MAX_IMAGE_BYTES;
+  if (file.size > limit) {
+    throw new Error(`${file.name} exceeds the ${kind === "video" ? "700 MB" : "30 MB"} local safety limit.`);
+  }
   const id = crypto.randomUUID();
   const blobKey = `asset:${id}`;
   await storeAssetBlob(blobKey, file);
@@ -665,6 +752,83 @@ export async function importFileAsset(file: File, origin: AssetOrigin = "upload"
     byteSize: file.size,
     fingerprint: `${file.name}:${file.size}:${file.lastModified}:${file.type}`,
   };
+}
+
+export function mediaMimeFromSource(source: string, fallback: string): string {
+  const dataMime = source.match(/^data:([^;,]+)/i)?.[1]?.toLowerCase();
+  if (dataMime?.startsWith("image/") || dataMime?.startsWith("video/")) return dataMime;
+  const clean = source.split(/[?#]/, 1)[0].toLowerCase();
+  if (clean.endsWith(".jpg") || clean.endsWith(".jpeg")) return "image/jpeg";
+  if (clean.endsWith(".webp")) return "image/webp";
+  if (clean.endsWith(".gif")) return "image/gif";
+  if (clean.endsWith(".webm")) return "video/webm";
+  if (clean.endsWith(".mov")) return "video/quicktime";
+  if (clean.endsWith(".mp4")) return "video/mp4";
+  if (clean.endsWith(".png")) return "image/png";
+  return fallback;
+}
+
+export function mediaNameForMime(name: string, mimeType: string): string {
+  const extension = mimeType === "image/jpeg" ? "jpg"
+    : mimeType === "image/webp" ? "webp"
+      : mimeType === "image/gif" ? "gif"
+        : mimeType === "video/webm" ? "webm"
+          : mimeType === "video/quicktime" ? "mov"
+            : mimeType.startsWith("video/") ? "mp4" : "png";
+  const stem = name.replace(/\.[^.]+$/, "");
+  return `${stem}.${extension}`;
+}
+
+export function requestedImageDimensions(
+  width: number,
+  height: number,
+  resolution?: string,
+  aspectRatio?: string,
+): { width: number; height: number } | null {
+  const resolutionValue = resolution?.trim().toLowerCase();
+  const longSide = resolutionValue === "4k" ? 4096
+    : resolutionValue === "2k" ? 2048
+      : resolutionValue === "1k" ? 1024
+        : Number(resolutionValue?.match(/^(\d+)(?:px|p)?$/)?.[1] ?? 0);
+  const ratioMatch = aspectRatio?.trim().match(/^(\d+(?:\.\d+)?):(\d+(?:\.\d+)?)$/);
+  const ratio = ratioMatch ? Number(ratioMatch[1]) / Number(ratioMatch[2]) : width / height;
+  const targetLongSide = longSide || Math.max(width, height);
+  if (!Number.isFinite(ratio) || ratio <= 0 || !Number.isFinite(targetLongSide) || targetLongSide <= 0) return null;
+  const target = ratio >= 1
+    ? { width: targetLongSide, height: Math.max(1, Math.round(targetLongSide / ratio)) }
+    : { width: Math.max(1, Math.round(targetLongSide * ratio)), height: targetLongSide };
+  return target.width === width && target.height === height ? null : target;
+}
+
+async function normalizeGeneratedImageBlob(
+  blob: Blob,
+  output?: { resolution?: string; aspectRatio?: string },
+): Promise<Blob> {
+  if (!output?.resolution && !output?.aspectRatio) return blob;
+  const bitmap = await createImageBitmap(blob);
+  try {
+    const target = requestedImageDimensions(bitmap.width, bitmap.height, output.resolution, output.aspectRatio);
+    if (!target) return blob;
+    const canvas = document.createElement("canvas");
+    canvas.width = target.width;
+    canvas.height = target.height;
+    const context = canvas.getContext("2d");
+    if (!context) return blob;
+    const sourceRatio = bitmap.width / bitmap.height;
+    const targetRatio = target.width / target.height;
+    const sourceWidth = sourceRatio > targetRatio ? bitmap.height * targetRatio : bitmap.width;
+    const sourceHeight = sourceRatio > targetRatio ? bitmap.height : bitmap.width / targetRatio;
+    const sourceX = (bitmap.width - sourceWidth) / 2;
+    const sourceY = (bitmap.height - sourceHeight) / 2;
+    context.drawImage(bitmap, sourceX, sourceY, sourceWidth, sourceHeight, 0, 0, target.width, target.height);
+    return await new Promise<Blob>((resolve) => canvas.toBlob(
+      (value) => resolve(value ?? blob),
+      blob.type || "image/png",
+      blob.type === "image/jpeg" ? .95 : undefined,
+    ));
+  } finally {
+    bitmap.close();
+  }
 }
 
 function sessionAssetFromManaged(
@@ -787,14 +951,23 @@ export async function importGeneratedImage(
   source: string,
   name: string,
   origin: AssetOrigin,
+  output?: { resolution?: string; aspectRatio?: string },
 ): Promise<SessionAsset> {
   const id = crypto.randomUUID();
   if (isTauriRuntime() && /^(?:\/|[A-Za-z]:[\\/])/.test(source)) {
+    if (output?.resolution || output?.aspectRatio) {
+      await invoke("normalize_generated_image", {
+        path: source,
+        resolution: output.resolution ?? null,
+        aspectRatio: output.aspectRatio ?? null,
+      });
+    }
+    const mimeType = mediaMimeFromSource(source, "image/png");
     return {
       id,
-      name,
+      name: mediaNameForMime(name, mimeType),
       kind: "image",
-      mimeType: "image/png",
+      mimeType,
       origin,
       createdAt: new Date().toISOString(),
       localPath: source,
@@ -805,24 +978,26 @@ export async function importGeneratedImage(
   try {
     const response = await fetch(source);
     if (!response.ok) throw new Error("Could not cache generated image");
-    const blob = await response.blob();
+    const blob = await normalizeGeneratedImageBlob(await response.blob(), output);
     await storeAssetBlob(blobKey, blob);
+    const mimeType = blob.type || mediaMimeFromSource(source, "image/png");
     return {
       id,
-      name,
+      name: mediaNameForMime(name, mimeType),
       kind: "image",
-      mimeType: blob.type || "image/png",
+      mimeType,
       origin,
       createdAt: new Date().toISOString(),
       blobKey,
       byteSize: blob.size,
     };
   } catch {
+    const mimeType = mediaMimeFromSource(source, "image/png");
     return {
       id,
-      name,
+      name: mediaNameForMime(name, mimeType),
       kind: "image",
-      mimeType: "image/png",
+      mimeType,
       origin,
       createdAt: new Date().toISOString(),
       externalUrl: source,
@@ -838,11 +1013,12 @@ export async function importGeneratedVideo(
 ): Promise<SessionAsset> {
   const id = crypto.randomUUID();
   if (isTauriRuntime() && /^(?:\/|[A-Za-z]:[\\/])/.test(source)) {
+    const mimeType = mediaMimeFromSource(source, "video/mp4");
     return {
       id,
-      name,
+      name: mediaNameForMime(name, mimeType),
       kind: "video",
-      mimeType: "video/mp4",
+      mimeType,
       origin,
       createdAt: new Date().toISOString(),
       localPath: source,
@@ -856,11 +1032,12 @@ export async function importGeneratedVideo(
     if (!response.ok) throw new Error("Could not cache generated video");
     const blob = await response.blob();
     await storeAssetBlob(blobKey, blob);
+    const mimeType = blob.type || mediaMimeFromSource(source, "video/mp4");
     return {
       id,
-      name,
+      name: mediaNameForMime(name, mimeType),
       kind: "video",
-      mimeType: blob.type || "video/mp4",
+      mimeType,
       origin,
       createdAt: new Date().toISOString(),
       blobKey,
@@ -868,16 +1045,19 @@ export async function importGeneratedVideo(
       jobId,
     };
   } catch {
+    const mimeType = mediaMimeFromSource(source, "video/mp4");
     return {
       id,
-      name,
+      name: mediaNameForMime(name, mimeType),
       kind: "video",
-      mimeType: "video/mp4",
+      mimeType,
       origin,
       createdAt: new Date().toISOString(),
       externalUrl: source,
       jobId,
     };
+  } finally {
+    if (source.startsWith("blob:")) URL.revokeObjectURL(source);
   }
 }
 
@@ -953,13 +1133,6 @@ export async function assetRequestUrl(asset: SessionAsset): Promise<string> {
     return asset.externalUrl;
   }
   throw new Error(`${asset.name} has no readable source.`);
-}
-
-export async function extractPromptContextFrames(asset: SessionAsset): Promise<PromptContextFrame[]> {
-  if (!isTauriRuntime() || !asset.localPath || asset.kind !== "video") {
-    throw new Error(`${asset.name} requires a managed desktop video for visual prompt enhancement.`);
-  }
-  return invoke<PromptContextFrame[]>("extract_prompt_context_frames", { path: asset.localPath });
 }
 
 export function nextReferenceSlot(references: DraftReference[]): number {

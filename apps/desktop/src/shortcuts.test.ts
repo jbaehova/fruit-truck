@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { APP_COMMANDS, bindingMatches } from "./shortcuts.ts";
+import { APP_COMMANDS, NATIVE_MENU_COMMAND_IDS, bindingMatches, commandForKeyboardEvent } from "./shortcuts.ts";
 
 test("app shortcuts have unique ids and native accelerators", () => {
   assert.equal(new Set(APP_COMMANDS.map((command) => command.id)).size, APP_COMMANDS.length);
@@ -32,4 +32,19 @@ test("shifted bracket aliases match the physical bracket keys", () => {
     shiftKey: true,
   } as KeyboardEvent;
   assert.equal(bindingMatches(event, { key: "]", code: "BracketRight", meta: true, shift: true }), true);
+});
+
+test("thread cycling and inspector shortcuts stay in the WebView instead of native defaults", () => {
+  assert.equal(NATIVE_MENU_COMMAND_IDS.has("nextThread"), false);
+  assert.equal(NATIVE_MENU_COMMAND_IDS.has("previousThread"), false);
+  assert.equal(NATIVE_MENU_COMMAND_IDS.has("toggleInspector"), false);
+  const next = commandForKeyboardEvent({
+    key: "Tab",
+    code: "Tab",
+    metaKey: false,
+    ctrlKey: true,
+    altKey: false,
+    shiftKey: false,
+  } as KeyboardEvent);
+  assert.equal(next?.id, "nextThread");
 });

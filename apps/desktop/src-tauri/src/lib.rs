@@ -88,14 +88,6 @@ struct AssemblyResult {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct PromptContextFrame {
-  position: String,
-  timestamp_seconds: f64,
-  data_url: String,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
 struct SavedCustomSkill {
   name: String,
   version: u64,
@@ -302,7 +294,10 @@ fn import_media_file(source: &Path, root: &Path) -> Result<ManagedAssetFile, Str
     .ok_or("The selected file name is invalid.")?;
   let mut input = std::fs::File::open(&canonical).map_err(|error| error.to_string())?;
   let metadata = input.metadata().map_err(|error| error.to_string())?;
-  if metadata.len() == 0 || metadata.len() > MAX_VIDEO_BYTES {
+  if metadata.len() == 0 {
+    return Err("The selected media file is empty.".into());
+  }
+  if metadata.len() > MAX_VIDEO_BYTES {
     return Err("The selected media exceeds the local safety limit.".into());
   }
   let mut header = [0u8; 16];
@@ -532,6 +527,67 @@ fn read_managed_image_data_url(app: tauri::AppHandle, path: String) -> Result<St
   image_data_url_from_file(&source)
 }
 
+fn requested_image_dimensions(
+  width: u32,
+  height: u32,
+  resolution: Option<&str>,
+  aspect_ratio: Option<&str>,
+) -> Option<(u32, u32)> {
+  let resolution_value = resolution.unwrap_or("").trim().to_ascii_lowercase();
+  let long_side = match resolution_value.as_str() {
+    "1k" => 1024,
+    "2k" => 2048,
+    "4k" => 4096,
+    value => value.trim_end_matches("px").trim_end_matches('p').parse::<u32>().unwrap_or(0),
+  };
+  let ratio = aspect_ratio
+    .and_then(|value| value.split_once(':'))
+    .and_then(|(left, right)| Some((left.parse::<f64>().ok()?, right.parse::<f64>().ok()?)))
+    .filter(|(_, right)| *right > 0.0)
+    .map(|(left, right)| left / right)
+    .unwrap_or(width as f64 / height as f64);
+  let target_long_side = if long_side > 0 { long_side } else { width.max(height) };
+  if !ratio.is_finite() || ratio <= 0.0 || target_long_side == 0 {
+    return None;
+  }
+  let target = if ratio >= 1.0 {
+    (target_long_side, ((target_long_side as f64 / ratio).round() as u32).max(1))
+  } else {
+    (((target_long_side as f64 * ratio).round() as u32).max(1), target_long_side)
+  };
+  (target != (width, height)).then_some(target)
+}
+
+#[tauri::command]
+fn normalize_generated_image(
+  app: tauri::AppHandle,
+  path: String,
+  resolution: Option<String>,
+  aspect_ratio: Option<String>,
+) -> Result<(), String> {
+  let source = validate_managed_media_path(&app, Path::new(&path))?;
+  if !source.starts_with(generated_directory(&app)?) {
+    return Err("Only generated images may be normalized.".into());
+  }
+  let image = image::open(&source).map_err(|error| format!("Could not decode generated image: {error}"))?;
+  let Some((width, height)) = requested_image_dimensions(
+    image.width(),
+    image.height(),
+    resolution.as_deref(),
+    aspect_ratio.as_deref(),
+  ) else { return Ok(()) };
+  if width > 4096 || height > 4096 {
+    return Err("Requested image dimensions exceed the 4K local output limit.".into());
+  }
+  let format = image::ImageFormat::from_path(&source).map_err(|error| error.to_string())?;
+  let normalized = image.resize_to_fill(width, height, image::imageops::FilterType::Lanczos3);
+  let temporary = source.with_extension("normalize.tmp");
+  normalized.save_with_format(&temporary, format).map_err(|error| error.to_string())?;
+  set_private_file_permissions(&temporary)?;
+  std::fs::rename(&temporary, &source).map_err(|error| error.to_string())?;
+  Ok(())
+}
+
 struct AgentStoreLock(PathBuf);
 
 impl Drop for AgentStoreLock {
@@ -657,7 +713,7 @@ fn remove_api_key(app: tauri::AppHandle) -> Result<CredentialStatus, String> {
 fn read_agent_sessions_file(app: &tauri::AppHandle) -> Result<Value, String> {
   let path = agent_sessions_path(app)?;
   if !path.exists() {
-    return Ok(serde_json::json!({ "schemaVersion": 3, "revision": 0, "sessions": [] }));
+    return Ok(serde_json::json!({ "schemaVersion": 4, "revision": 0, "sessions": [] }));
   }
   let metadata = std::fs::metadata(&path).map_err(|error| error.to_string())?;
   if metadata.len() > 50 * 1024 * 1024 {
@@ -665,12 +721,12 @@ fn read_agent_sessions_file(app: &tauri::AppHandle) -> Result<Value, String> {
   }
   let raw = std::fs::read(&path).map_err(|error| error.to_string())?;
   let value: Value = serde_json::from_slice(&raw).map_err(|_| "The agent session bridge file is invalid JSON.")?;
-  if !matches!(value.get("schemaVersion").and_then(Value::as_u64), Some(1) | Some(2) | Some(3)) {
+  if !matches!(value.get("schemaVersion").and_then(Value::as_u64), Some(1) | Some(2) | Some(3) | Some(4)) {
     return Err("The agent session bridge file has an unsupported schema.".into());
   }
   if value.get("sessions").is_some_and(Value::is_array) {
     let mut value = value;
-    value["schemaVersion"] = Value::from(3);
+    value["schemaVersion"] = Value::from(4);
     return Ok(value);
   }
   let files = value.get("sessionFiles").and_then(Value::as_array).ok_or("The agent session bridge index has no session files.")?;
@@ -697,7 +753,7 @@ fn read_agent_sessions_file(app: &tauri::AppHandle) -> Result<Value, String> {
     sessions.push(session);
   }
   Ok(serde_json::json!({
-    "schemaVersion": 3,
+    "schemaVersion": 4,
     "revision": value.get("revision").and_then(Value::as_u64).unwrap_or(0),
     "sessions": sessions,
   }))
@@ -758,7 +814,7 @@ fn write_agent_sessions_file(app: &tauri::AppHandle, value: &Value) -> Result<()
     retained.insert(file.clone());
     session_files.push(serde_json::json!({ "id": id, "file": file }));
   }
-  let index = serde_json::json!({ "schemaVersion": 3, "revision": revision, "sessionFiles": session_files });
+  let index = serde_json::json!({ "schemaVersion": 4, "revision": revision, "sessionFiles": session_files });
   let bytes = serde_json::to_vec_pretty(&index).map_err(|error| error.to_string())?;
   if bytes.len() > 10 * 1024 * 1024 { return Err("The agent session index exceeds 10 MB.".into()); }
   let temporary = directory.join(format!(".agent-sessions-{}.tmp", std::process::id()));
@@ -1177,8 +1233,10 @@ fn hydrate_local_media_references(app: &tauri::AppHandle, value: &mut Value) -> 
       let bytes = std::fs::read(&path).map_err(|error| error.to_string())?;
       let name = path.file_name().and_then(|item| item.to_str()).unwrap_or("media.png");
       let (kind, mime_type, _) = inspect_media(&bytes[..bytes.len().min(16)], name)?;
-      let limit = if kind == "video" { MAX_VIDEO_BYTES } else { MAX_IMAGE_BYTES };
-      if bytes.len() as u64 > limit {
+      if kind == "video" {
+        return Err("Video generation inputs must be images.".into());
+      }
+      if bytes.len() as u64 > MAX_IMAGE_BYTES {
         return Err("A managed request asset exceeds the local safety limit.".into());
       }
       *source = format!(
@@ -1545,50 +1603,6 @@ async fn execute_media_command(command: ShellCommand) -> Result<MediaCommandOutp
   })
 }
 
-async fn execute_media_command_with_timeout(
-  command: ShellCommand,
-  timeout: std::time::Duration,
-  operation: &str,
-) -> Result<MediaCommandOutput, String> {
-  let (mut events, child) = command
-    .spawn()
-    .map_err(|error| format!("Could not launch bundled media tool: {error}"))?;
-  let mut stdout = Vec::new();
-  let mut stderr = Vec::new();
-  let mut exit_code = None;
-  let deadline = tokio::time::sleep(timeout);
-  tokio::pin!(deadline);
-  loop {
-    tokio::select! {
-      event = events.recv() => {
-        let Some(event) = event else { break };
-        match event {
-          CommandEvent::Stdout(bytes) => {
-            append_bounded(&mut stdout, &bytes);
-            append_bounded(&mut stdout, b"\n");
-          }
-          CommandEvent::Stderr(bytes) => {
-            append_bounded(&mut stderr, &bytes);
-            append_bounded(&mut stderr, b"\n");
-          }
-          CommandEvent::Error(error) => append_bounded(&mut stderr, error.as_bytes()),
-          CommandEvent::Terminated(payload) => exit_code = payload.code,
-          _ => {}
-        }
-      }
-      _ = &mut deadline => {
-        let _ = child.kill();
-        return Err(format!("{operation} timed out."));
-      }
-    }
-  }
-  Ok(MediaCommandOutput {
-    success: exit_code == Some(0),
-    stdout,
-    stderr,
-  })
-}
-
 fn parse_video_dimensions(value: &str) -> Result<(u32, u32), String> {
   let (width, height) = value
     .trim()
@@ -1627,119 +1641,6 @@ async fn video_dimensions(app: &tauri::AppHandle, path: &Path) -> Result<(u32, u
     });
   }
   parse_video_dimensions(&String::from_utf8_lossy(&output.stdout))
-}
-
-fn prompt_frame_timestamps(duration: f64) -> Result<[f64; 3], String> {
-  if !duration.is_finite() || duration <= 0.0 || duration > 21_600.0 {
-    return Err("The prompt context video has an invalid duration.".into());
-  }
-  Ok([duration * 0.05, duration * 0.5, duration * 0.95])
-}
-
-async fn video_duration(app: &tauri::AppHandle, path: &Path) -> Result<f64, String> {
-  let command = media_command(app, "ffprobe")?
-    .args([
-      "-v",
-      "error",
-      "-show_entries",
-      "format=duration",
-      "-of",
-      "default=noprint_wrappers=1:nokey=1",
-    ])
-    .arg(path);
-  let output = execute_media_command_with_timeout(
-    command,
-    std::time::Duration::from_secs(20),
-    "FFprobe prompt context inspection",
-  ).await?;
-  if !output.success {
-    let diagnostic = bounded_diagnostic(&output.stderr);
-    return Err(if diagnostic.is_empty() {
-      "FFprobe could not inspect the prompt context video.".into()
-    } else {
-      format!("FFprobe could not inspect the prompt context video: {diagnostic}")
-    });
-  }
-  let duration = String::from_utf8_lossy(&output.stdout)
-    .trim()
-    .parse::<f64>()
-    .map_err(|_| "FFprobe returned an invalid prompt context duration.".to_string())?;
-  prompt_frame_timestamps(duration)?;
-  Ok(duration)
-}
-
-#[tauri::command]
-async fn extract_prompt_context_frames(
-  app: tauri::AppHandle,
-  path: String,
-) -> Result<Vec<PromptContextFrame>, String> {
-  let source = validate_managed_media_path(&app, Path::new(&path))?;
-  let bytes = std::fs::metadata(&source).map_err(|error| error.to_string())?.len();
-  if bytes == 0 || bytes > MAX_VIDEO_BYTES {
-    return Err("The prompt context video exceeds the local safety limit.".into());
-  }
-  let duration = video_duration(&app, &source).await?;
-  let timestamps = prompt_frame_timestamps(duration)?;
-  let positions = ["beginning", "middle", "end"];
-  let cache = app.path().app_cache_dir().map_err(|error| error.to_string())?;
-  std::fs::create_dir_all(&cache).map_err(|error| error.to_string())?;
-  let stamp = std::time::SystemTime::now()
-    .duration_since(std::time::UNIX_EPOCH)
-    .map_err(|error| error.to_string())?
-    .as_millis();
-  let sequence = MEDIA_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-  let work = cache.join(format!("prompt-frames-{}-{stamp}-{sequence}", std::process::id()));
-  std::fs::create_dir_all(&work).map_err(|error| error.to_string())?;
-
-  let result = async {
-    let mut frames = Vec::with_capacity(3);
-    for (index, timestamp) in timestamps.into_iter().enumerate() {
-      let output_path = work.join(format!("frame-{index}.jpg"));
-      let timestamp_arg = format!("{timestamp:.3}");
-      let command = media_command(&app, "ffmpeg")?
-        .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-ss", &timestamp_arg])
-        .arg("-i")
-        .arg(&source)
-        .args([
-          "-frames:v",
-          "1",
-          "-vf",
-          "scale=w='min(1280,iw)':h='min(1280,ih)':force_original_aspect_ratio=decrease",
-          "-q:v",
-          "3",
-        ])
-        .arg(&output_path);
-      let rendered = execute_media_command_with_timeout(
-        command,
-        std::time::Duration::from_secs(60),
-        "FFmpeg prompt frame extraction",
-      ).await?;
-      if !rendered.success {
-        let diagnostic = bounded_diagnostic(&rendered.stderr);
-        return Err(if diagnostic.is_empty() {
-          "FFmpeg could not extract prompt context frames.".into()
-        } else {
-          format!("FFmpeg could not extract prompt context frames: {diagnostic}")
-        });
-      }
-      let frame_bytes = std::fs::read(&output_path).map_err(|error| error.to_string())?;
-      if frame_bytes.is_empty() || frame_bytes.len() as u64 > MAX_IMAGE_BYTES {
-        return Err("A prompt context frame exceeds the local safety limit.".into());
-      }
-      frames.push(PromptContextFrame {
-        position: positions[index].into(),
-        timestamp_seconds: timestamp,
-        data_url: format!(
-          "data:image/jpeg;base64,{}",
-          base64::engine::general_purpose::STANDARD.encode(frame_bytes),
-        ),
-      });
-    }
-    Ok(frames)
-  }
-  .await;
-  let _ = std::fs::remove_dir_all(&work);
-  result
 }
 
 fn target_video_bitrate(width: u32, height: u32) -> u64 {
@@ -1909,6 +1810,7 @@ pub fn run() {
   let app = tauri::Builder::default()
     .enable_macos_default_menu(false)
     .plugin(tauri_plugin_dialog::init())
+    .plugin(tauri_plugin_opener::init())
     .plugin(tauri_plugin_process::init())
     .plugin(tauri_plugin_shell::init())
     .plugin(tauri_plugin_updater::Builder::new().build())
@@ -1952,7 +1854,7 @@ pub fn run() {
       delete_managed_asset,
       export_managed_asset,
       read_managed_image_data_url,
-      extract_prompt_context_frames,
+      normalize_generated_image,
       assemble_video,
       read_agent_sessions,
       wait_for_agent_sessions,
@@ -1999,7 +1901,6 @@ mod tests {
     list_custom_skills_from_root,
     mask_key,
     parse_video_dimensions,
-    prompt_frame_timestamps,
     read_custom_skill_from_root,
     save_custom_skill_to_root,
     target_video_bitrate,
@@ -2008,6 +1909,7 @@ mod tests {
     unique_export_path,
     import_media_file,
     image_data_url_from_file,
+    requested_image_dimensions,
     append_shared_asset_chunk_to_root,
     finish_shared_asset_to_root,
     openrouter_url,
@@ -2017,6 +1919,13 @@ mod tests {
     validate_remote_image_url,
     write_assembly_source,
   };
+
+  #[test]
+  fn generated_image_dimensions_follow_resolution_and_aspect_ratio() {
+    assert_eq!(requested_image_dimensions(592, 448, Some("512"), Some("4:3")), Some((512, 384)));
+    assert_eq!(requested_image_dimensions(448, 592, Some("1K"), Some("3:4")), Some((768, 1024)));
+    assert_eq!(requested_image_dimensions(512, 384, Some("512"), Some("4:3")), None);
+  }
 
   #[test]
   fn update_restarts_bypass_interactive_quit_confirmation() {
@@ -2078,14 +1987,6 @@ mod tests {
     assert!(parse_video_dimensions("1x1080").is_err());
     assert!(parse_video_dimensions("9000x1080").is_err());
     assert!(parse_video_dimensions("not-a-size").is_err());
-  }
-
-  #[test]
-  fn prompt_context_frames_sample_beginning_middle_and_end() {
-    assert_eq!(prompt_frame_timestamps(20.0).unwrap(), [1.0, 10.0, 19.0]);
-    assert!(prompt_frame_timestamps(0.0).is_err());
-    assert!(prompt_frame_timestamps(f64::NAN).is_err());
-    assert!(prompt_frame_timestamps(21_601.0).is_err());
   }
 
   #[test]

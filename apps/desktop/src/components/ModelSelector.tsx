@@ -1,19 +1,22 @@
 import { Field } from "@base-ui/react/field";
 import { Popover } from "@base-ui/react/popover";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useMemo, useState } from "react";
-import { Check, ChevronDown, ImageIcon, Search, Video } from "lucide-react";
+import { Check, ChevronDown, ExternalLink, ImageIcon, Search, Video } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useI18n } from "@/i18n";
-import { modelInputSignature, modelPriceLabel, type GenerationMode, type GenerationModel } from "@/openrouter";
+import { isTauriRuntime, modelInputSignature, modelPriceLabel, type GenerationMode, type GenerationModel } from "@/openrouter";
+
+const OPENROUTER_MODELS_URL = "https://openrouter.ai/models";
+const MODEL_LIST_MAX_HEIGHT = 360;
 
 type Props = {
   mode: GenerationMode;
   models: GenerationModel[];
   selectedId: string;
   loading: boolean;
-  catalogCount?: number;
   disabled?: boolean;
   onSelect: (id: string) => void;
   inherited?: boolean;
@@ -36,11 +39,10 @@ function localizedInputSignature(mode: GenerationMode, model: GenerationModel, l
     .replace("first frame", t("inputFirstFrame"))
     .replace("last frame", t("inputLastFrame"))
     .replace("Text", t("inputText"))
-    .replaceAll("image", t("inputImage"))
-    .replaceAll("video", t("inputVideo"));
+    .replaceAll("image", t("inputImage"));
 }
 
-export function ModelSelector({ mode, models, selectedId, loading, catalogCount, disabled, onSelect, inherited, onUseDefault, onSetDefault }: Props) {
+export function ModelSelector({ mode, models, selectedId, loading, disabled, onSelect, inherited, onUseDefault, onSetDefault }: Props) {
   const { language, t } = useI18n();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -54,7 +56,7 @@ export function ModelSelector({ mode, models, selectedId, loading, catalogCount,
     if (!value) return models;
     return models.filter((model) => `${model.name} ${model.id}`.toLowerCase().includes(value));
   }, [models, query]);
-  const listHeight = Math.min(410, Math.max(74, (loading ? 6 : Math.max(filtered.length, 1)) * 52 + 10));
+  const listHeight = Math.min(MODEL_LIST_MAX_HEIGHT, Math.max(74, (loading ? 6 : Math.max(filtered.length, 1)) * 52 + 10));
 
   useEffect(() => {
     setQuery("");
@@ -84,10 +86,21 @@ export function ModelSelector({ mode, models, selectedId, loading, catalogCount,
                 <strong>{t("chooseModel")}</strong>
                 <small>{loading
                   ? t("loadingModels")
-                  : catalogCount != null && catalogCount > models.length
-                    ? t("filteredVideoModels", { shown: models.length, total: catalogCount })
-                    : t("availableModels", { count: models.length })}</small>
+                  : t("availableModels", { count: models.length })}</small>
               </div>
+              <a
+                href={OPENROUTER_MODELS_URL}
+                target="_blank"
+                rel="noreferrer"
+                onClick={(event) => {
+                  if (!isTauriRuntime()) return;
+                  event.preventDefault();
+                  void openUrl(OPENROUTER_MODELS_URL);
+                }}
+              >
+                {t("browsePricing")}
+                <ExternalLink aria-hidden="true" />
+              </a>
             </header>
             <div className="model-default-actions">
               <Button type="button" size="xs" variant={inherited ? "outline" : "ghost"} disabled={inherited} onClick={() => onUseDefault?.()}>{t("useModeDefault")}</Button>

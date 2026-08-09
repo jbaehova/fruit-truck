@@ -5,8 +5,10 @@ import { useState } from "react";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
+import { Textarea } from "@/components/ui/textarea";
 import { useI18n, type MessageKey } from "@/i18n";
 import type { DraftOptions, GenerationMode, GenerationModel, ImageModel, VideoModel } from "@/openrouter";
+import { normalizeRangeValue } from "@/optionValues";
 
 type Props = {
   mode: GenerationMode;
@@ -49,7 +51,7 @@ function EnumField({ name, values, value, onChange }: { name: string; values: Ar
   );
 }
 
-export function OptionsFields({ mode, model, options, onOptionsChange }: Props) {
+export function OptionsFields({ mode, model, options, providerJson, providerError, onOptionsChange, onProviderJsonChange }: Props) {
   const { t } = useI18n();
   const [advanced, setAdvanced] = useState(false);
   if (!model) return null;
@@ -68,7 +70,16 @@ export function OptionsFields({ mode, model, options, onOptionsChange }: Props) 
         const field = (
           <Field.Root className="option-field" key={name}>
             <Field.Label>{LABEL_KEYS[name] ? t(LABEL_KEYS[name]) : name.replaceAll("_", " ")}</Field.Label>
-            <Input type="number" min={descriptor.min} max={descriptor.max} value={Number(options[name] ?? descriptor.min ?? 0)} onChange={(event) => patch(name, Number(event.target.value))} />
+            <Input
+              type="number"
+              min={descriptor.min}
+              max={descriptor.max}
+              value={options[name] == null ? "" : Number(options[name])}
+              onChange={(event) => onOptionsChange({
+                ...options,
+                [name]: normalizeRangeValue(event.target.value, descriptor.min, descriptor.max),
+              })}
+            />
           </Field.Root>
         );
         (name === "n" ? basic : advancedFields).push(field);
@@ -99,18 +110,28 @@ export function OptionsFields({ mode, model, options, onOptionsChange }: Props) 
     <div className="options-section">
       <div className="section-label-row"><span className="section-label">{t("outputOptions")}</span><small>{t("supportedFieldsOnly")}</small></div>
       {basic.length ? <div className="options-grid">{basic}</div> : <p className="empty-options">{t("noOutputControls")}</p>}
-      {advancedFields.length ? (
-        <Collapsible.Root open={advanced} onOpenChange={setAdvanced}>
+      <Collapsible.Root open={advanced} onOpenChange={setAdvanced}>
           <Collapsible.Trigger className={`advanced-toggle ${advanced ? "open" : ""}`}>
             <span><SlidersHorizontal /> {t("advanced")}</span><ChevronDown />
           </Collapsible.Trigger>
           <Collapsible.Panel className="advanced-panel">
             <div className="advanced-content">
-              <div className="options-grid">{advancedFields}</div>
+              {advancedFields.length ? <div className="options-grid">{advancedFields}</div> : null}
+              <Field.Root className="provider-options-field" invalid={Boolean(providerError)}>
+                <Field.Label>{t("providerOptions")}</Field.Label>
+                <Textarea
+                  aria-label={t("providerOptions")}
+                  spellCheck={false}
+                  value={providerJson}
+                  placeholder='{"order":["provider-slug"]}'
+                  onChange={(event) => onProviderJsonChange(event.target.value)}
+                />
+                <Field.Description>{t("providerOptionsHint")}</Field.Description>
+                {providerError ? <Field.Error className="field-error" match>{providerError}</Field.Error> : null}
+              </Field.Root>
             </div>
           </Collapsible.Panel>
-        </Collapsible.Root>
-      ) : null}
+      </Collapsible.Root>
     </div>
   );
 }

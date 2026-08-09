@@ -36,7 +36,7 @@ export function RequestPreviewDialog({
                   <strong>{t("inputMapping")}</strong>
                   {references.map((reference) => (
                     <span key={reference.id}>
-                      <b>#{reference.slot}</b>
+                      <b>@{reference.slot}</b>
                       <span>{reference.name}</span>
                       <code>→ {reference.role === "first_frame" || reference.role === "last_frame" ? `frame_images.${reference.role}` : "input_references"}</code>
                     </span>

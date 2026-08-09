@@ -158,12 +158,17 @@ export function composeEditPrompt({
     sections.push(
       "",
       "[MASK SEMANTICS]",
-      `Transparent pixels in ${target} are a coarse semantic selection cue, not a shape to reproduce. Infer the intended existing subject or part, preserve its anatomy, geometry, texture, lighting, and depth, and change only the requested attribute. Expand, contract, or softly blend the selection to nearby natural subject boundaries when needed. Never create a new object that follows the brush-stroke silhouette. Preserve unrelated content outside the selected subject as closely as possible.`,
+      `Transparent pixels in ${target} are a coarse semantic selection cue, not a shape to reproduce. Infer the intended existing subject or part, preserve its anatomy, geometry, texture, lighting, and depth, and change only the requested attribute. Expand, contract, or softly blend only along the selected subject's own natural boundary when needed; do not absorb or regenerate adjacent or overlapping people, hands, fingers, limbs, or held-contact geometry unless the user explicitly requests it. Never create a new object that follows the brush-stroke silhouette. Preserve unrelated content outside the selected subject as closely as possible.`,
       "",
       "[MASK INSTRUCTIONS]",
       maskInstructions.trim() || "Apply the user prompt inside the selected region.",
     );
   }
   if (prompt.trim()) sections.push("", "[USER PROMPT]", prompt.trim());
+  if (hasMask) sections.push(
+    "",
+    "[PRESERVATION PRIORITY]",
+    "For every hand or limb touching, holding, crossing, or occluding the selected subject, preserve the exact pose, finger count and placement, grasp angle, contact points, overlap, and occlusion. Do not invent new grip or contact geometry. These preservation rules override any unrequested elaboration in the user or enhanced prompt.",
+  );
   return sections.join("\n");
 }

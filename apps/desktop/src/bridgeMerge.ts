@@ -1,3 +1,5 @@
+import { totalActualCostUsd, type ActualCostEntry } from "./agent.ts";
+
 type RevisionedBridgeSession = {
   id: string;
   updatedAt: string;
@@ -84,6 +86,48 @@ function mergeValue(base: unknown, local: unknown, remote: unknown): unknown {
   return remote;
 }
 
+function recordId(value: unknown): string | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const id = (value as Record<string, unknown>).id;
+  return typeof id === "string" ? id : undefined;
+}
+
+function recordedAtMillis(value: unknown): number | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const recordedAt = (value as Record<string, unknown>).recordedAt;
+  if (typeof recordedAt !== "string") return undefined;
+  const millis = Date.parse(recordedAt);
+  return Number.isFinite(millis) ? millis : undefined;
+}
+
+function resolveCostLedgerConflicts(merged: unknown[], local: unknown[], remote: unknown[]) {
+  const localById = new Map(local.flatMap((entry) => {
+    const id = recordId(entry);
+    return id ? [[id, entry] as const] : [];
+  }));
+  const remoteById = new Map(remote.flatMap((entry) => {
+    const id = recordId(entry);
+    return id ? [[id, entry] as const] : [];
+  }));
+  return merged.map((entry) => {
+    const id = recordId(entry);
+    const localEntry = id ? localById.get(id) : undefined;
+    const remoteEntry = id ? remoteById.get(id) : undefined;
+    if (!localEntry || !remoteEntry || equal(localEntry, remoteEntry)) return entry;
+    const localMillis = recordedAtMillis(localEntry);
+    const remoteMillis = recordedAtMillis(remoteEntry);
+    if (localMillis == null || remoteMillis == null || localMillis === remoteMillis) return entry;
+    return localMillis > remoteMillis ? localEntry : remoteEntry;
+  });
+}
+
+function executionCostLedger(session: RevisionedBridgeSession): unknown[] | undefined {
+  const execution = session.agent.execution;
+  if (!execution || typeof execution !== "object" || Array.isArray(execution)) return undefined;
+  const ledger = (execution as Record<string, unknown>).costLedger;
+  return Array.isArray(ledger) ? ledger : undefined;
+}
+
 export function mergeBridgeSession<T extends RevisionedBridgeSession>(
   base: T,
   local: T,
@@ -91,11 +135,28 @@ export function mergeBridgeSession<T extends RevisionedBridgeSession>(
 ): T {
   const merged = mergeValue(base, local, remote) as T;
   const updatedAt = new Date().toISOString();
+  const execution = merged.agent.execution;
+  const costLedger = execution && typeof execution === "object" && !Array.isArray(execution)
+    ? (execution as Record<string, unknown>).costLedger
+    : undefined;
+  const resolvedCostLedger = Array.isArray(costLedger)
+    ? resolveCostLedgerConflicts(costLedger, executionCostLedger(local) ?? [], executionCostLedger(remote) ?? [])
+    : undefined;
+  const normalizedExecution = resolvedCostLedger ? {
+    ...(execution as Record<string, unknown>),
+    costLedger: resolvedCostLedger,
+    spentUsd: totalActualCostUsd(resolvedCostLedger.flatMap((entry) => {
+      if (!entry || typeof entry !== "object") return [];
+      const cost = (entry as Record<string, unknown>).actualCostUsd;
+      return typeof cost === "number" && Number.isFinite(cost) && cost >= 0 ? [entry as ActualCostEntry] : [];
+    })),
+  } : execution;
   return {
     ...merged,
     updatedAt,
     agent: {
       ...merged.agent,
+      ...(normalizedExecution ? { execution: normalizedExecution } : {}),
       revision: remote.agent.revision + 1,
       updatedAt,
     },

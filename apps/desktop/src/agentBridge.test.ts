@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   materializeAgentSession,
+  recoverAgentBridgeEnvelope,
   recoverBridgeGenerationState,
   serializeAgentSessionForBridge,
   validBridgeSession,
@@ -80,6 +81,102 @@ test("validBridgeSession rejects duplicate and malformed thread state", () => {
   const malformedDraft = structuredClone(validBridge);
   (malformedDraft.threads.image[0] as { draft?: unknown }).draft = null;
   assert.equal(validBridgeSession(malformedDraft), false);
+});
+
+test("bridge recovery drops legacy video edit state and retains its media asset", () => {
+  const session = createSession("Legacy bridge cleanup");
+  const generated = session.threads.video[0];
+  generated.draft.prompt = "Generate a fresh shot";
+  session.assets.push({
+    id: "legacy-source",
+    name: "source.mp4",
+    kind: "video",
+    mimeType: "video/mp4",
+    origin: "generated",
+    createdAt: new Date().toISOString(),
+    localPath: "/Users/test/.fruit-truck/generated/source.mp4",
+  });
+  const edit = {
+    ...structuredClone(generated),
+    id: "legacy-edit",
+    videoWorkflow: "edit" as const,
+    draft: {
+      ...structuredClone(generated.draft),
+      references: [{ assetId: "legacy-source", slot: 1, role: "video_reference" }],
+    },
+  };
+  const bridge = {
+    id: session.id,
+    name: session.name,
+    createdAt: session.createdAt,
+    updatedAt: session.updatedAt,
+    mode: "video" as const,
+    generationDefaults: {
+      modelIds: { image: "", video: "legacy/video" },
+      options: { image: {}, videoGenerate: { duration: 6 }, videoEdit: { duration: 10 } },
+      providerJson: { image: "", videoGenerate: "{\"mode\":\"generate\"}", videoEdit: "" },
+    },
+    threads: { image: session.threads.image, video: [generated, edit] },
+    activeThreadIds: { image: session.activeThreadIds.image, video: edit.id },
+    assets: session.assets,
+    agent: session.agent,
+  } as unknown as AgentBridgeSession;
+
+  const recovered = recoverBridgeGenerationState(bridge);
+  assert.deepEqual(recovered.threads?.video.map((thread) => thread.id), [generated.id]);
+  assert.equal(recovered.activeThreadIds?.video, generated.id);
+  assert.equal(recovered.assets?.some((asset) => asset.id === "legacy-source"), true);
+  assert.deepEqual(recovered.generationDefaults?.options.video, { duration: 6 });
+  assert.doesNotMatch(JSON.stringify(recovered), /videoWorkflow|video_reference|videoEdit/);
+});
+
+test("bridge recovery removes a submitted legacy video edit attempt and its job", () => {
+  const session = createSession("Legacy bridge in-flight edit");
+  const edit = {
+    ...structuredClone(session.threads.video[0]),
+    id: "legacy-edit-in-flight",
+    videoWorkflow: "edit" as const,
+    attempts: [{
+      id: "legacy-edit-attempt",
+      status: "in_progress" as const,
+      backend: "openrouter" as const,
+      draftRevision: 0,
+      requestedBy: "agent" as const,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      submittedAt: new Date().toISOString(),
+      modelId: "legacy/video",
+      request: { model: "legacy/video" },
+      inputAssetIds: [],
+      assetIds: [],
+      jobId: "legacy-edit-job",
+      pollAttempts: 4,
+    }],
+  };
+  const bridge = {
+    id: session.id,
+    name: session.name,
+    createdAt: session.createdAt,
+    updatedAt: session.updatedAt,
+    mode: "video" as const,
+    generationDefaults: session.generationDefaults,
+    threads: { image: session.threads.image, video: [edit] },
+    activeThreadIds: { image: session.activeThreadIds.image, video: edit.id },
+    assets: [],
+    agent: {
+      ...session.agent,
+      execution: { ...session.agent.execution, currentJobIds: ["legacy-edit-job", "generate-job"] },
+    },
+  } as unknown as AgentBridgeSession;
+
+  const recovered = recoverBridgeGenerationState(bridge);
+  assert.notEqual(recovered.threads?.video[0].id, edit.id);
+  assert.deepEqual(recovered.threads?.video[0].attempts, []);
+  assert.deepEqual(recovered.agent.execution.currentJobIds, ["generate-job"]);
+  assert.doesNotMatch(JSON.stringify(recovered), /videoWorkflow|video_reference|videoEdit/);
+
+  const envelope = recoverAgentBridgeEnvelope({ schemaVersion: 4, revision: 7, sessions: [bridge] });
+  assert.deepEqual(envelope.migrationSessionIds, [bridge.id]);
 });
 
 test("serializeAgentSessionForBridge preserves in-progress video attempt polling metadata without legacy jobs", async () => {

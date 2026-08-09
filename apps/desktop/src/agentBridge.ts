@@ -25,10 +25,26 @@ export type AgentBridgeSession = {
 };
 
 export type AgentBridgeEnvelope = {
-  schemaVersion: 1 | 2 | 3;
+  schemaVersion: 1 | 2 | 3 | 4;
   revision: number;
   sessions: AgentBridgeSession[];
+  migrationSessionIds?: string[];
 };
+
+function stableBridgeValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stableBridgeValue);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+      .filter(([, item]) => item !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => [key, stableBridgeValue(item)]));
+  }
+  return value;
+}
+
+function bridgeValuesEqual(left: unknown, right: unknown) {
+  return JSON.stringify(stableBridgeValue(left)) === JSON.stringify(stableBridgeValue(right));
+}
 
 export function validBridgeSession(value: unknown): value is AgentBridgeSession {
   if (!value || typeof value !== "object") return false;
@@ -39,7 +55,7 @@ export function validBridgeSession(value: unknown): value is AgentBridgeSession 
     || typeof item.createdAt !== "string"
     || typeof item.updatedAt !== "string"
     || !item.agent
-    || (item.agent.schemaVersion !== 1 && item.agent.schemaVersion !== 2 && item.agent.schemaVersion !== 3)) {
+    || (item.agent.schemaVersion !== 1 && item.agent.schemaVersion !== 2 && item.agent.schemaVersion !== 3 && item.agent.schemaVersion !== 4)) {
     return false;
   }
   const agent = normalizeAgentState(item.agent);
@@ -48,19 +64,40 @@ export function validBridgeSession(value: unknown): value is AgentBridgeSession 
 }
 
 export function recoverBridgeGenerationState(value: AgentBridgeSession): AgentBridgeSession {
+  type LegacyWorkflow = "generate" | "edit";
+  type LegacyThread = GenerationThread & { videoWorkflow?: LegacyWorkflow; videoWorkflowStates?: unknown };
+  type LegacyDefaults = GenerationDefaults & {
+    options: GenerationDefaults["options"] & { videoGenerate?: GenerationDefaults["options"]["video"]; videoEdit?: GenerationDefaults["options"]["video"] };
+    providerJson: GenerationDefaults["providerJson"] & { videoGenerate?: string; videoEdit?: string };
+  };
+  type LegacyJob = { jobId?: string; workflow?: LegacyWorkflow; threadId?: string };
+  const legacyValue = value as AgentBridgeSession & Partial<{
+    videoWorkflow: LegacyWorkflow;
+    drafts: unknown;
+    activeVideoJobs: LegacyJob[];
+    jobs: LegacyJob[];
+  }>;
   const base = createSession(value.name || "Recovered agent session");
   const assets = Array.isArray(value.assets) ? value.assets : [];
   const assetIds = new Set(assets.map((asset) => asset.id));
   const attemptStatuses = new Set(["queued", "enhancing", "awaiting_host", "submitting", "in_progress", "completed", "failed", "uncertain", "canceled"]);
+  const legacyEditJobIds = new Set<string>();
   const recoverThreads = (mode: GenerationMode): GenerationThread[] => {
-    const source = Array.isArray(value.threads?.[mode]) ? value.threads[mode] : [];
+    const source = (Array.isArray(value.threads?.[mode]) ? value.threads[mode] : []) as LegacyThread[];
     const recovered = source.flatMap((candidate, index) => {
       if (!candidate || typeof candidate !== "object" || typeof candidate.id !== "string") return [];
+      if (mode === "video" && candidate.videoWorkflow === "edit") {
+        for (const attempt of candidate.attempts ?? []) {
+          if (attempt.jobId) legacyEditJobIds.add(attempt.jobId);
+        }
+        return [];
+      }
       const fallback = base.threads[mode][0];
       const draft = candidate.draft && typeof candidate.draft === "object" ? candidate.draft : fallback.draft;
+      const { videoWorkflow: _workflow, videoWorkflowStates: _workflowStates, ...canonical } = candidate;
       return [{
         ...fallback,
-        ...candidate,
+        ...canonical,
         mode,
         name: typeof candidate.name === "string" && candidate.name.trim() ? candidate.name : `${mode === "image" ? "Image" : "Video"} ${index + 1}`,
         revision: Number.isInteger(candidate.revision) && candidate.revision >= 0 ? candidate.revision : 0,
@@ -68,12 +105,33 @@ export function recoverBridgeGenerationState(value: AgentBridgeSession): AgentBr
         draft: {
           ...fallback.draft,
           ...draft,
-          references: Array.isArray(draft.references) ? draft.references.filter((reference) => reference && assetIds.has(reference.assetId)) : [],
+          references: Array.isArray(draft.references) ? draft.references.filter((reference) =>
+            reference && assetIds.has(reference.assetId) && (reference.role as string) !== "video_reference"
+          ) : [],
         },
         attempts: Array.isArray(candidate.attempts) ? candidate.attempts.flatMap((attempt) => {
           if (!attempt || typeof attempt !== "object" || typeof attempt.id !== "string") return [];
+          const legacySnapshot = attempt.snapshot as (NonNullable<typeof attempt.snapshot> & { videoWorkflow?: LegacyWorkflow }) | undefined;
+          const legacyEditAttempt = mode === "video" && (candidate.videoWorkflow === "edit"
+            || legacySnapshot?.videoWorkflow === "edit"
+            || legacySnapshot?.assetBindings?.some((binding) => (binding.role as string) === "video_reference"));
+          if (legacyEditAttempt) {
+            if (attempt.jobId) legacyEditJobIds.add(attempt.jobId);
+            return [];
+          }
           const status = attemptStatuses.has(attempt.status) ? attempt.status : "uncertain";
           const request = attempt.request && !/data:(?:image|video)\/|;base64,/i.test(JSON.stringify(attempt.request)) ? attempt.request : undefined;
+          const snapshot = legacySnapshot && Array.isArray(legacySnapshot.assetBindings)
+            ? (() => {
+              const { videoWorkflow: _snapshotWorkflow, ...canonicalSnapshot } = legacySnapshot;
+              return {
+                ...canonicalSnapshot,
+                assetBindings: canonicalSnapshot.assetBindings.filter((binding) =>
+                  assetIds.has(binding.assetId) && (binding.role as string) !== "video_reference"
+                ),
+              };
+            })()
+            : undefined;
           return [{
             ...attempt,
             status,
@@ -81,9 +139,7 @@ export function recoverBridgeGenerationState(value: AgentBridgeSession): AgentBr
             error: status === "uncertain" && !attemptStatuses.has(attempt.status) ? "Recovered an unsupported attempt status; review before retrying." : attempt.error,
             inputAssetIds: Array.isArray(attempt.inputAssetIds) ? attempt.inputAssetIds.filter((id) => assetIds.has(id)) : [],
             assetIds: Array.isArray(attempt.assetIds) ? attempt.assetIds.filter((id) => assetIds.has(id)) : [],
-            snapshot: attempt.snapshot && Array.isArray(attempt.snapshot.assetBindings)
-              ? { ...attempt.snapshot, assetBindings: attempt.snapshot.assetBindings.filter((binding) => assetIds.has(binding.assetId)) }
-              : undefined,
+            snapshot,
           }];
         }) : [],
         enhancementAttempts: Array.isArray(candidate.enhancementAttempts) ? candidate.enhancementAttempts : [],
@@ -91,17 +147,41 @@ export function recoverBridgeGenerationState(value: AgentBridgeSession): AgentBr
     });
     return recovered.length ? recovered : base.threads[mode];
   };
+  const legacyEditThreadIds = new Set(((value.threads?.video ?? []) as LegacyThread[])
+    .filter((thread) => thread.videoWorkflow === "edit")
+    .map((thread) => thread.id));
+  for (const job of [...(legacyValue.activeVideoJobs ?? []), ...(legacyValue.jobs ?? [])]) {
+    const legacyEditJob = job.workflow === "edit" || (job.threadId ? legacyEditThreadIds.has(job.threadId) : false);
+    if (legacyEditJob && job.jobId) legacyEditJobIds.add(job.jobId);
+  }
   const threads = { image: recoverThreads("image"), video: recoverThreads("video") };
-  const generationDefaults = value.generationDefaults && typeof value.generationDefaults === "object"
+  const agent = normalizeAgentState(value.agent);
+  agent.execution.currentJobIds = agent.execution.currentJobIds.filter((jobId) => !legacyEditJobIds.has(jobId));
+  const legacyDefaults = value.generationDefaults as LegacyDefaults | undefined;
+  const generationDefaults = legacyDefaults && typeof legacyDefaults === "object"
     ? {
-      modelIds: { ...base.generationDefaults.modelIds, ...value.generationDefaults.modelIds },
-      options: { ...base.generationDefaults.options, ...value.generationDefaults.options },
-      providerJson: { ...base.generationDefaults.providerJson, ...value.generationDefaults.providerJson },
+      modelIds: { ...base.generationDefaults.modelIds, ...legacyDefaults.modelIds },
+      options: {
+        image: legacyDefaults.options?.image ?? base.generationDefaults.options.image,
+        video: legacyDefaults.options?.video ?? legacyDefaults.options?.videoGenerate ?? base.generationDefaults.options.video,
+      },
+      providerJson: {
+        image: legacyDefaults.providerJson?.image ?? base.generationDefaults.providerJson.image,
+        video: legacyDefaults.providerJson?.video ?? legacyDefaults.providerJson?.videoGenerate ?? base.generationDefaults.providerJson.video,
+      },
     }
     : base.generationDefaults;
+  const {
+    videoWorkflow: _sessionWorkflow,
+    drafts: _drafts,
+    activeVideoJobs: _activeVideoJobs,
+    jobs: _jobs,
+    ...canonicalValue
+  } = legacyValue;
   return {
-    ...value,
+    ...canonicalValue,
     assets,
+    agent,
     generationDefaults,
     threads,
     activeThreadIds: {
@@ -109,6 +189,25 @@ export function recoverBridgeGenerationState(value: AgentBridgeSession): AgentBr
       video: threads.video.some((thread) => thread.id === value.activeThreadIds?.video) ? value.activeThreadIds!.video : threads.video[0].id,
     },
   };
+}
+
+export function recoverAgentBridgeEnvelope(value: AgentBridgeEnvelope): AgentBridgeEnvelope {
+  if ((value?.schemaVersion !== 1 && value?.schemaVersion !== 2 && value?.schemaVersion !== 3 && value?.schemaVersion !== 4) || !Array.isArray(value.sessions)) {
+    throw new Error("The external agent bridge returned an unsupported schema.");
+  }
+  const sessions = value.sessions.map(recoverBridgeGenerationState);
+  const migrationSessionIds = sessions.flatMap((session, index) =>
+    bridgeValuesEqual(value.sessions[index], session) ? [] : [session.id]
+  );
+  const recovered = {
+    ...value,
+    sessions,
+    ...(migrationSessionIds.length ? { migrationSessionIds } : {}),
+  };
+  const invalid = (recovered.sessions as unknown[]).find((session) => !validBridgeSession(session));
+  const invalidId = invalid && typeof invalid === "object" && "id" in invalid && typeof invalid.id === "string" ? invalid.id : "unknown";
+  if (invalid) throw new Error(`The external agent bridge contains a malformed session (${invalidId}). Its data was left untouched for recovery.`);
+  return recovered;
 }
 
 function validSessionAssetReferences(session: Pick<AgentBridgeSession, "assets" | "agent" | "threads">) {
@@ -180,14 +279,7 @@ function validSessionAssetReferences(session: Pick<AgentBridgeSession, "assets" 
 
 export async function readAgentBridge(): Promise<AgentBridgeEnvelope> {
   const value = await invoke<AgentBridgeEnvelope>("read_agent_sessions");
-  if ((value?.schemaVersion !== 1 && value?.schemaVersion !== 2 && value?.schemaVersion !== 3) || !Array.isArray(value.sessions)) {
-    throw new Error("The external agent bridge returned an unsupported schema.");
-  }
-  const recovered = { ...value, sessions: value.sessions.map(recoverBridgeGenerationState) };
-  const invalid = (recovered.sessions as unknown[]).find((session) => !validBridgeSession(session));
-  const invalidId = invalid && typeof invalid === "object" && "id" in invalid && typeof invalid.id === "string" ? invalid.id : "unknown";
-  if (invalid) throw new Error(`The external agent bridge contains a malformed session (${invalidId}). Its data was left untouched for recovery.`);
-  return recovered;
+  return recoverAgentBridgeEnvelope(value);
 }
 
 export async function waitForAgentBridge(
@@ -198,14 +290,7 @@ export async function waitForAgentBridge(
     afterRevision,
     timeoutMs,
   });
-  if ((value?.schemaVersion !== 1 && value?.schemaVersion !== 2 && value?.schemaVersion !== 3) || !Array.isArray(value.sessions)) {
-    throw new Error("The external agent bridge returned an unsupported schema.");
-  }
-  const recovered = { ...value, sessions: value.sessions.map(recoverBridgeGenerationState) };
-  const invalid = (recovered.sessions as unknown[]).find((session) => !validBridgeSession(session));
-  const invalidId = invalid && typeof invalid === "object" && "id" in invalid && typeof invalid.id === "string" ? invalid.id : "unknown";
-  if (invalid) throw new Error(`The external agent bridge contains a malformed session (${invalidId}). Its data was left untouched for recovery.`);
-  return recovered;
+  return recoverAgentBridgeEnvelope(value);
 }
 
 export function materializeAgentSession(value: AgentBridgeSession): StudioSession {

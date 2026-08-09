@@ -21,6 +21,7 @@ import "./App.css";
 import {
   assemblyDurationSeconds,
   expectedVideoDurationSeconds,
+  recordActualCost,
   recordAgentActivity,
   exposeAgentSession,
   resolveAgentDecisionFromDesktop,
@@ -43,11 +44,12 @@ import { AttemptHistoryPopover } from "@/components/AttemptHistoryPopover";
 import { AssetLibrary } from "@/components/AssetLibrary";
 import { AssetPreview } from "@/components/AssetPreview";
 import { ConfirmDialog, type Confirmation } from "@/components/ConfirmDialog";
-import { EditMediaPanel } from "@/components/EditMediaPanel";
+import { ImageEditPanel } from "@/components/EditMediaPanel";
 import { GenerationThreadRail } from "@/components/GenerationThreadRail";
 import { GenerationResultDialog, type GenerationResultNotice } from "@/components/GenerationResultDialog";
 import { InputTray } from "@/components/InputTray";
 import { ModelSelector } from "@/components/ModelSelector";
+import { Onboarding } from "@/components/Onboarding";
 import { OptionsFields } from "@/components/OptionsFields";
 import { RequestPreviewDialog } from "@/components/RequestPreviewDialog";
 import { RightPanel } from "@/components/RightPanel";
@@ -60,6 +62,7 @@ import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "@/components/ui/toast-manager";
 import { useI18n } from "@/i18n";
+import { findInputMentions, mentionedInputSlots } from "@/inputMentions";
 import { createNativeAppMenu, type NativeAppMenu, type NativeMenuState } from "@/appMenu";
 import { applyAlphaMaskBlob, composeEditPrompt, hasGenerationInstructions, renderMaskGuide } from "@/mask";
 import { invoke } from "@tauri-apps/api/core";
@@ -70,6 +73,7 @@ import {
   defaultOptions,
   enhancePrompt,
   estimateGenerationCost,
+  formatUsd,
   generateImage,
   getCredentialStatus,
   imageReferenceLimit,
@@ -82,7 +86,6 @@ import {
   removeApiKey,
   saveApiKey,
   submitVideo,
-  supportsVideoInput,
   validateEnhancedPrompt,
   videoReferenceLimit,
   type CredentialStatus,
@@ -96,7 +99,7 @@ import {
 } from "@/openrouter";
 import {
   createSession,
-  createGenerationThread,
+  createSiblingGenerationThread,
   assetRequestUrl,
   deleteManagedAsset,
   deleteSessionBlobs,
@@ -114,12 +117,11 @@ import {
   resolveAssetMaskSource,
   saveStudioState,
   activeGenerationAttempt,
+  beginGeneratedImageEdit,
   activeVideoJobsFromAttempts,
   effectiveThreadDraft,
   effectiveThreadModelId,
   exportAssetToDownloads,
-  extractPromptContextFrames,
-  generationDefaultKey,
   optionOverridesFromDefaults,
   type NativeManagedAsset,
   type GenerationDraftState,
@@ -129,6 +131,13 @@ import {
   type StudioSession,
 } from "@/studio";
 import { NATIVE_MENU_COMMAND_IDS, commandForKeyboardEvent, type AppCommandId } from "@/shortcuts";
+import {
+  VIDEO_POLL_INTERVAL_MS,
+  createResilientPollScheduler,
+  hasVideoPollingTimedOut,
+  isVideoPollDue,
+  videoPollRetryDelayMs,
+} from "@/videoPolling";
 
 const AssemblyDialog = lazy(() => import("@/components/AssemblyDialog").then((module) => ({ default: module.AssemblyDialog })));
 const DecisionWorkspace = lazy(() => import("@/components/DecisionWorkspace").then((module) => ({ default: module.DecisionWorkspace })));
@@ -145,6 +154,25 @@ function FruitTruckMark() {
 
 function providerLabel(model: GenerationModel | null) {
   return model?.name.split(":", 1)[0] ?? "OpenRouter";
+}
+
+function PromptMentionHighlight({
+  value,
+  mentions,
+}: {
+  value: string;
+  mentions: ReturnType<typeof findInputMentions>;
+}) {
+  const content = [];
+  let cursor = 0;
+  for (const mention of mentions) {
+    content.push(value.slice(cursor, mention.start));
+    content.push(<mark key={`${mention.start}:${mention.slot}`}>{value.slice(mention.start, mention.end)}</mark>);
+    cursor = mention.end;
+  }
+  content.push(value.slice(cursor));
+  if (value.endsWith("\n")) content.push(" ");
+  return <>{content}</>;
 }
 
 function summarizeBatchAttempts(attempts: GenerationAttempt[]): BatchSummary {
@@ -166,6 +194,7 @@ function summarizeBatchAttempts(attempts: GenerationAttempt[]): BatchSummary {
 const SESSION_SIDEBAR_OPEN_KEY = "fruit-truck.session-sidebar.open";
 const SESSION_SIDEBAR_WIDTH_KEY = "fruit-truck.session-sidebar.width";
 const RIGHT_PANEL_OPEN_KEY = "fruit-truck.right-panel.open";
+const ONBOARDING_COMPLETE_KEY = "fruit-truck.onboarding.complete.v1";
 const DEFAULT_SESSION_SIDEBAR_WIDTH = 256;
 
 function hasRunnableInstructions(mode: GenerationMode, draft: GenerationDraftState) {
@@ -189,6 +218,7 @@ export default function App() {
   const [catalogError, setCatalogError] = useState<string | null>(null);
   const [imageEndpoints, setImageEndpoints] = useState<Record<string, ImageModelEndpoint[]>>({});
   const [credential, setCredential] = useState<CredentialStatus | null>(null);
+  const [onboardingOpen, setOnboardingOpen] = useState<boolean | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [shortcutHelpOpen, setShortcutHelpOpen] = useState(false);
   const [executingThreadIds, setExecutingThreadIds] = useState<Set<string>>(new Set());
@@ -219,6 +249,7 @@ export default function App() {
   });
   const composerViewportRef = useRef<HTMLDivElement>(null);
   const promptRef = useRef<HTMLTextAreaElement>(null);
+  const promptHighlightRef = useRef<HTMLDivElement>(null);
   const sessionSearchRef = useRef<HTMLInputElement>(null);
   const nativeMenuRef = useRef<NativeAppMenu | null>(null);
   const nativeMenuStateRef = useRef<NativeMenuState>({ enabled: {}, checked: {} });
@@ -242,6 +273,7 @@ export default function App() {
   const migratingAssetIds = useRef(new Set<string>());
   const bridgeRevisions = useRef(new Map<string, number>());
   const bridgeSnapshots = useRef(new Map<string, AgentBridgeSession>());
+  const bridgeMigrations = useRef(new Set<string>());
   const quitConfirmationPending = useRef(false);
   const confirmationRef = useRef<Confirmation | null>(null);
 
@@ -252,19 +284,15 @@ export default function App() {
   const mode = session.mode;
   const modeThreads = session.threads[mode].filter((item) => !item.archivedAt);
   const thread = modeThreads.find((item) => item.id === session.activeThreadIds[mode]) ?? modeThreads[0];
-  const workflow = thread.videoWorkflow;
   const draft = effectiveThreadDraft(session, thread);
-  const allModels = catalogs[mode];
-  const models = mode === "video" && workflow === "edit"
-    ? allModels.filter((model) => supportsVideoInput(model as VideoModel))
-    : allModels;
+  const models = catalogs[mode];
   const selectedId = effectiveThreadModelId(session, thread);
   const selectedModel = models.find((model) => model.id === selectedId) ?? null;
   const approvedVideoCount = session.agent.artifacts.filter((artifact) =>
     artifact.approval === "approved"
       && session.assets.find((asset) => asset.id === artifact.assetId)?.kind === "video"
   ).length;
-  const roles = allowedAssetRoles(mode, selectedModel, workflow);
+  const roles = allowedAssetRoles(mode, selectedModel);
   const referenceLimit = mode === "image"
     ? imageReferenceLimit(selectedModel as ImageModel | null)
     : Math.max(
@@ -376,7 +404,7 @@ export default function App() {
 
   useEffect(() => {
     composerViewportRef.current?.scrollTo({ top: 0, left: 0 });
-  }, [mode, workflow, selectedId, studio.activeSessionId, thread.id]);
+  }, [mode, selectedId, studio.activeSessionId, thread.id]);
 
   const patchSession = useCallback((id: string, update: (current: StudioSession) => StudioSession) => {
     setStudio((current) => ({
@@ -407,11 +435,10 @@ export default function App() {
           ...current.threads,
           [currentMode]: current.threads[currentMode].map((item) => {
             if (item.id !== targetId) return item;
-            const defaultKey = generationDefaultKey(item);
-            const defaults = current.generationDefaults.options[defaultKey];
+            const defaults = current.generationDefaults.options[item.mode];
             const optionOverrides = patch.options ? optionOverridesFromDefaults(defaults, patch.options) : item.optionOverrides;
             const providerJsonOverride = patch.providerJson !== undefined
-              ? patch.providerJson === current.generationDefaults.providerJson[defaultKey] ? undefined : patch.providerJson
+              ? patch.providerJson === current.generationDefaults.providerJson[item.mode] ? undefined : patch.providerJson
               : item.providerJsonOverride;
             const { options: _options, providerJson: _providerJson, ...draftPatch } = patch;
             const normalizedDraftPatch = draftPatch.enhancedPrompt === ""
@@ -441,6 +468,37 @@ export default function App() {
       };
     });
   }, [patchActive]);
+
+  const recordGenerationCost = useCallback((
+    sessionId: string,
+    mode: GenerationMode,
+    threadId: string | undefined,
+    attemptId: string | undefined,
+    actualCostUsd: number,
+  ) => {
+    if (!threadId || !attemptId) return;
+    const recordedAt = new Date().toISOString();
+    patchSession(sessionId, (current) => ({
+      ...current,
+      threads: {
+        ...current.threads,
+        [mode]: current.threads[mode].map((item) => item.id === threadId ? {
+          ...item,
+          attempts: item.attempts.map((attempt) => attempt.id === attemptId ? {
+            ...attempt,
+            actualCostUsd,
+            costRecordedAt: recordedAt,
+          } : attempt),
+        } : item),
+      },
+      agent: recordActualCost(current.agent, {
+        id: `generation:${attemptId}`,
+        category: "generation",
+        actualCostUsd,
+        recordedAt,
+      }),
+    }));
+  }, [patchSession]);
 
   const confirmAction = useCallback((title: string, description: string, confirmLabel?: string) =>
     new Promise<boolean>((resolve) => {
@@ -501,13 +559,14 @@ export default function App() {
     const timer = window.setTimeout(() => {
       for (const item of studio.sessions.filter((candidate) => candidate.agentBridge)) {
         const expectedRevision = bridgeRevisions.current.get(item.id);
-        if (expectedRevision === item.agent.revision) continue;
+        if (expectedRevision === item.agent.revision && !bridgeMigrations.current.has(item.id)) continue;
         void serializeAgentSessionForBridge(item).then(async (serialized) => {
           const savedEnvelope = await writeSerializedAgentBridgeSession(serialized, expectedRevision);
           const saved = savedEnvelope.sessions.find((candidate) => candidate.id === item.id);
           if (!saved) throw new Error("The saved agent session was not returned by the bridge.");
           bridgeRevisions.current.set(item.id, saved.agent.revision);
           bridgeSnapshots.current.set(item.id, saved);
+          bridgeMigrations.current.delete(item.id);
           setStudio((current) => ({
             ...current,
             sessions: current.sessions.map((candidate) =>
@@ -530,6 +589,7 @@ export default function App() {
               if (!saved) throw new Error("The merged agent session was not returned by the bridge.");
               bridgeRevisions.current.set(item.id, saved.agent.revision);
               bridgeSnapshots.current.set(item.id, saved);
+              bridgeMigrations.current.delete(item.id);
               const incoming = materializeAgentSession(saved);
               setStudio((current) => ({
                 ...current,
@@ -570,6 +630,8 @@ export default function App() {
         let changed = false;
         const sessions = [...current.sessions];
         for (const external of envelope.sessions) {
+          const migrationRequired = envelope.migrationSessionIds?.includes(external.id) ?? false;
+          if (migrationRequired) bridgeMigrations.current.add(external.id);
           bridgeRevisions.current.set(external.id, external.agent.revision);
           bridgeSnapshots.current.set(external.id, external);
           const index = sessions.findIndex((item) => item.id === external.id);
@@ -586,6 +648,9 @@ export default function App() {
                 ...incoming.assets.filter((asset) => !sessions[index].assets.some((existing) => existing.id === asset.id)),
               ],
             };
+            changed = true;
+          } else if (migrationRequired) {
+            sessions[index] = { ...sessions[index] };
             changed = true;
           }
         }
@@ -632,7 +697,11 @@ export default function App() {
   useEffect(() => {
     void getCredentialStatus().then((status) => {
       setCredential(status);
+      const completed = localStorage.getItem(ONBOARDING_COMPLETE_KEY) === "true";
+      if (status.configured && !completed) localStorage.setItem(ONBOARDING_COMPLETE_KEY, "true");
+      setOnboardingOpen(!status.configured && !completed);
     }).catch((error) => {
+      setOnboardingOpen(false);
       toast.error(errorMessage(error));
     });
   }, []);
@@ -649,14 +718,21 @@ export default function App() {
       setStudio((current) => ({
         ...current,
         sessions: current.sessions.map((item) => {
-          const activeVideoThread = item.threads.video.find((thread) => thread.id === item.activeThreadIds.video) ?? item.threads.video[0];
-          const videoCandidates = activeVideoThread.videoWorkflow === "edit"
-            ? videos.filter((model) => supportsVideoInput(model))
-            : videos;
           const imageId = images.some((model) => model.id === item.generationDefaults.modelIds.image)
             ? item.generationDefaults.modelIds.image : images[0]?.id ?? "";
-          const videoId = videoCandidates.some((model) => model.id === item.generationDefaults.modelIds.video)
-            ? item.generationDefaults.modelIds.video : videoCandidates[0]?.id ?? "";
+          const videoId = videos.some((model) => model.id === item.generationDefaults.modelIds.video)
+            ? item.generationDefaults.modelIds.video : videos[0]?.id ?? "";
+          const repairThreadModel = (thread: GenerationThread, candidates: GenerationModel[], defaultId: string) => {
+            const compatible = new Set(candidates.map((model) => model.id));
+            const effectiveId = thread.modelOverrideId ?? defaultId;
+            if (compatible.has(effectiveId)) return thread;
+            return {
+              ...thread,
+              modelOverrideId: compatible.has(defaultId) ? undefined : candidates[0]?.id,
+              updatedAt: new Date().toISOString(),
+              revision: thread.revision + 1,
+            };
+          };
           return {
             ...item,
             generationDefaults: {
@@ -664,9 +740,12 @@ export default function App() {
               modelIds: { image: imageId, video: videoId },
               options: {
                 image: Object.keys(item.generationDefaults.options.image).length ? item.generationDefaults.options.image : defaultOptions("image", images[0] ?? null),
-                videoGenerate: Object.keys(item.generationDefaults.options.videoGenerate).length ? item.generationDefaults.options.videoGenerate : defaultOptions("video", videos[0] ?? null),
-                videoEdit: Object.keys(item.generationDefaults.options.videoEdit).length ? item.generationDefaults.options.videoEdit : defaultOptions("video", videoCandidates[0] ?? null),
+                video: Object.keys(item.generationDefaults.options.video).length ? item.generationDefaults.options.video : defaultOptions("video", videos[0] ?? null),
               },
+            },
+            threads: {
+              image: item.threads.image.map((thread) => repairThreadModel(thread, images, imageId)),
+              video: item.threads.video.map((thread) => repairThreadModel(thread, videos, videoId)),
             },
           };
         }),
@@ -714,82 +793,60 @@ export default function App() {
 
   useEffect(() => {
     if (!credential?.configured || !activeVideoJobIds) return;
-    let active = true;
-    let timer: number | undefined;
-    const schedule = () => {
-      if (active) timer = window.setTimeout(() => void pollActiveJobs(), 4_000);
-    };
     const pollActiveJobs = async () => {
-      if (!active) return;
-      if (polling.current) {
-        schedule();
-        return;
-      }
+      if (polling.current) return;
+      const nowMs = Date.now();
       const activeJobs = studioRef.current.sessions.flatMap((item) =>
         activeVideoJobsFromAttempts(item)
           .filter((job) => job.status === "pending" || job.status === "in_progress")
-          .filter((job) => !job.nextPollAt || Date.parse(job.nextPollAt) <= Date.now())
+          .filter((job) => hasVideoPollingTimedOut(job.submittedAt, nowMs) || isVideoPollDue(job.nextPollAt, nowMs))
           .map((job) => ({ sessionId: item.id, job })),
       );
       if (!activeJobs.length) return;
       polling.current = true;
-      await Promise.all(activeJobs.map(async ({ sessionId, job }) => {
+      let outcomes: PromiseSettledResult<void>[] = [];
+      try {
+        outcomes = await Promise.allSettled(activeJobs.map(async ({ sessionId, job }) => {
         try {
-          const result = await pollVideo(job.jobId);
+          const result = await pollVideo(job.jobId, (actualCostUsd) => {
+            recordGenerationCost(sessionId, "video", job.threadId, job.attemptId, actualCostUsd);
+          });
           if (result.status === "completed") {
+            const polledAt = new Date().toISOString();
             const latestSession = studioRef.current.sessions.find((item) => item.id === sessionId);
             const existing = latestSession?.assets.find((item) => item.jobId === job.jobId);
             if (existing) {
               patchSession(sessionId, (current) => {
-                const costRecorded = current.threads.video.flatMap((item) => item.attempts).find((attempt) => attempt.id === job.attemptId)?.costRecordedAt;
                 return {
-                ...current,
-                threads: job.threadId && job.attemptId ? {
-                  ...current.threads,
-                  video: current.threads.video.map((item) => item.id === job.threadId ? {
-                    ...item,
-                    attempts: item.attempts.map((attempt) => attempt.id === job.attemptId ? { ...attempt, status: "completed", assetIds: [existing.id], actualCostUsd: result.actualCostUsd ?? attempt.actualCostUsd, costRecordedAt: result.actualCostUsd != null ? attempt.costRecordedAt ?? new Date().toISOString() : attempt.costRecordedAt, completedAt: new Date().toISOString(), updatedAt: new Date().toISOString() } : attempt),
-                  } : item),
-                } : current.threads,
-                agent: {
-                  ...current.agent,
-                  execution: {
-                    ...current.agent.execution,
-                    currentJobIds: current.agent.execution.currentJobIds.filter((id) => id !== job.jobId),
-                    spentUsd: current.agent.execution.spentUsd + (!costRecorded ? result.actualCostUsd ?? 0 : 0),
+                  ...current,
+                  threads: job.threadId && job.attemptId ? {
+                    ...current.threads,
+                    video: current.threads.video.map((item) => item.id === job.threadId ? {
+                      ...item,
+                      attempts: item.attempts.map((attempt) => attempt.id === job.attemptId ? { ...attempt, status: "completed", assetIds: [existing.id], progress: 100, error: undefined, actualCostUsd: result.actualCostUsd ?? attempt.actualCostUsd, costRecordedAt: result.actualCostUsd != null ? attempt.costRecordedAt ?? polledAt : attempt.costRecordedAt, pollAttempts: (attempt.pollAttempts ?? 0) + 1, lastPolledAt: polledAt, nextPollAt: undefined, completedAt: polledAt, updatedAt: polledAt } : attempt),
+                    } : item),
+                  } : current.threads,
+                  agent: {
+                    ...current.agent,
+                    execution: {
+                      ...current.agent.execution,
+                      currentJobIds: current.agent.execution.currentJobIds.filter((id) => id !== job.jobId),
+                    },
                   },
-                },
-              };
+                };
               });
               return;
             }
-            let source = result.url;
-            if (isTauriRuntime()) {
-              source = await cacheVideo(job.jobId);
-            }
-            if (!source) throw new Error("The video completed without a readable URL.");
-            const asset = isTauriRuntime()
-              ? {
-                id: crypto.randomUUID(),
-                name: `video-${job.jobId}.mp4`,
-                kind: "video" as const,
-                mimeType: "video/mp4",
-                origin: job.workflow === "edit" ? "edited" as const : "generated" as const,
-                createdAt: new Date().toISOString(),
-                localPath: source,
-                jobId: job.jobId,
-              }
-              : await importGeneratedVideo(
-                source,
-                `video-${job.jobId}.mp4`,
-                job.workflow === "edit" ? "edited" : "generated",
-                job.jobId,
-              );
+            const source = await cacheVideo(job.jobId);
+            const asset = await importGeneratedVideo(
+              source,
+              `video-${job.jobId}.mp4`,
+              "generated",
+              job.jobId,
+            );
             patchSession(sessionId, (current) => {
               const existing = current.assets.find((item) => item.jobId === job.jobId);
               const resolvedAsset = existing ?? asset;
-              const costRecorded = current.threads.video.flatMap((item) => item.attempts).find((attempt) => attempt.id === job.attemptId)?.costRecordedAt;
-              const costDelta = !costRecorded ? result.actualCostUsd ?? 0 : 0;
               return {
                 ...current,
                 assets: existing ? current.assets : [...current.assets, asset],
@@ -797,7 +854,7 @@ export default function App() {
                   ...current.threads,
                   video: current.threads.video.map((item) => item.id === job.threadId ? {
                     ...item,
-                    attempts: item.attempts.map((attempt) => attempt.id === job.attemptId ? { ...attempt, status: "completed", assetIds: [resolvedAsset.id], actualCostUsd: result.actualCostUsd ?? attempt.actualCostUsd, costRecordedAt: result.actualCostUsd != null ? attempt.costRecordedAt ?? new Date().toISOString() : attempt.costRecordedAt, completedAt: new Date().toISOString(), updatedAt: new Date().toISOString() } : attempt),
+                    attempts: item.attempts.map((attempt) => attempt.id === job.attemptId ? { ...attempt, status: "completed", assetIds: [resolvedAsset.id], progress: 100, error: undefined, actualCostUsd: result.actualCostUsd ?? attempt.actualCostUsd, costRecordedAt: result.actualCostUsd != null ? attempt.costRecordedAt ?? polledAt : attempt.costRecordedAt, pollAttempts: (attempt.pollAttempts ?? 0) + 1, lastPolledAt: polledAt, nextPollAt: undefined, completedAt: polledAt, updatedAt: polledAt } : attempt),
                   } : item),
                 } : current.threads,
                 agent: existing ? {
@@ -805,14 +862,12 @@ export default function App() {
                   execution: {
                     ...current.agent.execution,
                     currentJobIds: current.agent.execution.currentJobIds.filter((id) => id !== job.jobId),
-                    spentUsd: current.agent.execution.spentUsd + costDelta,
                   },
                 } : recordAgentActivity({
                   ...current.agent,
                   execution: {
                     ...current.agent.execution,
                     currentJobIds: current.agent.execution.currentJobIds.filter((id) => id !== job.jobId),
-                    spentUsd: current.agent.execution.spentUsd + costDelta,
                   },
                   artifacts: [...current.agent.artifacts, {
                     assetId: resolvedAsset.id,
@@ -833,14 +888,19 @@ export default function App() {
                 }),
               };
             });
-          } else if (result.status === "failed") {
+          } else if (result.status === "failed" || result.status === "cancelled" || result.status === "expired") {
+            const polledAt = new Date().toISOString();
+            const canceled = result.status === "cancelled";
+            const message = result.error ?? (canceled
+              ? t("videoGenerationCanceled")
+              : result.status === "expired" ? t("videoGenerationExpired") : t("videoGenerationFailed"));
             patchSession(sessionId, (current) => ({
               ...current,
               threads: job.threadId && job.attemptId ? {
                 ...current.threads,
                 video: current.threads.video.map((item) => item.id === job.threadId ? {
                   ...item,
-                  attempts: item.attempts.map((attempt) => attempt.id === job.attemptId ? { ...attempt, status: "failed", error: result.error ?? "Video generation failed.", completedAt: new Date().toISOString(), updatedAt: new Date().toISOString() } : attempt),
+                  attempts: item.attempts.map((attempt) => attempt.id === job.attemptId ? { ...attempt, status: canceled ? "canceled" : "failed", error: message, pollAttempts: (attempt.pollAttempts ?? 0) + 1, lastPolledAt: polledAt, nextPollAt: undefined, completedAt: polledAt, updatedAt: polledAt } : attempt),
                 } : item),
               } : current.threads,
               agent: {
@@ -849,7 +909,29 @@ export default function App() {
                 execution: {
                   ...current.agent.execution,
                   currentJobIds: current.agent.execution.currentJobIds.filter((id) => id !== job.jobId),
-                  lastError: result.error ?? "Video generation failed.",
+                  lastError: message,
+                },
+              },
+            }));
+          } else if (hasVideoPollingTimedOut(job.submittedAt)) {
+            const completedAt = new Date().toISOString();
+            const message = t("videoPollingTimedOut");
+            patchSession(sessionId, (current) => ({
+              ...current,
+              threads: job.threadId && job.attemptId ? {
+                ...current.threads,
+                video: current.threads.video.map((item) => item.id === job.threadId ? {
+                  ...item,
+                  attempts: item.attempts.map((attempt) => attempt.id === job.attemptId ? { ...attempt, status: "failed", error: message, pollAttempts: (attempt.pollAttempts ?? 0) + 1, lastPolledAt: completedAt, nextPollAt: undefined, completedAt, updatedAt: completedAt } : attempt),
+                } : item),
+              } : current.threads,
+              agent: {
+                ...current.agent,
+                runStatus: current.agent.controlMode === "agent" && current.agent.runStatus === "working" ? "failed" : current.agent.runStatus,
+                execution: {
+                  ...current.agent.execution,
+                  currentJobIds: current.agent.execution.currentJobIds.filter((id) => id !== job.jobId),
+                  lastError: message,
                 },
               },
             }));
@@ -861,14 +943,15 @@ export default function App() {
                 ...current.threads,
                 video: current.threads.video.map((item) => item.id === job.threadId ? {
                   ...item,
-                  attempts: item.attempts.map((attempt) => attempt.id === job.attemptId ? { ...attempt, status: "in_progress", progress: result.progress, error: result.error, pollAttempts: (attempt.pollAttempts ?? 0) + 1, lastPolledAt: polledAt, nextPollAt: new Date(Date.now() + 10_000).toISOString(), updatedAt: new Date().toISOString() } : attempt),
+                  attempts: item.attempts.map((attempt) => attempt.id === job.attemptId ? { ...attempt, status: "in_progress", progress: result.progress, error: result.error, pollAttempts: (attempt.pollAttempts ?? 0) + 1, lastPolledAt: polledAt, nextPollAt: new Date(Date.now() + VIDEO_POLL_INTERVAL_MS).toISOString(), updatedAt: polledAt } : attempt),
                 } : item),
               } : current.threads,
             }));
           }
         } catch (error) {
-          const message = errorMessage(error);
-          const expired = Date.now() - new Date(job.submittedAt).getTime() >= 30 * 60_000;
+          const polledAt = new Date().toISOString();
+          const timedOut = hasVideoPollingTimedOut(job.submittedAt, Date.parse(polledAt));
+          const message = timedOut ? t("videoPollingTimedOut") : errorMessage(error);
           patchSession(sessionId, (current) => ({
             ...current,
             threads: job.threadId && job.attemptId ? {
@@ -877,39 +960,52 @@ export default function App() {
                 ...item,
                 attempts: item.attempts.map((attempt) => attempt.id === job.attemptId ? {
                   ...attempt,
-                  status: expired ? "failed" : "in_progress",
+                  status: timedOut ? "failed" : "in_progress",
                   error: message,
                   pollAttempts: (attempt.pollAttempts ?? 0) + 1,
-                  lastPolledAt: new Date().toISOString(),
-                  nextPollAt: expired ? undefined : new Date(Date.now() + Math.min(60_000, 4_000 * 2 ** Math.min(4, attempt.pollAttempts ?? 0))).toISOString(),
-                  completedAt: expired ? new Date().toISOString() : attempt.completedAt,
-                  updatedAt: new Date().toISOString(),
+                  lastPolledAt: polledAt,
+                  nextPollAt: timedOut ? undefined : new Date(Date.now() + videoPollRetryDelayMs(attempt.pollAttempts ?? 0)).toISOString(),
+                  completedAt: timedOut ? polledAt : attempt.completedAt,
+                  updatedAt: polledAt,
                 } : attempt),
               } : item),
             } : current.threads,
-            agent: expired ? {
+            agent: timedOut ? {
               ...current.agent,
-              runStatus: current.agent.controlMode === "agent" && current.agent.runStatus === "working"
-                ? "failed"
-                : current.agent.runStatus,
+              runStatus: current.agent.controlMode === "agent" && current.agent.runStatus === "working" ? "failed" : current.agent.runStatus,
               execution: {
                 ...current.agent.execution,
                 currentJobIds: current.agent.execution.currentJobIds.filter((id) => id !== job.jobId),
-                lastError: `Video polling stopped after 30 minutes: ${message}`,
+                lastError: message,
               },
             } : current.agent,
           }));
         }
-      }));
-      polling.current = false;
-      schedule();
+        }));
+      } finally {
+        polling.current = false;
+      }
+      for (const outcome of outcomes) {
+        if (outcome.status === "rejected") console.error("Video polling state update failed", outcome.reason);
+      }
     };
-    schedule();
+    const scheduler = createResilientPollScheduler({
+      run: pollActiveJobs,
+      onError: (error) => console.error("Video polling scheduler failed", error),
+    });
+    const wake = () => scheduler.wake();
+    const wakeWhenVisible = () => { if (document.visibilityState === "visible") wake(); };
+    scheduler.start();
+    window.addEventListener("online", wake);
+    window.addEventListener("focus", wake);
+    document.addEventListener("visibilitychange", wakeWhenVisible);
     return () => {
-      active = false;
-      if (timer != null) window.clearTimeout(timer);
+      scheduler.stop();
+      window.removeEventListener("online", wake);
+      window.removeEventListener("focus", wake);
+      document.removeEventListener("visibilitychange", wakeWhenVisible);
     };
-  }, [activeVideoJobIds, credential?.configured, patchSession]);
+  }, [activeVideoJobIds, credential?.configured, patchSession, recordGenerationCost, t]);
 
   const commitImportedAssets = useCallback((candidates: SessionAsset[]): SessionAsset[] => {
     const imported: SessionAsset[] = [];
@@ -1023,7 +1119,7 @@ export default function App() {
     const targetDraft = effectiveThreadDraft(targetSession, targetThread);
     const targetModelId = effectiveThreadModelId(targetSession, targetThread);
     const targetModel = catalogs[targetThread.mode].find((item) => item.id === targetModelId) ?? null;
-    const targetRoles = allowedAssetRoles(targetThread.mode, targetModel, targetThread.videoWorkflow);
+    const targetRoles = allowedAssetRoles(targetThread.mode, targetModel);
     const targetReferenceLimit = targetThread.mode === "image"
       ? imageReferenceLimit(targetModel as ImageModel | null)
       : Math.max(
@@ -1031,10 +1127,14 @@ export default function App() {
         videoReferenceLimit(targetModel as VideoModel | null)
         + ((targetModel as VideoModel | null)?.supported_frame_images?.length ?? 0),
       );
-    if (!targetAsset || targetDraft.references.some((reference) => reference.assetId === assetId) || targetDraft.references.length >= targetReferenceLimit) return;
+    if (!targetAsset || targetDraft.references.some((reference) => reference.assetId === assetId)) return;
+    if (targetDraft.references.length >= targetReferenceLimit) {
+      toast.error(t("tooManyInputs", { count: targetReferenceLimit }));
+      return;
+    }
     const validRole = targetAsset.kind === "video"
-      ? targetRoles.includes("video_reference") ? "video_reference" : null
-      : targetRoles.includes("reference") ? "reference" : targetRoles.find((role) => role !== "video_reference") ?? null;
+      ? null
+      : targetRoles.includes("reference") ? "reference" : targetRoles[0] ?? null;
     if (!validRole) {
       toast.error(t("unsupportedAssetInput"));
       return;
@@ -1073,8 +1173,24 @@ export default function App() {
       const targetId = notice?.threadId ?? current.activeThreadIds.image;
       const imageThread = current.threads.image.find((item) => item.id === targetId) ?? current.threads.image[0];
       const imageDraft = imageThread.draft;
+      if (notice) {
+        return {
+          ...current,
+          mode: "image",
+          activeThreadIds: { ...current.activeThreadIds, image: imageThread.id },
+          threads: {
+            ...current.threads,
+            image: current.threads.image.map((item) => item.id === imageThread.id ? {
+              ...item,
+              revision: item.revision + 1,
+              updatedAt: new Date().toISOString(),
+              draft: beginGeneratedImageEdit(imageDraft, assetId),
+            } : item),
+          },
+        };
+      }
       const existing = imageDraft.references.find((reference) => reference.assetId === assetId);
-      const previousTarget = imageDraft.references.find((reference) => `#${reference.slot}` === imageDraft.imageEditTarget);
+      const previousTarget = imageDraft.references.find((reference) => `@${reference.slot}` === imageDraft.imageEditTarget);
       const slot = existing?.slot ?? nextReferenceSlot(imageDraft.references);
       return {
         ...current,
@@ -1089,7 +1205,7 @@ export default function App() {
             draft: {
               ...imageDraft,
               imageEditMode: true,
-              imageEditTarget: `#${slot}`,
+              imageEditTarget: `@${slot}`,
               maskStrokes: previousTarget?.assetId === assetId ? imageDraft.maskStrokes : [],
               maskInstructions: previousTarget?.assetId === assetId ? imageDraft.maskInstructions : "",
               enhancedPrompt: "",
@@ -1105,39 +1221,32 @@ export default function App() {
 
   const setEditTargetAsset = (assetId: string, incomingAsset?: SessionAsset) => {
     const asset = assetMap.get(assetId) ?? incomingAsset;
-    const expectedKind = mode === "image" ? "image" : "video";
-    if (!asset || asset.kind !== expectedKind) {
-      toast.error(t(expectedKind === "image" ? "editImageRequired" : "editVideoRequired"));
+    if (!asset || asset.kind !== "image") {
+      toast.error(t("editImageRequired"));
       return;
     }
     patchActive((current) => {
-      const currentMode = current.mode;
-      const targetId = current.activeThreadIds[currentMode];
-      const targetThread = current.threads[currentMode].find((item) => item.id === targetId) ?? current.threads[currentMode][0];
+      const targetId = current.activeThreadIds.image;
+      const targetThread = current.threads.image.find((item) => item.id === targetId) ?? current.threads.image[0];
       const currentDraft = targetThread.draft;
-      const role = current.mode === "video" ? "video_reference" as const : "reference" as const;
-      const previousTarget = current.mode === "image"
-        ? currentDraft.references.find((reference) => `#${reference.slot}` === currentDraft.imageEditTarget)
-        : currentDraft.references.find((reference) => reference.role === "video_reference");
+      const role = "reference" as const;
+      const previousTarget = currentDraft.references.find((reference) => `@${reference.slot}` === currentDraft.imageEditTarget);
       const existing = currentDraft.references.find((reference) => reference.assetId === assetId);
-      const slot = existing?.slot
-        ?? (current.mode === "video" ? previousTarget?.slot : undefined)
-        ?? nextReferenceSlot(currentDraft.references);
+      const slot = existing?.slot ?? nextReferenceSlot(currentDraft.references);
       const references = currentDraft.references
-        .filter((reference) => current.mode !== "video" || reference.role !== "video_reference" || reference.assetId === assetId)
         .map((reference) => reference.assetId === assetId ? { ...reference, role } : reference);
       if (!references.some((reference) => reference.assetId === assetId)) references.push({ assetId, slot, role });
       return {
         ...current,
         threads: {
           ...current.threads,
-          [currentMode]: current.threads[currentMode].map((item) => item.id === targetThread.id ? {
+          image: current.threads.image.map((item) => item.id === targetThread.id ? {
             ...item,
             revision: item.revision + 1,
             updatedAt: new Date().toISOString(),
             draft: {
               ...currentDraft,
-              imageEditTarget: current.mode === "image" ? `#${slot}` : currentDraft.imageEditTarget,
+              imageEditTarget: `@${slot}`,
               references,
               maskStrokes: previousTarget?.assetId === assetId ? currentDraft.maskStrokes : [],
               maskInstructions: previousTarget?.assetId === assetId ? currentDraft.maskInstructions : "",
@@ -1151,10 +1260,9 @@ export default function App() {
   };
 
   const applyImportedEditTarget = (assets: SessionAsset[]) => {
-    const expectedKind = mode === "image" ? "image" : "video";
-    const target = assets.find((asset) => asset.kind === expectedKind);
+    const target = assets.find((asset) => asset.kind === "image");
     if (target) setEditTargetAsset(target.id, target);
-    else toast.error(t(expectedKind === "image" ? "editImageRequired" : "editVideoRequired"));
+    else toast.error(t("editImageRequired"));
   };
   const importEditTarget = async (files: FileList | File[]) => applyImportedEditTarget(await importFiles(files));
   const pickEditTarget = async () => applyImportedEditTarget(await pickFiles());
@@ -1167,7 +1275,7 @@ export default function App() {
     const targetThread = targetSession.threads.video.find((item) => item.id === targetSession.activeThreadIds.video) ?? targetSession.threads.video[0];
     const videoId = effectiveThreadModelId(targetSession, targetThread);
     const videoModel = catalogs.video.find((model) => model.id === videoId) ?? null;
-    const videoRoles = allowedAssetRoles("video", videoModel, "generate");
+    const videoRoles = allowedAssetRoles("video", videoModel);
     const role = videoRoles.includes("reference")
       ? "reference"
       : videoRoles.includes("first_frame") ? "first_frame" : null;
@@ -1195,8 +1303,7 @@ export default function App() {
         threads: {
           ...current.threads,
           video: current.threads.video.map((item) => item.id === videoThread.id ? {
-            ...item,
-            videoWorkflow: "generate",
+            ...videoThread,
             revision: item.revision + 1,
             updatedAt: new Date().toISOString(),
             draft: {
@@ -1261,26 +1368,6 @@ export default function App() {
     patchActive((current) => ({ ...current, mode: next }));
   };
 
-  const switchWorkflow = (next: "generate" | "edit") => {
-    const candidates = next === "edit"
-      ? (catalogs.video as VideoModel[]).filter(supportsVideoInput)
-      : catalogs.video as VideoModel[];
-    patchActive((current) => ({
-      ...current,
-      threads: {
-        ...current.threads,
-        video: current.threads.video.map((item) => item.id === current.activeThreadIds.video ? {
-          ...item,
-          videoWorkflow: next,
-          modelOverrideId: candidates.some((model) => model.id === effectiveThreadModelId(current, item))
-            ? item.modelOverrideId : candidates[0]?.id ?? "",
-          revision: item.revision + 1,
-          updatedAt: new Date().toISOString(),
-        } : item),
-      },
-    }));
-  };
-
   const providerError = useMemo(() => {
     if (!draft.providerJson.trim()) return null;
     try {
@@ -1295,7 +1382,7 @@ export default function App() {
     const asset = assetMap.get(reference.assetId);
     const masked = mode === "image"
       && draft.imageEditMode
-      && `#${reference.slot}` === draft.imageEditTarget.trim()
+      && `@${reference.slot}` === draft.imageEditTarget.trim()
       && draft.maskStrokes.length > 0;
     return asset ? [{
       id: asset.id,
@@ -1324,7 +1411,6 @@ export default function App() {
     try {
       return buildRequest({
         mode,
-        videoWorkflow: workflow,
         model: selectedId,
         prompt: preparedPrompt,
         assets: previewReferences,
@@ -1334,64 +1420,49 @@ export default function App() {
     } catch {
       return {};
     }
-  }, [draft.options, draft.providerJson, mode, preparedPrompt, previewReferences, selectedId, selectedModel, workflow]);
+  }, [draft.options, draft.providerJson, mode, preparedPrompt, previewReferences, selectedId, selectedModel]);
 
   const editTargetError = useMemo(() => {
     if (mode !== "image" || !draft.imageEditMode) return null;
     if (!draft.imageEditTarget.trim()) return t("chooseEditTarget");
-    const match = draft.imageEditTarget.trim().match(/^#(\d+)$/);
+    const match = draft.imageEditTarget.trim().match(/^@(\d+)$/);
     if (!match) return t("editTargetFormat");
     const reference = draft.references.find((item) => item.slot === Number(match[1]));
     const asset = reference ? assetMap.get(reference.assetId) : null;
     return !asset || asset.kind !== "image" ? t("targetNotAttached", { target: draft.imageEditTarget || t("thatTarget") }) : null;
   }, [assetMap, draft.imageEditMode, draft.imageEditTarget, draft.references, mode, t]);
   const imageEditReference = mode === "image" && draft.imageEditMode
-    ? draft.references.find((reference) => `#${reference.slot}` === draft.imageEditTarget.trim())
+    ? draft.references.find((reference) => `@${reference.slot}` === draft.imageEditTarget.trim())
     : undefined;
-  const videoEditReference = mode === "video" && workflow === "edit"
-    ? draft.references.find((reference) => reference.role === "video_reference")
-    : undefined;
-  const editReference = imageEditReference ?? videoEditReference;
+  const editReference = imageEditReference;
   const editTargetAsset = editReference ? assetMap.get(editReference.assetId) ?? null : null;
 
   const inputValidationError = useMemo(() => {
     const unsupported = draft.references.find((reference) => {
       const asset = assetMap.get(reference.assetId);
       if (!asset) return true;
-      if (asset.kind === "video") return !roles.includes("video_reference") || reference.role !== "video_reference";
+      if (asset.kind === "video") return true;
       return !roles.includes(reference.role);
     });
     if (unsupported) return t("unsupportedReference", { slot: unsupported.slot });
     if (draft.references.length > referenceLimit) return t("tooManyInputs", { count: referenceLimit });
-    if (mode === "video" && workflow === "generate") {
+    if (mode === "video") {
       const hasReference = draft.references.some((reference) => reference.role === "reference");
       const hasFrame = draft.references.some((reference) => reference.role === "first_frame" || reference.role === "last_frame");
       if (hasReference && hasFrame) return t("mixedInputStyles");
     }
-    if (mode === "video" && workflow === "edit" && !draft.references.some((reference) => reference.role === "video_reference")) {
-      return t("attachSourceVideo");
-    }
     return null;
-  }, [assetMap, draft.references, mode, referenceLimit, roles, t, workflow]);
-
-  const promptReferenceError = useMemo(() => {
-    const slots = new Set(draft.references.map((reference) => reference.slot));
-    const mentioned = [...draft.prompt.matchAll(/#(\d+)/g)].map((match) => Number(match[1]));
-    const missing = mentioned.find((slot) => !slots.has(slot));
-    return missing ? t("missingMention", { slot: missing }) : null;
-  }, [draft.prompt, draft.references, t]);
+  }, [assetMap, draft.references, mode, referenceLimit, roles, t]);
 
   const maskReferenceError = useMemo(() => {
     if (mode !== "image" || !draft.imageEditMode || !draft.maskStrokes.length) return null;
     const slots = new Set(draft.references.map((reference) => reference.slot));
-    const mentioned = [...draft.maskInstructions.matchAll(/#(\d+)/g)].map((match) => Number(match[1]));
+    const mentioned = [...draft.maskInstructions.matchAll(/@(\d+)/g)].map((match) => Number(match[1]));
     const missing = mentioned.find((slot) => !slots.has(slot));
     return missing ? t("missingMention", { slot: missing }) : null;
   }, [draft.imageEditMode, draft.maskInstructions, draft.maskStrokes.length, draft.references, mode, t]);
 
   const generationValidationError = editTargetError
-    ?? inputValidationError
-    ?? promptReferenceError
     ?? maskReferenceError;
 
   const hydratePromptEnhancementVisuals = async (
@@ -1404,24 +1475,11 @@ export default function App() {
     for (const reference of targetDraft.references.toSorted((left, right) => left.slot - right.slot)) {
       const asset = targetAssetMap.get(reference.assetId);
       if (!asset) throw new Error(t("missingReference", { slot: reference.slot }));
-      if (asset.kind === "video") {
-        const frames = await extractPromptContextFrames(asset).catch(() => []);
-        visuals.push(...frames.map((frame) => ({
-          id: `${asset.id}:${frame.position}`,
-          kind: "video_frame" as const,
-          source: frame.dataUrl,
-          slot: reference.slot,
-          name: asset.name,
-          role: reference.role,
-          framePosition: frame.position,
-          timestampSeconds: frame.timestampSeconds,
-        })));
-        continue;
-      }
+      if (asset.kind === "video") continue;
 
       const isEditTarget = targetThread.mode === "image"
         && targetDraft.imageEditMode
-        && `#${reference.slot}` === targetDraft.imageEditTarget.trim();
+        && `@${reference.slot}` === targetDraft.imageEditTarget.trim();
       visuals.push({
         id: asset.id,
         kind: isEditTarget ? "edit_target" : "reference",
@@ -1450,7 +1508,11 @@ export default function App() {
     return visuals;
   };
 
-  const enhanceThreadPrompt = async (targetSession: StudioSession, targetThread: GenerationThread) => {
+  const enhanceThreadPrompt = async (
+    targetSession: StudioSession,
+    targetThread: GenerationThread,
+    costEntryId = `prompt-enhancement:${crypto.randomUUID()}`,
+  ) => {
     const targetDraft = effectiveThreadDraft(targetSession, targetThread);
     if (!hasRunnableInstructions(targetThread.mode, targetDraft)) {
       throw new Error(targetThread.mode === "image" && targetDraft.imageEditMode && targetDraft.maskStrokes.length
@@ -1465,7 +1527,6 @@ export default function App() {
       const text = await enhancePrompt({
         promptModel: studioRef.current.promptModel,
         mode: targetThread.mode,
-        videoWorkflow: targetThread.videoWorkflow,
         editMode: targetDraft.imageEditMode,
         editTarget: targetDraft.imageEditTarget,
         prompt: targetDraft.prompt,
@@ -1476,6 +1537,15 @@ export default function App() {
           return asset ? [{ slot: reference.slot, name: asset.name, mediaType: asset.mimeType, role: reference.role }] : [];
         }),
         visuals,
+      }, (actualCostUsd) => {
+        patchSession(targetSession.id, (current) => ({
+          ...current,
+          agent: recordActualCost(current.agent, {
+            id: costEntryId,
+            category: "prompt_enhancement",
+            actualCostUsd,
+          }),
+        }));
       });
       patchSession(targetSession.id, (current) => ({
         ...current,
@@ -1506,7 +1576,7 @@ export default function App() {
     if (!asset) throw new Error(t("missingReference", { slot: reference.slot }));
     const masked = targetThread.mode === "image"
       && targetDraft.imageEditMode
-      && `#${reference.slot}` === targetDraft.imageEditTarget.trim()
+      && `@${reference.slot}` === targetDraft.imageEditTarget.trim()
       && targetDraft.maskStrokes.length > 0;
     let source = await assetRequestUrl(asset);
     if (masked) {
@@ -1549,16 +1619,15 @@ export default function App() {
         if (!value || Array.isArray(value) || typeof value !== "object") return t("jsonObjectRequired");
       } catch { return t("invalidJson"); }
     }
-    const targetRoles = allowedAssetRoles(targetThread.mode, model, targetThread.videoWorkflow);
+    const targetRoles = allowedAssetRoles(targetThread.mode, model);
     const targetAssets = new Map(targetSession.assets.map((asset) => [asset.id, asset]));
     const unsupported = targetDraft.references.find((reference) => {
       const asset = targetAssets.get(reference.assetId);
       if (!asset) return true;
-      return asset.kind === "video" ? reference.role !== "video_reference" || !targetRoles.includes("video_reference") : !targetRoles.includes(reference.role);
+      return asset.kind === "video" || !targetRoles.includes(reference.role);
     });
     if (unsupported) return t("unsupportedReference", { slot: unsupported.slot });
-    if (targetThread.mode === "video" && targetThread.videoWorkflow === "edit" && !targetDraft.references.some((reference) => reference.role === "video_reference")) return t("attachSourceVideo");
-    if (targetThread.mode === "video" && targetThread.videoWorkflow === "generate") {
+    if (targetThread.mode === "video") {
       const hasReference = targetDraft.references.some((reference) => reference.role === "reference");
       const hasFrame = targetDraft.references.some((reference) => reference.role === "first_frame" || reference.role === "last_frame");
       if (hasReference && hasFrame) return t("mixedInputStyles");
@@ -1613,14 +1682,12 @@ export default function App() {
       updatedAt: createdAt,
       modelId: targetModelId,
       estimatedCostUsd: estimateGenerationCost(targetThread.mode, targetModel, targetDraft.options, {
-        videoWorkflow: targetThread.videoWorkflow,
         imageInputCount: targetDraft.references.filter((reference) =>
           targetSession.assets.find((asset) => asset.id === reference.assetId)?.kind === "image"
         ).length,
       }),
       snapshot: {
         mode: targetThread.mode,
-        videoWorkflow: targetThread.videoWorkflow,
         modelId: targetModelId,
         outputRole: targetThread.outputRole,
         prompt: targetDraft.prompt,
@@ -1654,11 +1721,16 @@ export default function App() {
             enhancementOriginalIntent(targetThread.mode, targetDraft),
             prompt,
             targetDraft.imageEditMode ? targetDraft.imageEditTarget : undefined,
+            targetDraft.references.map((reference) => reference.slot),
           );
           if (enhancedError) throw new Error(enhancedError);
         } else {
           try {
-            prompt = targetDraft.enhancedPrompt.trim() || await enhanceThreadPrompt(targetSession, targetThread);
+            prompt = targetDraft.enhancedPrompt.trim() || await enhanceThreadPrompt(
+              targetSession,
+              targetThread,
+              `prompt-enhancement:${attemptId}`,
+            );
           } catch (error) {
             const continueWithOriginal = await confirmAction(
               t("enhancementFailed"),
@@ -1680,7 +1752,6 @@ export default function App() {
       patchAttempt(targetSession.id, targetThread.mode, targetThread.id, attemptId, { status: "submitting" });
       const payload = buildRequest({
         mode: targetThread.mode,
-        videoWorkflow: targetThread.videoWorkflow,
         model: targetModelId,
         prompt,
         assets: await hydrateThreadReferences(targetSession, targetThread, targetDraft),
@@ -1689,12 +1760,19 @@ export default function App() {
       }, targetModel);
       patchAttempt(targetSession.id, targetThread.mode, targetThread.id, attemptId, { request: JSON.parse(prettyRequest(payload)) as Record<string, unknown>, submittedAt: new Date().toISOString() });
       if (targetThread.mode === "image") {
-        const result = await generateImage(payload);
+        const result = await generateImage(payload, (actualCostUsd) => {
+          recordGenerationCost(targetSession.id, "image", targetThread.id, attemptId, actualCostUsd);
+        });
         const generated = await Promise.all(result.urls.map((url, index) =>
           importGeneratedImage(
             url,
             `image-${new Date().toISOString().replaceAll(":", "-")}-${index + 1}.png`,
             targetDraft.imageEditMode ? "edited" : "generated",
+            {
+              resolution: typeof targetDraft.options.resolution === "string" || typeof targetDraft.options.resolution === "number"
+                ? String(targetDraft.options.resolution) : undefined,
+              aspectRatio: typeof targetDraft.options.aspect_ratio === "string" ? targetDraft.options.aspect_ratio : undefined,
+            },
           ),
         ));
         patchSession(targetSession.id, (current) => {
@@ -1722,7 +1800,6 @@ export default function App() {
               execution: {
                 ...current.agent.execution,
                 generationCount: current.agent.execution.generationCount + 1,
-                spentUsd: current.agent.execution.spentUsd + (result.actualCostUsd ?? 0),
               },
               artifacts: [
                 ...current.agent.artifacts,
@@ -1748,7 +1825,9 @@ export default function App() {
           };
         });
       } else {
-        const result = await submitVideo(payload);
+        const result = await submitVideo(payload, (actualCostUsd) => {
+          recordGenerationCost(targetSession.id, "video", targetThread.id, attemptId, actualCostUsd);
+        });
         patchSession(targetSession.id, (current) => ({
           ...current,
           threads: {
@@ -1774,7 +1853,6 @@ export default function App() {
               ...current.agent.execution,
               generationCount: current.agent.execution.generationCount + 1,
               currentJobIds: [...current.agent.execution.currentJobIds, result.jobId],
-              spentUsd: current.agent.execution.spentUsd + (result.actualCostUsd ?? 0),
             },
           }, {
             actor: current.agent.controlMode === "agent" ? "agent" : "user",
@@ -1811,11 +1889,8 @@ export default function App() {
     patchActive((current) => {
       if (current.agent.controlMode === "agent") return current;
       const active = current.threads[current.mode].find((item) => item.id === current.activeThreadIds[current.mode]);
-      const next = createGenerationThread(
-        current.mode,
-        current.threads[current.mode].length + 1,
-        current.mode === "video" ? active?.videoWorkflow ?? "generate" : "generate",
-      );
+      if (!active) return current;
+      const next = createSiblingGenerationThread(active, current.threads[current.mode].length + 1);
       return {
         ...current,
         threads: { ...current.threads, [current.mode]: [...current.threads[current.mode], next] },
@@ -1847,18 +1922,18 @@ export default function App() {
     });
   };
 
-  const renameThread = (id: string) => {
+  const renameThread = (id: string, name: string) => {
     const current = modeThreads.find((item) => item.id === id);
     if (!current) return;
-    const name = window.prompt(t("renameThread"), current.name)?.trim();
-    if (!name || name === current.name) return;
+    const normalized = name.trim().slice(0, 100);
+    if (!normalized || normalized === current.name) return;
     patchActive((session) => ({
       ...session,
       threads: {
         ...session.threads,
         [session.mode]: session.threads[session.mode].map((item) => item.id === id ? {
           ...item,
-          name: name.slice(0, 100),
+          name: normalized,
           revision: item.revision + 1,
           updatedAt: new Date().toISOString(),
         } : item),
@@ -1870,25 +1945,17 @@ export default function App() {
     patchActive((current) => {
       if (current.agent.controlMode === "agent") return current;
       const visible = current.threads[current.mode].filter((item) => !item.archivedAt);
+      if (visible.length <= 1) return current;
       const target = visible.find((item) => item.id === id);
       if (!target || activeGenerationAttempt(target)) return current;
       const remaining = visible.filter((item) => item.id !== id);
-      const replacement = remaining.length ? null : createGenerationThread(
-        current.mode,
-        current.threads[current.mode].length + 1,
-        current.mode === "video" ? target.videoWorkflow : "generate",
-      );
-      const nextVisible = replacement ? [replacement] : remaining;
       const targetIndex = visible.findIndex((item) => item.id === id);
-      const nextActive = nextVisible[Math.min(targetIndex, nextVisible.length - 1)];
+      const nextActive = remaining[Math.min(targetIndex, remaining.length - 1)];
       return {
         ...current,
         threads: {
           ...current.threads,
-          [current.mode]: [
-            ...current.threads[current.mode].map((item) => item.id === id ? { ...item, archivedAt: new Date().toISOString() } : item),
-            ...(replacement ? [replacement] : []),
-          ],
+          [current.mode]: current.threads[current.mode].map((item) => item.id === id ? { ...item, archivedAt: new Date().toISOString() } : item),
         },
         activeThreadIds: current.activeThreadIds[current.mode] === id
           ? { ...current.activeThreadIds, [current.mode]: nextActive.id }
@@ -1901,9 +1968,15 @@ export default function App() {
     if (quitConfirmationPending.current || confirmationRef.current) return;
     quitConfirmationPending.current = true;
     try {
+      const activeJobCount = studioRef.current.sessions.reduce(
+        (count, current) => count + activeVideoJobsFromAttempts(current).length,
+        0,
+      );
       const confirmed = await confirmAction(
         t("quitAppTitle"),
-        t("quitAppHint"),
+        activeJobCount
+          ? `${t("quitAppHint")}\n\n${t("quitAppWithVideoJobsHint", { count: activeJobCount })}`
+          : t("quitAppHint"),
         t("quitApp"),
       );
       if (confirmed && isTauriRuntime()) {
@@ -1968,7 +2041,7 @@ export default function App() {
   const setCurrentAsModeDefault = () => patchActive((current) => {
     const target = current.threads[current.mode].find((item) => item.id === current.activeThreadIds[current.mode]) ?? current.threads[current.mode][0];
     const resolved = effectiveThreadDraft(current, target);
-    const key = generationDefaultKey(target);
+    const key = target.mode;
     const modelId = effectiveThreadModelId(current, target);
     return {
       ...current,
@@ -2043,10 +2116,18 @@ export default function App() {
     setSelectedAssetIds(new Set());
   };
 
-  const mentionMatch = draft.prompt.match(/(?:^|\s)#(\d*)$/);
+  const mentionMatch = draft.prompt.match(/(?:^|\s)@(\d*)$/);
   const mentionSuggestions = mentionMatch
     ? draft.references.filter((reference) => String(reference.slot).startsWith(mentionMatch[1]))
     : [];
+  const validPromptMentions = useMemo(
+    () => findInputMentions(draft.prompt, draft.references.map((reference) => reference.slot)),
+    [draft.prompt, draft.references],
+  );
+  const mentionedSlots = useMemo(
+    () => mentionedInputSlots(draft.prompt, draft.references.map((reference) => reference.slot)),
+    [draft.prompt, draft.references],
+  );
   const agentModelConfirmed = session.agent.controlMode === "human"
     || (session.agent.modelSelections[mode].status === "selected" && session.agent.modelSelections[mode].modelId === selectedId);
   const hasMask = mode === "image" && draft.imageEditMode && draft.maskStrokes.length > 0;
@@ -2141,7 +2222,7 @@ export default function App() {
   runGenerationRef.current = runGeneration;
   dismissGenerationResultRef.current = () => dismissGenerationResult();
 
-  const modalOpen = otherDialogOpen || resultDialogOpen || Boolean(confirmation)
+  const modalOpen = onboardingOpen !== false || otherDialogOpen || resultDialogOpen || Boolean(confirmation)
     || settingsOpen || shortcutHelpOpen || assemblyOpen || decisionOpen;
   const previewAsset = session.assets.find((asset) => asset.id === previewAssetId);
   const focusedAsset = previewAsset ?? session.assets.find((asset) => asset.id === focusedAssetId)
@@ -2219,7 +2300,7 @@ export default function App() {
         focusPrompt();
         return true;
       case "archiveThread":
-        if (session.agent.controlMode === "agent" || hasActiveAttempt) return false;
+        if (session.agent.controlMode === "agent" || hasActiveAttempt || modeThreads.length <= 1) return true;
         archiveThread(thread.id);
         return true;
       case "restoreThread": {
@@ -2266,7 +2347,7 @@ export default function App() {
         return true;
       default: return false;
     }
-  }, [archiveThread, assemblyOpen, canGenerate, closeTopmostDialog, confirmation, createThread, cycleThread, decisionOpen, focusPrompt, focusedAsset, hasActiveAttempt, modalOpen, mode, previewAsset, requestAppQuit, rightPanelOpen, rightPanelTab, session.agent.controlMode, session.threads, settingsOpen, shortcutHelpOpen, t, thread.id]);
+  }, [archiveThread, assemblyOpen, canGenerate, closeTopmostDialog, confirmation, createThread, cycleThread, decisionOpen, focusPrompt, focusedAsset, hasActiveAttempt, modalOpen, mode, modeThreads.length, previewAsset, requestAppQuit, rightPanelOpen, rightPanelTab, session.agent.controlMode, session.threads, settingsOpen, shortcutHelpOpen, t, thread.id]);
   dispatchCommandRef.current = dispatchAppCommand;
 
   useEffect(() => {
@@ -2302,7 +2383,7 @@ export default function App() {
       newSession: !modalOpen,
       newThread: !modalOpen && session.agent.controlMode === "human",
       duplicateThread: !modalOpen && session.agent.controlMode === "human",
-      archiveThread: modalOpen || (session.agent.controlMode === "human" && !hasActiveAttempt),
+      archiveThread: modalOpen || (session.agent.controlMode === "human" && !hasActiveAttempt && modeThreads.length > 1),
       restoreThread: !modalOpen && session.agent.controlMode === "human" && hasArchivedThread,
       nextThread: !modalOpen && modeThreads.length > 1,
       previousThread: !modalOpen && modeThreads.length > 1,
@@ -2500,13 +2581,13 @@ export default function App() {
 
   return (
     <Tooltip.Provider>
-    <div className="app-shell">
+    <div className="app-shell" aria-hidden={onboardingOpen !== false} inert={onboardingOpen !== false ? true : undefined}>
       <header className="topbar" data-tauri-drag-region>
         <div className="brand" data-tauri-drag-region><span className="brand-mark"><FruitTruckMark /></span><strong>Fruit Truck</strong><button type="button" className={`brand-badge ${session.agent.controlMode}`} onClick={() => {
           setRightPanelOpen(true);
           setRightPanelTab("agent");
         }}>{session.agent.controlMode === "agent" ? t("agent") : t("humanDriven")}</button></div>
-        <ModelSelector mode={mode} models={models} selectedId={selectedId} loading={catalogLoading} catalogCount={mode === "video" && workflow === "edit" ? allModels.length : undefined} disabled={session.agent.controlMode === "agent"} onSelect={selectModel} inherited={!thread.modelOverrideId} onUseDefault={useModeDefaults} onSetDefault={setCurrentAsModeDefault} />
+        <ModelSelector mode={mode} models={models} selectedId={selectedId} loading={catalogLoading} disabled={session.agent.controlMode === "agent"} onSelect={selectModel} inherited={!thread.modelOverrideId} onUseDefault={useModeDefaults} onSetDefault={setCurrentAsModeDefault} />
         <ToggleGroup className="mode-switcher" aria-label={t("generationMode")} value={[mode]} onValueChange={(value) => {
           const next = value[0];
           if (next === "image" || next === "video") switchMode(next);
@@ -2515,6 +2596,16 @@ export default function App() {
           <Toggle value="video" aria-label={t("video")} aria-keyshortcuts="Meta+2"><Video /> {t("video")}</Toggle>
         </ToggleGroup>
         <div className="topbar-actions">
+          <div
+            className="session-spend"
+            role="status"
+            aria-live="polite"
+            aria-label={`${t("sessionSpend")}: ${formatUsd(session.agent.execution.spentUsd)}`}
+            data-tauri-drag-region
+          >
+            <small>{t("sessionSpend")}</small>
+            <strong>{formatUsd(session.agent.execution.spentUsd)}</strong>
+          </div>
           <div className="connection-pill" role="status"><i className={credential?.configured ? "online" : ""} />{credential?.configured ? credential.maskedKey : t("addApiKey")}</div>
           <Button type="button" variant="ghost" size="icon" aria-label={t("settings")} aria-keyshortcuts="Meta+," onClick={() => setSettingsOpen(true)}><Settings /></Button>
         </div>
@@ -2576,7 +2667,7 @@ export default function App() {
           {catalogError ? <div className="catalog-error"><CircleAlert /><span><strong>{t("catalogLoadFailed")}</strong><small>{catalogError}</small></span><Button variant="outline" size="sm" onClick={() => void refreshCatalog()}><RefreshCw /> {t("retry")}</Button></div> : null}
           <header className="composer-header">
             <div>
-              <p>{mode === "image" ? draft.imageEditMode ? t("imageEdit") : t("imageGeneration") : workflow === "edit" ? t("videoEdit") : t("videoGeneration")}</p>
+              <p>{mode === "image" ? draft.imageEditMode ? t("imageEdit") : t("imageGeneration") : t("videoGeneration")}</p>
               <h1>{selectedModel?.name ?? (catalogLoading ? t("loadingModels") : t("chooseModel"))}</h1>
             </div>
             <div className="composer-header-meta">
@@ -2587,18 +2678,6 @@ export default function App() {
               </div>
             </div>
           </header>
-          {mode === "video" ? (
-            <div className="workflow-row">
-              <ToggleGroup className="workflow-switch" aria-label={t("videoWorkflow")} value={[workflow]} onValueChange={(value) => {
-                const next = value[0];
-                if (next === "generate" || next === "edit") switchWorkflow(next);
-              }}>
-                <Toggle value="generate">{t("generate")}</Toggle>
-                <Toggle value="edit">{t("edit")}</Toggle>
-              </ToggleGroup>
-              <small>{workflow === "edit" ? t("editWorkflowHint") : t("generateWorkflowHint")}</small>
-            </div>
-          ) : null}
           <div className="composer-form">
             {mode === "image" ? (
               <Field.Root className="edit-mode-row">
@@ -2606,22 +2685,21 @@ export default function App() {
                 <Switch checked={draft.imageEditMode} onCheckedChange={(value) => patchDraft({ imageEditMode: value })} />
               </Field.Root>
             ) : null}
-            {(mode === "image" && draft.imageEditMode) || (mode === "video" && workflow === "edit") ? (
+            {mode === "image" && draft.imageEditMode ? (
               <>
-                <EditMediaPanel
+                <ImageEditPanel
                   asset={editTargetAsset}
-                  targetLabel={editReference ? `#${editReference.slot}` : ""}
-                  kind={mode === "image" ? "image" : "video"}
-                  maskStrokes={mode === "image" ? draft.maskStrokes : undefined}
-                  maskInstructions={mode === "image" ? draft.maskInstructions : undefined}
-                  maskError={mode === "image" ? maskReferenceError : undefined}
-                  onMaskStrokesChange={mode === "image" ? (maskStrokes) => patchDraft({
+                  targetLabel={editReference ? `@${editReference.slot}` : ""}
+                  maskStrokes={draft.maskStrokes}
+                  maskInstructions={draft.maskInstructions}
+                  maskError={maskReferenceError}
+                  onMaskStrokesChange={(maskStrokes) => patchDraft({
                     maskStrokes,
                     maskInstructions: maskStrokes.length ? draft.maskInstructions : "",
                     enhancedPrompt: "",
                     enhancedPromptDirty: false,
-                  }) : undefined}
-                  onMaskInstructionsChange={mode === "image" ? (maskInstructions) => patchDraft({ maskInstructions, enhancedPrompt: "", enhancedPromptDirty: false }) : undefined}
+                  })}
+                  onMaskInstructionsChange={(maskInstructions) => patchDraft({ maskInstructions, enhancedPrompt: "", enhancedPromptDirty: false })}
                   onDropAsset={setEditTargetAsset}
                   onImport={importEditTarget}
                   onPick={pickEditTarget}
@@ -2629,9 +2707,23 @@ export default function App() {
                 {editTargetError ? <div className="field-error edit-canvas-error">{editTargetError}</div> : null}
               </>
             ) : null}
-            <Field.Root className="prompt-field" invalid={Boolean(promptReferenceError)}>
+            <InputTray references={draft.references} assets={session.assets} roles={roles} limit={referenceLimit} error={inputValidationError} onChange={(references) => {
+              const targetStillAttached = references.some((reference) => `@${reference.slot}` === draft.imageEditTarget);
+              patchDraft({
+                references,
+                imageEditTarget: mode === "image" && draft.imageEditMode && !targetStillAttached ? "" : draft.imageEditTarget,
+                maskStrokes: mode === "image" && draft.imageEditMode && !targetStillAttached ? [] : draft.maskStrokes,
+                maskInstructions: mode === "image" && draft.imageEditMode && !targetStillAttached ? "" : draft.maskInstructions,
+                enhancedPrompt: "",
+                enhancedPromptDirty: false,
+              });
+            }} onImport={importFiles} onPick={pickFiles} />
+            <Field.Root className="prompt-field">
               <Field.Label className="section-label-row"><span className="section-label">{t("prompt")}{hasMask ? <> <em>{t("optional")}</em></> : null}</span><small>{t("characters", { count: draft.prompt.length.toLocaleString(language === "ko" ? "ko-KR" : "en-US") })}</small></Field.Label>
-              <div className="prompt-input-wrap">
+              <div className={`prompt-input-wrap ${draft.prompt ? "has-value" : ""}`}>
+                <div ref={promptHighlightRef} className="prompt-highlight" aria-hidden="true">
+                  <PromptMentionHighlight value={draft.prompt} mentions={validPromptMentions} />
+                </div>
                 <Textarea
                   ref={promptRef}
                   autoFocus
@@ -2644,30 +2736,38 @@ export default function App() {
                     enhancedPrompt: "",
                     enhancedPromptDirty: false,
                   })}
+                  onScroll={(event) => {
+                    if (!promptHighlightRef.current) return;
+                    promptHighlightRef.current.scrollTop = event.currentTarget.scrollTop;
+                    promptHighlightRef.current.scrollLeft = event.currentTarget.scrollLeft;
+                  }}
                 />
                 {mentionSuggestions.length ? (
                   <div className="mention-menu" role="listbox" aria-label={t("numberedInputs")}>
                     {mentionSuggestions.map((reference) => {
                       const asset = assetMap.get(reference.assetId);
-                      return <Button type="button" variant="ghost" key={reference.assetId} onClick={() => patchDraft({ prompt: draft.prompt.replace(/#\d*$/, `#${reference.slot} `) })}><b>#{reference.slot}</b>{asset?.name}</Button>;
+                      return <Button type="button" variant="ghost" key={reference.assetId} onClick={() => patchDraft({ prompt: draft.prompt.replace(/@\d*$/, `@${reference.slot} `) })}><b>@{reference.slot}</b>{asset?.name}</Button>;
                     })}
                   </div>
                 ) : null}
               </div>
-              {draft.references.length ? <div className="prompt-references">{draft.references.map((reference) => {
-                const asset = assetMap.get(reference.assetId);
-                return asset ? (
-                  <Tooltip.Root key={reference.assetId}>
-                    <Tooltip.Trigger render={<Button type="button" variant="ghost" />} onClick={() => patchDraft({ prompt: `${draft.prompt}${draft.prompt.endsWith(" ") || !draft.prompt ? "" : " "}#${reference.slot} ` })}>#{reference.slot}</Tooltip.Trigger>
-                    <Tooltip.Portal>
-                      <Tooltip.Positioner sideOffset={6}>
-                        <Tooltip.Popup className="token-tooltip"><AssetPreview asset={asset} /><span>{asset.name}</span></Tooltip.Popup>
-                      </Tooltip.Positioner>
-                    </Tooltip.Portal>
-                  </Tooltip.Root>
-                ) : <Button type="button" variant="ghost" key={reference.assetId} onClick={() => patchDraft({ prompt: `${draft.prompt}${draft.prompt.endsWith(" ") || !draft.prompt ? "" : " "}#${reference.slot} ` })}>#{reference.slot}</Button>;
-              })}</div> : null}
-              {promptReferenceError ? <Field.Error className="field-error" match>{promptReferenceError}</Field.Error> : null}
+              <div className="prompt-reference-meta">
+                <small>{t("mentionInputsHint")}</small>
+                {mentionedSlots.length ? <div className="prompt-references">{mentionedSlots.map((slot) => {
+                  const reference = draft.references.find((item) => item.slot === slot);
+                  const asset = reference ? assetMap.get(reference.assetId) : undefined;
+                  return asset ? (
+                    <Tooltip.Root key={slot}>
+                      <Tooltip.Trigger render={<span className="prompt-reference-chip" />}>@{slot} {t("mentioned")}</Tooltip.Trigger>
+                      <Tooltip.Portal>
+                        <Tooltip.Positioner sideOffset={6}>
+                          <Tooltip.Popup className="token-tooltip"><AssetPreview asset={asset} /><span>{asset.name}</span></Tooltip.Popup>
+                        </Tooltip.Positioner>
+                      </Tooltip.Portal>
+                    </Tooltip.Root>
+                  ) : null;
+                })}</div> : null}
+              </div>
             </Field.Root>
 
             <Field.Root className="enhance-row">
@@ -2684,18 +2784,7 @@ export default function App() {
               </Collapsible.Root>
             ) : null}
 
-            <InputTray references={draft.references} assets={session.assets} roles={roles} limit={referenceLimit} error={inputValidationError} onChange={(references) => {
-              const targetStillAttached = references.some((reference) => `#${reference.slot}` === draft.imageEditTarget);
-              patchDraft({
-                references,
-                imageEditTarget: mode === "image" && draft.imageEditMode && !targetStillAttached ? "" : draft.imageEditTarget,
-                maskStrokes: mode === "image" && draft.imageEditMode && !targetStillAttached ? [] : draft.maskStrokes,
-                maskInstructions: mode === "image" && draft.imageEditMode && !targetStillAttached ? "" : draft.maskInstructions,
-                enhancedPrompt: "",
-                enhancedPromptDirty: false,
-              });
-            }} onImport={importFiles} onPick={pickFiles} />
-            <OptionsFields key={`${mode}:${workflow}:${selectedModel?.id ?? ""}`} mode={mode} model={selectedModel} options={draft.options} providerJson={draft.providerJson} providerError={providerError} onOptionsChange={(options) => patchDraft({ options })} onProviderJsonChange={(providerJson) => patchDraft({ providerJson })} />
+            <OptionsFields key={`${mode}:${selectedModel?.id ?? ""}`} mode={mode} model={selectedModel} options={draft.options} providerJson={draft.providerJson} providerError={providerError} onOptionsChange={(options) => patchDraft({ options })} onProviderJsonChange={(providerJson) => patchDraft({ providerJson })} />
             {selectedModel ? <div className="thread-default-controls">
               <Button type="button" size="xs" variant="ghost" disabled={session.agent.controlMode === "agent" || !thread.modelOverrideId && !Object.keys(thread.optionOverrides).length && thread.providerJsonOverride == null} onClick={useModeDefaults}>{t("useModeDefault")}</Button>
               <Button type="button" size="xs" variant="ghost" disabled={session.agent.controlMode === "agent"} onClick={setCurrentAsModeDefault}>{t("setModeDefault")}</Button>
@@ -2712,7 +2801,7 @@ export default function App() {
                 ? t("preparing")
                 : mode === "image"
                   ? draft.imageEditMode ? t("editImage") : t("generateMode", { mode: t("image") })
-                  : workflow === "edit" ? t("editVideo") : t("generateMode", { mode: t("video") })}
+                  : t("generateMode", { mode: t("video") })}
               {!generating && !enhancing ? <ChevronRight /> : null}
             </Button>
           </footer>
@@ -2799,6 +2888,19 @@ export default function App() {
       <ConfirmDialog confirmation={confirmation} onClose={closeConfirmation} />
       <UpdatePrompt />
     </div>
+    {onboardingOpen !== false ? (
+      <Onboarding
+        ready={onboardingOpen === true}
+        onSave={async (apiKey) => {
+          const status = await saveApiKey(apiKey);
+          if (!status.configured) throw new Error(t("onboardingKeySaveFailed"));
+          setCredential(status);
+          localStorage.setItem(ONBOARDING_COMPLETE_KEY, "true");
+          toast.success(t("keySaved"));
+        }}
+        onComplete={() => setOnboardingOpen(false)}
+      />
+    ) : null}
     </Tooltip.Provider>
   );
 }

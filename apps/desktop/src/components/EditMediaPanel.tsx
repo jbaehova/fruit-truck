@@ -1,7 +1,7 @@
 import { Field } from "@base-ui/react/field";
 import { Toggle } from "@base-ui/react/toggle";
 import { ToggleGroup } from "@base-ui/react/toggle-group";
-import { Brush, Eraser, Eye, ImagePlus, RotateCcw, Undo2, Upload, Video } from "lucide-react";
+import { Brush, Eraser, Eye, ImagePlus, RotateCcw, Undo2, Upload } from "lucide-react";
 import {
   useEffect,
   useCallback,
@@ -11,7 +11,6 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
-import { AssetPreview } from "@/components/AssetPreview";
 import { clearAssetDragData, hasAssetDragData, readActiveAssetDragId, readAssetDragId, subscribeToAssetPointerDrop } from "@/assetDrag";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -92,6 +91,7 @@ function MaskCanvas({
   viewMode: "fit" | "actual";
   onChange: (strokes: MaskStroke[]) => void;
 }) {
+  const { t } = useI18n();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const imageRef = useRef<HTMLImageElement>(null);
   const activeStroke = useRef<MaskStroke | null>(null);
@@ -166,6 +166,21 @@ function MaskCanvas({
     }
   };
 
+  useEffect(() => {
+    if (!editing || preview || !strokes.length) return;
+    const undoMask = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.matches("input, textarea, [contenteditable='true']")) return;
+      if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "z") return;
+      event.preventDefault();
+      event.stopPropagation();
+      onChange(strokes.slice(0, -1));
+      canvasRef.current?.focus();
+    };
+    window.addEventListener("keydown", undoMask, true);
+    return () => window.removeEventListener("keydown", undoMask, true);
+  }, [editing, onChange, preview, strokes]);
+
   return (
     <div className={`mask-stage ${viewMode}`}>
       {source ? <img ref={imageRef} src={source} alt={asset.name} onLoad={() => {
@@ -174,7 +189,7 @@ function MaskCanvas({
       <canvas
         ref={canvasRef}
         className={editing && !preview ? `drawing ${tool}` : ""}
-        aria-label="Mask drawing canvas"
+        aria-label={t("maskDrawingCanvas")}
         aria-disabled={!editing || preview}
         tabIndex={editing && !preview ? 0 : -1}
         onKeyDown={handleKeyDown}
@@ -205,10 +220,9 @@ function MaskCanvas({
   );
 }
 
-export function EditMediaPanel({
+export function ImageEditPanel({
   asset,
   targetLabel,
-  kind,
   maskStrokes,
   maskInstructions,
   maskError,
@@ -220,12 +234,11 @@ export function EditMediaPanel({
 }: {
   asset: SessionAsset | null;
   targetLabel: string;
-  kind: "image" | "video";
   maskStrokes?: MaskStroke[];
   maskInstructions?: string;
   maskError?: string | null;
-  onMaskStrokesChange?: (strokes: MaskStroke[]) => void;
-  onMaskInstructionsChange?: (instructions: string) => void;
+  onMaskStrokesChange: (strokes: MaskStroke[]) => void;
+  onMaskInstructionsChange: (instructions: string) => void;
   onDropAsset: (assetId: string) => void;
   onImport: (files: FileList | File[]) => Promise<void>;
   onPick: () => Promise<void>;
@@ -238,7 +251,7 @@ export function EditMediaPanel({
   const [viewMode, setViewMode] = useState<"fit" | "actual">("fit");
   const [brushSize, setBrushSize] = useState<number>(BRUSH_SIZES[1]);
   const strokes = maskStrokes ?? [];
-  const supportsMask = kind === "image" && Boolean(asset) && onMaskStrokesChange && onMaskInstructionsChange;
+  const supportsMask = Boolean(asset);
 
   useEffect(() => subscribeToAssetPointerDrop("edit", (assetId) => {
     setDragging(false);
@@ -293,7 +306,7 @@ export function EditMediaPanel({
       <header className="edit-media-header">
         <div>
           <span className="panel-eyebrow">{t("editCanvas")}</span>
-          <strong>{asset ? asset.name : t(kind === "image" ? "chooseEditImage" : "chooseEditVideo")}</strong>
+          <strong>{asset ? asset.name : t("chooseEditImage")}</strong>
           <small>{asset ? targetLabel : t("editCanvasDropHint")}</small>
         </div>
         <div className="edit-media-actions">
@@ -332,24 +345,20 @@ export function EditMediaPanel({
       </header>
 
       {asset ? (
-        supportsMask ? (
-          <MaskCanvas
-            asset={asset}
-            strokes={strokes}
-            brushSize={brushSize}
-            editing={editingMask}
-            tool={maskTool}
-            preview={previewMask}
-            viewMode={viewMode}
-            onChange={onMaskStrokesChange}
-          />
-        ) : (
-          <div className={`edit-media-preview ${viewMode}`}><AssetPreview asset={asset} controls={asset.kind === "video"} /></div>
-        )
+        <MaskCanvas
+          asset={asset}
+          strokes={strokes}
+          brushSize={brushSize}
+          editing={editingMask}
+          tool={maskTool}
+          preview={previewMask}
+          viewMode={viewMode}
+          onChange={onMaskStrokesChange}
+        />
       ) : (
         <Button type="button" variant="ghost" className="edit-media-empty" onClick={() => void onPick()}>
-          {kind === "image" ? <ImagePlus /> : <Video />}
-          <strong>{t(kind === "image" ? "dropEditImage" : "dropEditVideo")}</strong>
+          <ImagePlus />
+          <strong>{t("dropEditImage")}</strong>
           <small>{t("editCanvasDropHint")}</small>
         </Button>
       )}

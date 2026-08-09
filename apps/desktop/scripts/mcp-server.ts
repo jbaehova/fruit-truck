@@ -3,7 +3,7 @@ import { createInterface } from "node:readline";
 import { mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir, platform } from "node:os";
-import { delimiter, extname, isAbsolute, join, relative, resolve } from "node:path";
+import { delimiter, isAbsolute, join, relative, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
@@ -13,6 +13,7 @@ import {
   createAgentState,
   exposeAgentSession,
   normalizeAgentState,
+  recordActualCost,
   resolveAgentDecisionFromChat,
   validateAgentState,
   validatePlanStepTransition,
@@ -30,6 +31,7 @@ import {
   productSystemInstruction,
   promptEnhancementUserContent,
   promptEnhancerInstruction,
+  normalizeVideoStatus,
   validateEnhancedPrompt,
   type DraftOptions,
   type GenerationModel,
@@ -39,6 +41,7 @@ import {
   type ReferenceAsset,
 } from "../src/openrouter.ts";
 import { composeEditPrompt, hasGenerationInstructions } from "../src/mask.ts";
+import { hasVideoPollingTimedOut, isVideoPollDue, videoPollRetryDelayMs } from "../src/videoPolling.ts";
 import type {
   GenerationAttempt,
   GenerationAttemptSnapshot,
@@ -79,7 +82,7 @@ type BridgeSession = {
   agent: AgentSessionState;
 };
 
-type Envelope = { schemaVersion: 1 | 2 | 3; revision: number; sessions: BridgeSession[] };
+type Envelope = { schemaVersion: 1 | 2 | 3 | 4; revision: number; sessions: BridgeSession[] };
 type ToolResult = Record<string, unknown> | Array<unknown> | string | number | boolean | null;
 
 const dataDirectory = process.env.FRUIT_TRUCK_HOME
@@ -92,6 +95,7 @@ const credentialsPath = join(dataDirectory, "credentials.json");
 const runtimePath = join(dataDirectory, "desktop-runtime.json");
 const skillsDirectory = join(dataDirectory, "skills");
 const openRouterBase = process.env.FRUIT_TRUCK_OPENROUTER_BASE ?? "https://openrouter.ai/api/v1";
+const videoPollIntervalMs = Math.max(100, Number(process.env.FRUIT_TRUCK_VIDEO_POLL_INTERVAL_MS) || 10_000);
 const MAX_AGENT_STORE_BYTES = 10 * 1024 * 1024;
 const MAX_AGENT_READ_BYTES = 50 * 1024 * 1024;
 const MAX_AGENT_SESSION_BYTES = 50 * 1024 * 1024;
@@ -237,17 +241,17 @@ const BASE_TOOLS = [
   tool("create_generation_thread", "Create a visible, mode-scoped generation workspace. Workflow Skills own its semantic meaning; Fruit Truck stores only the free-form name and generation state.", {
     sessionId: { type: "string" }, requestKey: { type: "string", minLength: 1, maxLength: 200 },
     mode: { enum: ["image", "video"] }, name: { type: "string", minLength: 1, maxLength: 100 },
-    videoWorkflow: { enum: ["generate", "edit"] }, outputRole: { type: "string", minLength: 1, maxLength: 100 },
+    outputRole: { type: "string", minLength: 1, maxLength: 100 },
   }, ["sessionId", "requestKey", "mode", "name"]),
   tool("update_generation_thread", "Write the prompt, inputs, settings, and free-form output role for one generation thread before execution.", {
     sessionId: { type: "string" }, threadId: { type: "string" }, expectedThreadRevision: { type: "integer", minimum: 0 },
     patch: { type: "object", additionalProperties: false, properties: {
       name: { type: "string", minLength: 1, maxLength: 100 }, prompt: { type: "string", maxLength: 20_000 },
-      videoWorkflow: { enum: ["generate", "edit"] }, outputRole: { type: "string", minLength: 1, maxLength: 100 },
+      outputRole: { type: "string", minLength: 1, maxLength: 100 },
       modelOverrideId: { type: "string" }, useModeDefaultModel: { type: "boolean" }, enhancePrompt: { type: "boolean" },
       options: { type: "object", additionalProperties: true }, provider: { type: "object", additionalProperties: true },
       assetBindings: { type: "array", maxItems: 12, items: { type: "object", required: ["assetId", "role"], properties: {
-        assetId: { type: "string" }, role: { enum: ["reference", "first_frame", "last_frame", "video_reference"] },
+        assetId: { type: "string" }, role: { enum: ["reference", "first_frame", "last_frame"] },
       } } },
     } },
   }, ["sessionId", "threadId", "patch"]),
@@ -277,7 +281,7 @@ const BASE_TOOLS = [
     options: { type: "object", additionalProperties: true },
     provider: { type: "object", additionalProperties: true },
     assetBindings: { type: "array", maxItems: 12, items: { type: "object", required: ["assetId", "role"], properties: {
-      assetId: { type: "string" }, role: { enum: ["reference", "first_frame", "last_frame", "video_reference"] },
+      assetId: { type: "string" }, role: { enum: ["reference", "first_frame", "last_frame"] },
     } } },
     role: { type: "string" }, planStepId: { type: "string" },
     estimatedCostUsd: { type: "number", minimum: 0, maximum: 10000 },
@@ -337,13 +341,12 @@ function emptyThreadDraft(): GenerationDraftState {
   };
 }
 
-function newBridgeThread(mode: "image" | "video", index = 1, workflow: "generate" | "edit" = "generate"): GenerationThread {
+function newBridgeThread(mode: "image" | "video", index = 1): GenerationThread {
   const createdAt = new Date().toISOString();
   return {
     id: `thread-${crypto.randomUUID()}`,
     name: `${mode === "image" ? "Image" : "Video"} ${index}`,
     mode,
-    videoWorkflow: workflow,
     createdAt,
     updatedAt: createdAt,
     revision: 0,
@@ -356,31 +359,94 @@ function newBridgeThread(mode: "image" | "video", index = 1, workflow: "generate
 }
 
 function normalizeBridgeSession(value: BridgeSession): BridgeSession {
+  type LegacyWorkflow = "generate" | "edit";
+  type LegacyThread = GenerationThread & { videoWorkflow?: LegacyWorkflow; videoWorkflowStates?: unknown };
+  type LegacyDefaults = GenerationDefaults & {
+    options: GenerationDefaults["options"] & { videoGenerate?: DraftOptions; videoEdit?: DraftOptions };
+    providerJson: GenerationDefaults["providerJson"] & { videoGenerate?: string; videoEdit?: string };
+  };
   const legacy = value as BridgeSession & {
+    videoWorkflow?: LegacyWorkflow;
     selectedModelIds?: { image: string; video: string };
     jobs?: Array<Record<string, unknown>>;
+    activeVideoJobs?: Array<Record<string, unknown>>;
+    drafts?: unknown;
+    generationDefaults?: LegacyDefaults;
   };
   const imageThread = newBridgeThread("image");
   const videoThread = newBridgeThread("video");
-  const defaults: GenerationDefaults = value.generationDefaults ?? {
-    modelIds: { image: legacy.selectedModelIds?.image ?? "", video: legacy.selectedModelIds?.video ?? "" },
-    options: { image: {}, videoGenerate: {}, videoEdit: {} },
-    providerJson: { image: "", videoGenerate: "", videoEdit: "" },
+  const storedDefaults = legacy.generationDefaults;
+  const defaults: GenerationDefaults = {
+    modelIds: {
+      image: storedDefaults?.modelIds.image ?? legacy.selectedModelIds?.image ?? "",
+      video: storedDefaults?.modelIds.video ?? legacy.selectedModelIds?.video ?? "",
+    },
+    options: {
+      image: storedDefaults?.options.image ?? {},
+      video: storedDefaults?.options.video ?? storedDefaults?.options.videoGenerate ?? {},
+    },
+    providerJson: {
+      image: storedDefaults?.providerJson.image ?? "",
+      video: storedDefaults?.providerJson.video ?? storedDefaults?.providerJson.videoGenerate ?? "",
+    },
   };
-  const image = value.threads?.image?.length ? value.threads.image : [imageThread];
-  const video = value.threads?.video?.length ? value.threads.video : [videoThread];
-  for (const thread of [...image, ...video]) {
-    thread.attempts ??= [];
-    thread.enhancementAttempts ??= [];
+  const legacyEditJobIds = new Set<string>();
+  const normalizeThread = (thread: LegacyThread, mode: "image" | "video"): GenerationThread => {
+    const { videoWorkflow: _workflow, videoWorkflowStates: _workflowStates, ...canonical } = thread;
+    return {
+      ...canonical,
+      mode,
+      draft: {
+        ...canonical.draft,
+        references: (canonical.draft?.references ?? []).filter((reference) => (reference.role as string) !== "video_reference"),
+      },
+      attempts: (canonical.attempts ?? []).flatMap((attempt) => {
+        const legacySnapshot = attempt.snapshot as (GenerationAttemptSnapshot & { videoWorkflow?: LegacyWorkflow }) | undefined;
+        const legacyEditAttempt = mode === "video" && (thread.videoWorkflow === "edit"
+          || legacySnapshot?.videoWorkflow === "edit"
+          || legacySnapshot?.assetBindings?.some((binding) => (binding.role as string) === "video_reference"));
+        if (legacyEditAttempt) {
+          if (attempt.jobId) legacyEditJobIds.add(attempt.jobId);
+          return [];
+        }
+        if (!legacySnapshot) return [{ ...attempt }];
+        const { videoWorkflow: _snapshotWorkflow, ...snapshot } = legacySnapshot;
+        return [{ ...attempt, snapshot: { ...snapshot, assetBindings: (snapshot.assetBindings ?? []).filter((binding) => (binding.role as string) !== "video_reference") } }];
+      }),
+      enhancementAttempts: canonical.enhancementAttempts ?? [],
+    };
+  };
+  const image = value.threads?.image?.length
+    ? value.threads.image.map((thread) => normalizeThread(thread as LegacyThread, "image"))
+    : [imageThread];
+  const legacyEditThreadIds = new Set((value.threads?.video ?? [])
+    .filter((thread) => (thread as LegacyThread).videoWorkflow === "edit")
+    .map((thread) => thread.id));
+  for (const thread of (value.threads?.video ?? []) as LegacyThread[]) {
+    if (thread.videoWorkflow !== "edit") continue;
+    for (const attempt of thread.attempts ?? []) {
+      if (attempt.jobId) legacyEditJobIds.add(attempt.jobId);
+    }
   }
-  for (const job of legacy.jobs ?? []) {
+  const video = value.threads?.video?.length
+    ? value.threads.video
+      .filter((thread) => (thread as LegacyThread).videoWorkflow !== "edit")
+      .map((thread) => normalizeThread(thread as LegacyThread, "video"))
+    : [];
+  if (!video.length) video.push(videoThread);
+  for (const job of [...(legacy.jobs ?? []), ...(legacy.activeVideoJobs ?? [])]) {
+    const legacyEditJob = job.workflow === "edit" || (typeof job.threadId === "string" && legacyEditThreadIds.has(job.threadId));
+    if (legacyEditJob) {
+      if (typeof job.jobId === "string") legacyEditJobIds.add(job.jobId);
+      continue;
+    }
     const jobId = typeof job.jobId === "string" ? job.jobId : "";
     if (!jobId || video.some((thread) => thread.attempts.some((attempt) => attempt.jobId === jobId))) continue;
     const target = typeof job.threadId === "string" ? video.find((thread) => thread.id === job.threadId) : undefined;
     const thread = target ?? newBridgeThread("video", video.length + 1);
     if (!target) video.push(thread);
     const now = typeof job.submittedAt === "string" ? job.submittedAt : new Date().toISOString();
-    const modelId = typeof job.modelId === "string" ? job.modelId : defaults.modelIds.video;
+    const modelId = typeof job.modelId === "string" ? job.modelId : typeof job.model === "string" ? job.model : defaults.modelIds.video;
     const inputAssetIds = Array.isArray(job.inputAssetIds) ? job.inputAssetIds.filter((id): id is string => typeof id === "string") : [];
     thread.attempts.push({
       id: typeof job.attemptId === "string" ? job.attemptId : `attempt-${crypto.randomUUID()}`,
@@ -397,9 +463,21 @@ function normalizeBridgeSession(value: BridgeSession): BridgeSession {
       jobId,
       progress: typeof job.progress === "number" ? job.progress : undefined,
       error: typeof job.error === "string" ? job.error : undefined,
+      pollAttempts: typeof job.pollAttempts === "number" ? job.pollAttempts : undefined,
+      lastPolledAt: typeof job.lastPolledAt === "string" ? job.lastPolledAt : undefined,
+      nextPollAt: typeof job.nextPollAt === "string" ? job.nextPollAt : undefined,
     });
   }
-  const { selectedModelIds: _selectedModelIds, jobs: _jobs, ...canonical } = legacy;
+  const agent = normalizeAgentState(value.agent);
+  agent.execution.currentJobIds = agent.execution.currentJobIds.filter((jobId) => !legacyEditJobIds.has(jobId));
+  const {
+    videoWorkflow: _videoWorkflow,
+    selectedModelIds: _selectedModelIds,
+    jobs: _jobs,
+    activeVideoJobs: _activeVideoJobs,
+    drafts: _drafts,
+    ...canonical
+  } = legacy;
   return {
     ...canonical,
     generationDefaults: defaults,
@@ -409,21 +487,15 @@ function normalizeBridgeSession(value: BridgeSession): BridgeSession {
       video: video.some((thread) => thread.id === value.activeThreadIds?.video) ? value.activeThreadIds.video : video[0].id,
     },
     assets: value.assets ?? [],
-    agent: normalizeAgentState(value.agent),
+    agent,
   };
 }
 
-function threadDefaultKey(thread: GenerationThread) {
-  if (thread.mode === "image") return "image" as const;
-  return thread.videoWorkflow === "generate" ? "videoGenerate" as const : "videoEdit" as const;
-}
-
 function resolvedThreadDraft(session: BridgeSession, thread: GenerationThread): GenerationDraftState {
-  const key = threadDefaultKey(thread);
   return {
     ...thread.draft,
-    options: { ...session.generationDefaults.options[key], ...thread.optionOverrides },
-    providerJson: thread.providerJsonOverride ?? session.generationDefaults.providerJson[key],
+    options: { ...session.generationDefaults.options[thread.mode], ...thread.optionOverrides },
+    providerJson: thread.providerJsonOverride ?? session.generationDefaults.providerJson[thread.mode],
   };
 }
 
@@ -441,7 +513,6 @@ function snapshotForThread(session: BridgeSession, thread: GenerationThread): Ge
   const draft = resolvedThreadDraft(session, thread);
   return {
     mode: thread.mode,
-    videoWorkflow: thread.videoWorkflow,
     modelId: resolvedThreadModel(session, thread),
     outputRole: thread.outputRole,
     prompt: draft.prompt,
@@ -468,17 +539,32 @@ function sanitizedRequestSnapshot(payload: Record<string, unknown>, snapshot: Ge
 }
 
 function emptyEnvelope(): Envelope {
-  return { schemaVersion: 3, revision: 0, sessions: [] };
+  return { schemaVersion: 4, revision: 0, sessions: [] };
 }
 
-async function readEnvelope(): Promise<Envelope> {
+function stableEnvelopeValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stableEnvelopeValue);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+      .filter(([, item]) => item !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => [key, stableEnvelopeValue(item)]));
+  }
+  return value;
+}
+
+function envelopeValuesEqual(left: unknown, right: unknown) {
+  return JSON.stringify(stableEnvelopeValue(left)) === JSON.stringify(stableEnvelopeValue(right));
+}
+
+async function readEnvelope(options: { persistMigration?: boolean } = {}): Promise<Envelope> {
   if (!existsSync(sessionsPath)) return emptyEnvelope();
   const metadata = await stat(sessionsPath);
   if (metadata.size > MAX_AGENT_READ_BYTES) {
     throw new Error("The agent session bridge file exceeds the 50 MB recovery limit.");
   }
   const stored = JSON.parse(await readFile(sessionsPath, "utf8")) as Envelope & { sessionFiles?: Array<{ id: string; file: string }> };
-  if (stored.schemaVersion !== 1 && stored.schemaVersion !== 2 && stored.schemaVersion !== 3) throw new Error("Agent session store has an unsupported schema.");
+  if (stored.schemaVersion !== 1 && stored.schemaVersion !== 2 && stored.schemaVersion !== 3 && stored.schemaVersion !== 4) throw new Error("Agent session store has an unsupported schema.");
   let value: Envelope;
   if (Array.isArray(stored.sessions)) {
     value = stored;
@@ -492,12 +578,21 @@ async function readEnvelope(): Promise<Envelope> {
       if (session.id !== id) throw new Error(`Agent session file ${file} does not match index ID ${id}.`);
       return session;
     }));
-    value = { schemaVersion: 3, revision: stored.revision, sessions };
+    value = { schemaVersion: 4, revision: stored.revision, sessions };
   } else {
     throw new Error("Agent session store has an unsupported schema.");
   }
-  value.sessions = value.sessions.map(normalizeBridgeSession);
-  value.schemaVersion = 3;
+  const sourceSessions = value.sessions;
+  const sessions = sourceSessions.map(normalizeBridgeSession);
+  const requiresMigration = stored.schemaVersion !== 4
+    || Array.isArray(stored.sessions)
+    || sessions.some((session, index) => !envelopeValuesEqual(session, sourceSessions[index]));
+  value.sessions = sessions;
+  value.schemaVersion = 4;
+  if (options.persistMigration && requiresMigration) {
+    value.revision += 1;
+    await writeEnvelope(value);
+  }
   return value;
 }
 
@@ -528,7 +623,7 @@ async function writeEnvelope(value: Envelope) {
     await rename(temporary, path);
     sessionFiles.push({ id: session.id, file });
   }
-  const index = JSON.stringify({ schemaVersion: 3, revision: compacted.revision, sessionFiles }, null, 2);
+  const index = JSON.stringify({ schemaVersion: 4, revision: compacted.revision, sessionFiles }, null, 2);
   if (Buffer.byteLength(index) > MAX_AGENT_STORE_BYTES) throw new Error("The agent session index exceeds 10 MB.");
   const temporaryIndex = `${sessionsPath}.${process.pid}.tmp`;
   await writeFile(temporaryIndex, index, { mode: 0o600 });
@@ -682,6 +777,7 @@ async function openRouter(path: string, method: "GET" | "POST" = "GET", body?: u
   for (let retry = 0; ; retry += 1) {
     const response = await fetch(`${openRouterBase}${path}`, {
       method,
+      signal: AbortSignal.timeout(180_000),
       headers: {
         Authorization: `Bearer ${credential.openrouter_api_key}`,
         "Content-Type": "application/json",
@@ -729,16 +825,22 @@ function skillSlug(name: string) {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "custom-production";
 }
 
-function safeGeneratedName(name: string, mimeType: string) {
-  const extension = extname(name).toLowerCase();
-  const allowed = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4", ".webm", ".mov"]);
-  const fallback = mimeType.includes("webm") ? ".webm"
+function extensionForMime(mimeType: string) {
+  return mimeType.includes("webm") ? ".webm"
     : mimeType.startsWith("video/") ? ".mp4"
       : mimeType.includes("jpeg") ? ".jpg"
         : mimeType.includes("webp") ? ".webp"
+          : mimeType.includes("gif") ? ".gif"
           : ".png";
+}
+
+function safeGeneratedName(name: string, mimeType: string) {
   const stem = name.replace(/\.[^.]+$/, "").replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^-|-$/g, "").slice(0, 80) || "generated";
-  return `${stem}-${crypto.randomUUID()}${allowed.has(extension) ? extension : fallback}`;
+  return `${stem}-${crypto.randomUUID()}${extensionForMime(mimeType)}`;
+}
+
+function displayGeneratedName(name: string, mimeType: string) {
+  return `${name.replace(/\.[^.]+$/, "")}${extensionForMime(mimeType)}`;
 }
 
 async function writeGeneratedBytes(name: string, mimeType: string, bytes: Uint8Array) {
@@ -850,20 +952,24 @@ async function launchDesktop() {
   });
 }
 
-async function materializeGeneratedSource(source: string, name: string, fallbackMimeType: string) {
+async function materializeGeneratedMedia(source: string, name: string, fallbackMimeType: string) {
   if (source.startsWith("data:")) {
     const match = source.match(/^data:([^;,]+);base64,([A-Za-z0-9+/=\r\n]+)$/);
     if (!match) throw new Error("Generated media contains an invalid data URL.");
     const mimeType = match[1].toLowerCase();
     if (!mimeType.startsWith("image/") && !mimeType.startsWith("video/")) throw new Error("Generated data URL is not image or video media.");
-    return writeGeneratedBytes(name, mimeType, Buffer.from(match[2], "base64"));
+    return { source: await writeGeneratedBytes(name, mimeType, Buffer.from(match[2], "base64")), mimeType };
   }
-  if (!/^https?:\/\//i.test(source)) return source;
-  const response = await fetch(source, { redirect: "follow" });
+  if (!/^https?:\/\//i.test(source)) return { source, mimeType: fallbackMimeType };
+  const response = await fetch(source, { redirect: "follow", signal: AbortSignal.timeout(180_000) });
   if (!response.ok) throw new Error(`Could not preserve generated media locally (HTTP ${response.status}).`);
   const mimeType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() || fallbackMimeType;
   if (!mimeType.startsWith("image/") && !mimeType.startsWith("video/")) throw new Error("Generated URL did not return image or video media.");
-  return writeGeneratedBytes(name, mimeType, new Uint8Array(await response.arrayBuffer()));
+  return { source: await writeGeneratedBytes(name, mimeType, new Uint8Array(await response.arrayBuffer())), mimeType };
+}
+
+async function materializeGeneratedSource(source: string, name: string, fallbackMimeType: string) {
+  return (await materializeGeneratedMedia(source, name, fallbackMimeType)).source;
 }
 
 function customSkillVersion(markdown: string) {
@@ -954,6 +1060,7 @@ async function downloadGeneratedVideo(jobId: string, fallbackSource: string) {
   const credential = JSON.parse(await readFile(credentialsPath, "utf8")) as { openrouter_api_key?: string };
   const response = await fetch(`${openRouterBase}/videos/${encodeURIComponent(jobId)}/content?index=0`, {
     headers: { Authorization: `Bearer ${credential.openrouter_api_key ?? ""}` },
+    signal: AbortSignal.timeout(180_000),
   });
   if (response.ok) {
     const mimeType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() || "video/mp4";
@@ -1271,83 +1378,6 @@ function updateThreadAttempt(session: BridgeSession, threadId: string, attemptId
   return { thread, attempt };
 }
 
-function mediaToolPath(name: "ffmpeg" | "ffprobe") {
-  const environmentPath = process.env[name === "ffmpeg" ? "FRUIT_TRUCK_FFMPEG" : "FRUIT_TRUCK_FFPROBE"];
-  const target = process.arch === "arm64" ? "aarch64-apple-darwin" : "x86_64-apple-darwin";
-  const appRelative = `${name}-${target}`;
-  const candidates = [
-    environmentPath,
-    join(process.cwd(), "apps", "desktop", "src-tauri", "target", "bundled-tools", appRelative),
-    join(process.cwd(), "src-tauri", "target", "bundled-tools", appRelative),
-    join("/Applications", "Fruit Truck.app", "Contents", "MacOS", appRelative),
-    join("/Applications", "Fruit Truck.app", "Contents", "MacOS", name),
-    join(homedir(), "Applications", "Fruit Truck.app", "Contents", "MacOS", appRelative),
-    join(homedir(), "Applications", "Fruit Truck.app", "Contents", "MacOS", name),
-  ].find((candidate): candidate is string => Boolean(candidate && existsSync(candidate)));
-  return candidates ?? name;
-}
-
-async function captureMediaTool(
-  name: "ffmpeg" | "ffprobe",
-  args: string[],
-  maxOutputBytes: number,
-): Promise<Buffer> {
-  return new Promise((resolveCapture, rejectCapture) => {
-    const child = spawn(mediaToolPath(name), args, { stdio: ["ignore", "pipe", "pipe"] });
-    const stdout: Buffer[] = [];
-    const stderr: Buffer[] = [];
-    let stdoutBytes = 0;
-    let settled = false;
-    const finish = (error?: Error, output?: Buffer) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      if (error) rejectCapture(error);
-      else resolveCapture(output ?? Buffer.alloc(0));
-    };
-    const timeout = setTimeout(() => {
-      child.kill("SIGKILL");
-      finish(new Error(`${name} timed out while preparing prompt context.`));
-    }, 60_000);
-    child.stdout.on("data", (chunk: Buffer) => {
-      stdoutBytes += chunk.length;
-      if (stdoutBytes > maxOutputBytes) {
-        child.kill("SIGKILL");
-        finish(new Error(`${name} prompt context output exceeds the local safety limit.`));
-        return;
-      }
-      stdout.push(Buffer.from(chunk));
-    });
-    child.stderr.on("data", (chunk: Buffer) => {
-      stderr.push(Buffer.from(chunk));
-      while (stderr.reduce((total, item) => total + item.length, 0) > 2_000) stderr.shift();
-    });
-    child.once("error", (error) => finish(new Error(`Could not launch ${name}: ${error.message}`)));
-    child.once("close", (code) => {
-      if (code === 0) finish(undefined, Buffer.concat(stdout));
-      else finish(new Error(`${name} could not prepare prompt context${stderr.length ? `: ${Buffer.concat(stderr).toString("utf8").trim()}` : "."}`));
-    });
-  });
-}
-
-function promptFrameTimestamps(duration: number) {
-  if (!Number.isFinite(duration) || duration <= 0 || duration > 21_600) {
-    throw new Error("The prompt context video has an invalid duration.");
-  }
-  return [duration * 0.05, duration * 0.5, duration * 0.95] as const;
-}
-
-async function promptVideoDuration(asset: BridgeAsset, path: string) {
-  if (typeof asset.duration === "number" && Number.isFinite(asset.duration) && asset.duration > 0) return asset.duration;
-  const output = await captureMediaTool("ffprobe", [
-    "-v", "error",
-    "-show_entries", "format=duration",
-    "-of", "default=noprint_wrappers=1:nokey=1",
-    path,
-  ], 10_000);
-  return Number(output.toString("utf8").trim());
-}
-
 async function promptImageSource(asset: BridgeAsset) {
   const source = asset.localPath ?? asset.externalUrl;
   if (!source) throw new Error(`${asset.name} has no readable prompt enhancement source.`);
@@ -1369,54 +1399,18 @@ async function hydrateAgentPromptVisuals(
   for (const reference of draft.references.toSorted((left, right) => left.slot - right.slot)) {
     const asset = session.assets.find((item) => item.id === reference.assetId);
     if (!asset) throw new Error(`Asset ${reference.assetId} does not exist in this session.`);
-    if (asset.kind === "image") {
-      const editTarget = thread.mode === "image"
-        && draft.imageEditMode
-        && `#${reference.slot}` === draft.imageEditTarget.trim();
-      visuals.push({
-        id: asset.id,
-        kind: editTarget ? "edit_target" : "reference",
-        source: await promptImageSource(asset),
-        slot: reference.slot,
-        name: asset.name,
-        role: reference.role,
-      });
-      continue;
-    }
-    if (!asset.localPath) continue;
-    let path: string;
-    let duration: number;
-    try {
-      path = await validateLocalAssetSource(asset.localPath);
-      duration = await promptVideoDuration(asset, path);
-    } catch {
-      continue;
-    }
-    const positions = ["beginning", "middle", "end"] as const;
-    for (const [index, timestamp] of promptFrameTimestamps(duration).entries()) {
-      const frame = await captureMediaTool("ffmpeg", [
-        "-hide_banner", "-loglevel", "error", "-nostdin",
-        "-ss", timestamp.toFixed(3),
-        "-i", path,
-        "-frames:v", "1",
-        "-vf", "scale=w='min(1280,iw)':h='min(1280,ih)':force_original_aspect_ratio=decrease",
-        "-q:v", "3",
-        "-f", "image2pipe",
-        "-vcodec", "mjpeg",
-        "pipe:1",
-      ], 10 * 1024 * 1024).catch(() => Buffer.alloc(0));
-      if (!frame.length) continue;
-      visuals.push({
-        id: `${asset.id}:${positions[index]}`,
-        kind: "video_frame",
-        source: `data:image/jpeg;base64,${frame.toString("base64")}`,
-        slot: reference.slot,
-        name: asset.name,
-        role: reference.role,
-        framePosition: positions[index],
-        timestampSeconds: timestamp,
-      });
-    }
+    if (asset.kind === "video") continue;
+    const editTarget = thread.mode === "image"
+      && draft.imageEditMode
+      && `@${reference.slot}` === draft.imageEditTarget.trim();
+    visuals.push({
+      id: asset.id,
+      kind: editTarget ? "edit_target" : "reference",
+      source: await promptImageSource(asset),
+      slot: reference.slot,
+      name: asset.name,
+      role: reference.role,
+    });
   }
   return visuals;
 }
@@ -1449,8 +1443,10 @@ function validatePreparedThread(
   const assetIds = new Set(session.assets.map((asset) => asset.id));
   const missing = draft.references.find((reference) => !assetIds.has(reference.assetId));
   if (missing) throw new Error(`${thread.name} references a missing asset.`);
-  if (thread.mode === "video" && thread.videoWorkflow === "edit" && !draft.references.some((reference) => reference.role === "video_reference")) {
-    throw new Error(`${thread.name} requires a video reference.`);
+  if (thread.mode === "video" && draft.references.some((reference) =>
+    session.assets.find((asset) => asset.id === reference.assetId)?.kind === "video"
+  )) {
+    throw new Error(`${thread.name} accepts image inputs only.`);
   }
   if (backend === "codex_builtin") {
     if (thread.mode !== "image") throw new Error("Codex built-in generation supports image threads only.");
@@ -1469,7 +1465,7 @@ function estimateCatalogCost(
   mode: "image" | "video",
   model: GenerationModel | undefined,
   options: DraftOptions,
-  context: { videoWorkflow?: "generate" | "edit"; imageInputCount?: number } = {},
+  context: { imageInputCount?: number } = {},
 ) {
   return model ? estimateGenerationCost(mode, model, options, context) : undefined;
 }
@@ -1496,7 +1492,12 @@ async function hydrateImageCatalogPricing(models: ImageModel[], selectedIds?: Se
   return models.map((model) => hydrated.get(model.id) ?? model);
 }
 
-async function enhanceThreadText(session: BridgeSession, thread: GenerationThread, draft: GenerationDraftState) {
+async function enhanceThreadText(
+  session: BridgeSession,
+  thread: GenerationThread,
+  draft: GenerationDraftState,
+  onActualCost?: (actualCostUsd: number) => Promise<void>,
+) {
   const references = draft.references.flatMap((reference) => {
     const asset = session.assets.find((item) => item.id === reference.assetId);
     return asset ? [{ slot: reference.slot, name: asset.name, mediaType: asset.mimeType, role: reference.role }] : [];
@@ -1506,7 +1507,6 @@ async function enhanceThreadText(session: BridgeSession, thread: GenerationThrea
   const input = {
     promptModel: "openai/gpt-5.6-luna",
     mode: thread.mode,
-    videoWorkflow: thread.videoWorkflow,
     editMode: draft.imageEditMode,
     editTarget: draft.imageEditTarget,
     prompt: draft.prompt,
@@ -1524,12 +1524,19 @@ async function enhanceThreadText(session: BridgeSession, thread: GenerationThrea
       { role: "user", content: promptEnhancementUserContent(input) },
     ],
   });
+  const actualCostUsd = responseCost(response);
+  if (actualCostUsd != null) await onActualCost?.(actualCostUsd);
   const choices = Array.isArray(response.choices) ? response.choices as Array<Record<string, unknown>> : [];
   const message = choices[0]?.message as Record<string, unknown> | undefined;
   const content = message?.content;
   const text = typeof content === "string" ? content : Array.isArray(content) ? content.map((part) => typeof part === "object" && part && "text" in part ? String((part as { text?: unknown }).text ?? "") : "").join("") : "";
   const originalIntent = [draft.prompt.trim(), hasMask ? draft.maskInstructions.trim() : ""].filter(Boolean).join("\n");
-  const validationError = validateEnhancedPrompt(originalIntent, text, draft.imageEditTarget);
+  const validationError = validateEnhancedPrompt(
+    originalIntent,
+    text,
+    draft.imageEditTarget,
+    draft.references.map((reference) => reference.slot),
+  );
   if (validationError) throw new Error(validationError);
   return { text: text.trim(), visualCount: visuals.length };
 }
@@ -1541,11 +1548,14 @@ function responseCost(response: Record<string, unknown>) {
 
 function recordAttemptCost(session: BridgeSession, threadId: string, attemptId: string, cost: number | undefined) {
   if (cost == null) return;
-  const { attempt } = updateThreadAttempt(session, threadId, attemptId, { actualCostUsd: cost });
-  if (!attempt.costRecordedAt) {
-    attempt.costRecordedAt = new Date().toISOString();
-    session.agent.execution.spentUsd += cost;
-  }
+  const recordedAt = new Date().toISOString();
+  updateThreadAttempt(session, threadId, attemptId, { actualCostUsd: cost, costRecordedAt: recordedAt });
+  session.agent = recordActualCost(session.agent, {
+    id: `generation:${attemptId}`,
+    category: "generation",
+    actualCostUsd: cost,
+    recordedAt,
+  });
 }
 
 async function executeOpenRouterThread(sessionId: string, threadId: string, attemptId: string) {
@@ -1578,7 +1588,15 @@ async function executeOpenRouterThread(sessionId: string, threadId: string, atte
         maskInstructions: snapshot.maskInstructions,
         maskStrokes: snapshot.maskStrokes,
       };
-      prompt = (await enhanceThreadText(session, thread, draft)).text;
+      prompt = (await enhanceThreadText(session, thread, draft, async (actualCostUsd) => {
+        await mutateSession(sessionId, (current) => {
+          current.agent = recordActualCost(current.agent, {
+            id: `prompt-enhancement:${attemptId}`,
+            category: "prompt_enhancement",
+            actualCostUsd,
+          });
+        });
+      })).text;
       await mutateSession(sessionId, (current) => {
         const currentAttempt = findGenerationThread(current, threadId)?.attempts.find((item) => item.id === attemptId);
         if (!currentAttempt || currentAttempt.status === "canceled") throw new Error("Generation was canceled before provider submission.");
@@ -1598,13 +1616,12 @@ async function executeOpenRouterThread(sessionId: string, threadId: string, atte
     const model = models.find((item) => item.id === snapshot.modelId);
     if (!model) throw new Error(`The selected ${snapshot.mode} model is no longer available.`);
     const bindings = snapshot.assetBindings.map(({ assetId, role, slot }) => ({ assetId, role, slot }));
-    const targetSlot = Number(snapshot.imageEditTarget.match(/^#(\d+)$/)?.[1]);
+    const targetSlot = Number(snapshot.imageEditTarget.match(/^@(\d+)$/)?.[1]);
     const references = await hydrateGenerationAssets(session, bindings, hasMask && Number.isInteger(targetSlot)
       ? { targetSlot, strokes: snapshot.maskStrokes }
       : undefined);
     const payload = buildRequest({
       mode: snapshot.mode,
-      videoWorkflow: snapshot.videoWorkflow,
       model: snapshot.modelId,
       prompt,
       assets: references,
@@ -1621,22 +1638,28 @@ async function executeOpenRouterThread(sessionId: string, threadId: string, atte
       });
     });
     const response = await openRouter(snapshot.mode === "image" ? "/images" : "/videos", "POST", payload);
+    await mutateSession(sessionId, (current) => {
+      recordAttemptCost(current, threadId, attemptId, responseCost(response));
+    });
     if (snapshot.mode === "image") {
       const data = Array.isArray(response.data) ? response.data as Array<Record<string, unknown>> : [];
       const preserved = await Promise.all(data.map(async (item, index) => {
+        const claimedMimeType = typeof item.media_type === "string" ? item.media_type : "image/png";
+        const baseName = `agent-image-${Date.now()}-${index + 1}.png`;
         const source = typeof item.url === "string" ? item.url : typeof item.b64_json === "string" ? `data:${typeof item.media_type === "string" ? item.media_type : "image/png"};base64,${item.b64_json}` : "";
-        return source ? materializeGeneratedSource(source, `agent-image-${Date.now()}-${index + 1}.png`, "image/png") : "";
+        if (!source) return null;
+        const preservedImage = await materializeGeneratedMedia(source, baseName, claimedMimeType);
+        return { ...preservedImage, name: displayGeneratedName(baseName, preservedImage.mimeType) };
       }));
       await mutateSession(sessionId, (current) => {
         const currentThread = findGenerationThread(current, threadId)!;
-        const assets = preserved.flatMap((source, index) => source ? [bridgeAsset(current, {
-          name: `agent-image-${Date.now()}-${index + 1}.png`, kind: "image", mimeType: "image/png", origin: "generated", source,
+        const assets = preserved.flatMap((preservedImage) => preservedImage ? [bridgeAsset(current, {
+          name: preservedImage.name, kind: "image", mimeType: preservedImage.mimeType, origin: "generated", source: preservedImage.source,
           role: snapshot.outputRole, parentAssetIds: bindings.map((binding) => binding.assetId), prompt, modelId: snapshot.modelId,
           generationBackend: "openrouter", threadId, attemptId,
         })] : []);
         if (!assets.length) throw new Error("OpenRouter returned no image data.");
         updateThreadAttempt(current, threadId, attemptId, { status: "completed", assetIds: assets.map((asset) => asset.id), completedAt: new Date().toISOString() });
-        recordAttemptCost(current, threadId, attemptId, responseCost(response));
         current.agent.execution.generationCount += 1;
         appendActivity(current, { kind: "generation", title: `Generated ${currentThread.name}`, prompt, modelId: snapshot.modelId, generationBackend: "openrouter", assetIds: assets.map((asset) => asset.id) });
       });
@@ -1648,7 +1671,6 @@ async function executeOpenRouterThread(sessionId: string, threadId: string, atte
         if (!current.agent.execution.currentJobIds.includes(jobId)) current.agent.execution.currentJobIds.push(jobId);
         current.agent.execution.generationCount += 1;
         updateThreadAttempt(current, threadId, attemptId, { status: "in_progress", jobId, progress: typeof response.progress === "number" ? response.progress : undefined });
-        recordAttemptCost(current, threadId, attemptId, responseCost(response));
         appendActivity(current, { kind: "generation", title: `Submitted ${currentThread.name}`, detail: jobId, prompt, modelId: snapshot.modelId, assetIds: bindings.map((binding) => binding.assetId) });
       });
     }
@@ -1665,40 +1687,87 @@ async function executeOpenRouterThread(sessionId: string, threadId: string, atte
 async function pollThreadVideoAttempts(sessionId: string, attemptIds: string[]) {
   const session = (await readEnvelope()).sessions.find((item) => item.id === sessionId);
   if (!session) throw new Error(`Session ${sessionId} does not exist.`);
+  const nowMs = Date.now();
   const pending = session.threads.video.flatMap((thread) => thread.attempts
-    .filter((attempt) => attemptIds.includes(attempt.id) && attempt.jobId && attempt.status === "in_progress")
+    .filter((attempt) => attemptIds.includes(attempt.id)
+      && attempt.jobId
+      && attempt.status === "in_progress"
+      && (hasVideoPollingTimedOut(attempt.submittedAt ?? attempt.createdAt, nowMs) || isVideoPollDue(attempt.nextPollAt, nowMs)))
     .map((attempt) => ({ threadId: thread.id, attempt })));
   await Promise.all(pending.map(async ({ threadId, attempt }) => {
     const jobId = attempt.jobId!;
-    const response = await openRouter(`/videos/${encodeURIComponent(jobId)}`);
-    const urls = Array.isArray(response.unsigned_urls) ? response.unsigned_urls : [];
-    const data = Array.isArray(response.data) ? response.data as Array<Record<string, unknown>> : [];
-    const remoteSource = typeof urls[0] === "string" ? urls[0] : typeof data[0]?.url === "string" ? data[0].url : "";
-    const preservedSource = response.status === "completed" && !attempt.assetIds.length ? await downloadGeneratedVideo(jobId, remoteSource) : "";
-    await mutateSession(sessionId, (current) => {
-      const currentThread = findGenerationThread(current, threadId);
-      const currentAttempt = currentThread?.attempts.find((item) => item.id === attempt.id);
-      if (!currentThread || !currentAttempt || currentAttempt.status !== "in_progress") return;
-      const now = new Date().toISOString();
-      const polling = { pollAttempts: (currentAttempt.pollAttempts ?? 0) + 1, lastPolledAt: now };
-      if (response.status === "failed" || response.status === "cancelled" || response.status === "expired") {
-        updateThreadAttempt(current, threadId, attempt.id, { ...polling, status: response.status === "cancelled" ? "canceled" : "failed", error: String(response.error ?? "Video generation failed."), completedAt: now });
-        current.agent.execution.currentJobIds = current.agent.execution.currentJobIds.filter((id) => id !== jobId);
-      } else if (response.status === "completed" && preservedSource && !currentAttempt.assetIds.length) {
-        const snapshot = currentAttempt.snapshot;
-        const asset = bridgeAsset(current, {
-          name: `agent-video-${jobId}.mp4`, kind: "video", mimeType: "video/mp4", origin: "generated", source: preservedSource,
-          role: snapshot?.outputRole ?? currentThread.outputRole,
-          parentAssetIds: currentAttempt.inputAssetIds,
-          prompt: currentAttempt.enhancedPrompt ?? snapshot?.enhancedPrompt ?? snapshot?.prompt,
-          modelId: snapshot?.modelId ?? currentAttempt.modelId,
-          generationBackend: "openrouter", threadId, attemptId: attempt.id,
-        });
-        updateThreadAttempt(current, threadId, attempt.id, { ...polling, status: "completed", assetIds: [asset.id], progress: 100, completedAt: now });
+    try {
+      const response = await openRouter(`/videos/${encodeURIComponent(jobId)}`);
+      await mutateSession(sessionId, (current) => {
         recordAttemptCost(current, threadId, attempt.id, responseCost(response));
-        current.agent.execution.currentJobIds = current.agent.execution.currentJobIds.filter((id) => id !== jobId);
-      } else updateThreadAttempt(current, threadId, attempt.id, { ...polling, status: "in_progress", progress: typeof response.progress === "number" ? response.progress : undefined });
-    });
+      });
+      const status = normalizeVideoStatus(response.status);
+      const urls = Array.isArray(response.unsigned_urls) ? response.unsigned_urls : [];
+      const data = Array.isArray(response.data) ? response.data as Array<Record<string, unknown>> : [];
+      const remoteSource = typeof urls[0] === "string" ? urls[0] : typeof data[0]?.url === "string" ? data[0].url : "";
+      const preservedSource = status === "completed" && !attempt.assetIds.length ? await downloadGeneratedVideo(jobId, remoteSource) : "";
+      await mutateSession(sessionId, (current) => {
+        const currentThread = findGenerationThread(current, threadId);
+        const currentAttempt = currentThread?.attempts.find((item) => item.id === attempt.id);
+        if (!currentThread || !currentAttempt || currentAttempt.status !== "in_progress") return;
+        const now = new Date().toISOString();
+        const polling = { pollAttempts: (currentAttempt.pollAttempts ?? 0) + 1, lastPolledAt: now, nextPollAt: undefined };
+        if (status === "failed" || status === "cancelled" || status === "expired") {
+          updateThreadAttempt(current, threadId, attempt.id, { ...polling, status: status === "cancelled" ? "canceled" : "failed", error: String(response.error ?? `Video generation ${status}.`), completedAt: now });
+          current.agent.execution.currentJobIds = current.agent.execution.currentJobIds.filter((id) => id !== jobId);
+        } else if (status === "completed" && preservedSource && !currentAttempt.assetIds.length) {
+          const snapshot = currentAttempt.snapshot;
+          const asset = bridgeAsset(current, {
+            name: `agent-video-${jobId}.mp4`, kind: "video", mimeType: "video/mp4", origin: "generated", source: preservedSource,
+            role: snapshot?.outputRole ?? currentThread.outputRole,
+            parentAssetIds: currentAttempt.inputAssetIds,
+            prompt: currentAttempt.enhancedPrompt ?? snapshot?.enhancedPrompt ?? snapshot?.prompt,
+            modelId: snapshot?.modelId ?? currentAttempt.modelId,
+            generationBackend: "openrouter", threadId, attemptId: attempt.id,
+          });
+          updateThreadAttempt(current, threadId, attempt.id, { ...polling, status: "completed", assetIds: [asset.id], progress: 100, completedAt: now });
+          current.agent.execution.currentJobIds = current.agent.execution.currentJobIds.filter((id) => id !== jobId);
+        } else if (hasVideoPollingTimedOut(currentAttempt.submittedAt ?? currentAttempt.createdAt)) {
+          const message = "Video generation did not reach a terminal state within 30 minutes.";
+          updateThreadAttempt(current, threadId, attempt.id, { ...polling, status: "failed", error: message, completedAt: now });
+          current.agent.execution.currentJobIds = current.agent.execution.currentJobIds.filter((id) => id !== jobId);
+          current.agent.execution.lastError = message;
+        } else {
+          updateThreadAttempt(current, threadId, attempt.id, { ...polling, status: "in_progress", progress: typeof response.progress === "number" ? response.progress : undefined, nextPollAt: new Date(Date.now() + videoPollIntervalMs).toISOString() });
+        }
+      });
+    } catch (error) {
+      await mutateSession(sessionId, (current) => {
+        const currentAttempt = findGenerationThread(current, threadId)?.attempts.find((item) => item.id === attempt.id);
+        if (!currentAttempt || currentAttempt.status !== "in_progress") return;
+        const now = new Date().toISOString();
+        const timedOut = hasVideoPollingTimedOut(currentAttempt.submittedAt ?? currentAttempt.createdAt, Date.parse(now));
+        const message = timedOut
+          ? "Video generation did not reach a terminal state within 30 minutes."
+          : error instanceof Error ? error.message : String(error);
+        if (timedOut) {
+          updateThreadAttempt(current, threadId, attempt.id, {
+            status: "failed",
+            error: message,
+            pollAttempts: (currentAttempt.pollAttempts ?? 0) + 1,
+            lastPolledAt: now,
+            nextPollAt: undefined,
+            completedAt: now,
+          });
+          current.agent.execution.currentJobIds = current.agent.execution.currentJobIds.filter((id) => id !== jobId);
+          current.agent.execution.lastError = message;
+        } else {
+          updateThreadAttempt(current, threadId, attempt.id, {
+            status: "in_progress",
+            error: message,
+            pollAttempts: (currentAttempt.pollAttempts ?? 0) + 1,
+            lastPolledAt: now,
+            nextPollAt: new Date(Date.now() + videoPollRetryDelayMs(currentAttempt.pollAttempts ?? 0)).toISOString(),
+            completedAt: currentAttempt.completedAt,
+          });
+        }
+      });
+    }
   }));
 }
 
@@ -1734,8 +1803,8 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
       mode: /video|reel|shorts|film|clip|영상|릴스|쇼츠|동영상/i.test(intent) ? "video" : "image",
       generationDefaults: {
         modelIds: { image: "", video: "" },
-        options: { image: {}, videoGenerate: {}, videoEdit: {} },
-        providerJson: { image: "", videoGenerate: "", videoEdit: "" },
+        options: { image: {}, video: {} },
+        providerJson: { image: "", video: "" },
       },
       threads: { image: [imageThread], video: [videoThread] },
       activeThreadIds: { image: imageThread.id, video: videoThread.id },
@@ -2157,7 +2226,7 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
       const existing = [...session.threads.image, ...session.threads.video].find((thread) => thread.requestKey === requestKey);
       if (existing) { threadId = existing.id; return; }
       const mode = args.mode === "video" ? "video" : "image";
-      const thread = newBridgeThread(mode, session.threads[mode].length + 1, args.videoWorkflow === "edit" ? "edit" : "generate");
+      const thread = newBridgeThread(mode, session.threads[mode].length + 1);
       thread.requestKey = requestKey;
       thread.name = requiredString(args, "name");
       thread.outputRole = typeof args.outputRole === "string" && args.outputRole.trim() ? args.outputRole.trim() : thread.outputRole;
@@ -2184,7 +2253,6 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
       }
       if (typeof values.name === "string" && values.name.trim()) thread.name = values.name.trim();
       if (typeof values.prompt === "string") thread.draft.prompt = values.prompt;
-      if (values.videoWorkflow === "generate" || values.videoWorkflow === "edit") thread.videoWorkflow = values.videoWorkflow;
       if (typeof values.outputRole === "string" && values.outputRole.trim()) thread.outputRole = values.outputRole.trim();
       if (values.useModeDefaultModel === true) thread.modelOverrideId = undefined;
       else if (typeof values.modelOverrideId === "string") thread.modelOverrideId = values.modelOverrideId || undefined;
@@ -2198,7 +2266,7 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
         if (missing) throw new Error(`Asset ${String(missing.assetId ?? "")} does not exist in this session.`);
         thread.draft.references = bindings.map((binding, index) => ({
           assetId: String(binding.assetId ?? ""), slot: index + 1,
-          role: binding.role === "first_frame" || binding.role === "last_frame" || binding.role === "video_reference" ? binding.role : "reference",
+          role: binding.role === "first_frame" || binding.role === "last_frame" ? binding.role : "reference",
         }));
       }
       thread.draft.enhancedPrompt = "";
@@ -2299,7 +2367,15 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
     if (!work.length) return records.map(({ threadId, record }) => ({ threadId, status: record.status, enhancedPrompt: record.enhancedPrompt, error: record.error }));
     await Promise.all(work.map(async ({ thread: target, draft, recordId }) => {
       try {
-        const enhanced = await enhanceThreadText(reservedSession, target, draft);
+        const enhanced = await enhanceThreadText(reservedSession, target, draft, async (actualCostUsd) => {
+          await mutateSession(sessionId, (session) => {
+            session.agent = recordActualCost(session.agent, {
+              id: `prompt-enhancement:${recordId}`,
+              category: "prompt_enhancement",
+              actualCostUsd,
+            });
+          });
+        });
         await mutateSession(sessionId, (session) => {
           const current = findGenerationThread(session, target.id);
           const record = current?.enhancementAttempts.find((item) => item.id === recordId);
@@ -2405,7 +2481,6 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
           modelId: requestSnapshot.modelId,
           snapshot: requestSnapshot,
           estimatedCostUsd: estimateCatalogCost(target.mode, catalogModel, requestSnapshot.options, {
-            videoWorkflow: target.videoWorkflow,
             imageInputCount: requestSnapshot.assetBindings.filter((binding) =>
               session.assets.find((asset) => asset.id === binding.assetId)?.kind === "image"
             ).length,
@@ -2659,10 +2734,8 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
     const model = models.find((item) => item.id === selection.modelId);
     if (!model) throw new Error(`The selected ${mode} model is no longer in the current catalog.`);
     const references = await hydrateGenerationAssets(current, bindings);
-    const workflow = bindings.some((binding) => binding.role === "video_reference") ? "edit" : "generate";
     const payload = buildRequest({
       mode,
-      videoWorkflow: workflow,
       model: selection.modelId,
       prompt,
       assets: references,
@@ -2673,7 +2746,7 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
         ? JSON.stringify(args.provider)
         : "",
     }, model);
-    const referenceBindings = bindings.filter((binding) => binding.role === "reference" || binding.role === "video_reference");
+    const referenceBindings = bindings.filter((binding) => binding.role === "reference");
     const frameBindings = bindings.filter((binding) => binding.role === "first_frame" || binding.role === "last_frame");
     if (mode === "video" && referenceBindings.length && frameBindings.length) {
       throw new Error("The selected video model input must use either general references or frame images for one request, not both.");
@@ -2683,18 +2756,30 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
     if (sentReferences !== referenceBindings.length || sentFrames !== frameBindings.length) {
       throw new Error("One or more bound assets are incompatible with the user-selected model. Request a new model choice or compatible inputs.");
     }
+    const attemptId = `attempt-${crypto.randomUUID()}`;
     const response = await openRouter(mode === "image" ? "/images" : "/videos", "POST", payload);
-    const usage = response.usage && typeof response.usage === "object" ? response.usage as Record<string, unknown> : {};
-    const actualCost = typeof usage.cost === "number" ? usage.cost : undefined;
+    const actualCost = responseCost(response);
+    if (actualCost != null) {
+      await mutateSession(sessionId, (session) => {
+        session.agent = recordActualCost(session.agent, {
+          id: `generation:${attemptId}`,
+          category: "generation",
+          actualCostUsd: actualCost,
+        });
+      });
+    }
     const preservedImages = mode === "image"
       ? await Promise.all((Array.isArray(response.data) ? response.data as Array<Record<string, unknown>> : []).map(async (item, index) => {
+        const claimedMimeType = typeof item.media_type === "string" ? item.media_type : "image/png";
+        const baseName = `agent-image-${Date.now()}-${index + 1}.png`;
         const source = typeof item.url === "string"
           ? item.url
           : typeof item.b64_json === "string"
             ? `data:${typeof item.media_type === "string" ? item.media_type : "image/png"};base64,${item.b64_json}`
             : "";
         if (!source) return "";
-        return materializeGeneratedSource(source, `agent-image-${Date.now()}-${index + 1}.png`, "image/png");
+        const preservedImage = await materializeGeneratedMedia(source, baseName, claimedMimeType);
+        return { ...preservedImage, name: displayGeneratedName(baseName, preservedImage.mimeType) };
       }))
       : [];
     return mutateSession(sessionId, (session) => {
@@ -2703,7 +2788,7 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
         throw new Error(`AGENT_SESSION_CONFLICT: the selected ${mode} model changed while this request was running. Reload before recording its result.`);
       }
       const inputAssetIds = bindings.map((binding) => binding.assetId);
-      const thread = newBridgeThread(mode, session.threads[mode].length + 1, workflow);
+      const thread = newBridgeThread(mode, session.threads[mode].length + 1);
       thread.modelOverrideId = selection.modelId;
       thread.outputRole = typeof args.role === "string" ? args.role : mode === "image" ? "generated_image" : "generated_video";
       thread.draft.prompt = prompt;
@@ -2712,7 +2797,7 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
       thread.providerJsonOverride = args.provider && typeof args.provider === "object" && !Array.isArray(args.provider) ? JSON.stringify(args.provider) : undefined;
       const createdAt = new Date().toISOString();
       const attempt: GenerationAttempt = {
-        id: `attempt-${crypto.randomUUID()}`,
+        id: attemptId,
         status: mode === "image" ? "completed" : "in_progress",
         backend: "openrouter",
         draftRevision: thread.revision,
@@ -2738,11 +2823,11 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
       if (mode === "image") {
         const data = Array.isArray(response.data) ? response.data as Array<Record<string, unknown>> : [];
         const assets = data.flatMap((_item, index) => {
-          const source = preservedImages[index] ?? "";
-          if (!source) return [];
+          const preserved = preservedImages[index];
+          if (!preserved) return [];
           return [bridgeAsset(session, {
-            name: `agent-image-${Date.now()}-${index + 1}.png`, kind: "image", mimeType: "image/png",
-            origin: "generated", source, role: typeof args.role === "string" ? args.role : "generated_image",
+            name: preserved.name, kind: "image", mimeType: preserved.mimeType,
+            origin: "generated", source: preserved.source, role: typeof args.role === "string" ? args.role : "generated_image",
             parentAssetIds: inputAssetIds, planStepId: args.planStepId, prompt, modelId: selection.modelId,
             generationBackend: "openrouter", threadId: thread.id, attemptId: attempt.id,
           })];
@@ -2760,34 +2845,54 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
         appendActivity(session, { kind: "generation", title: "Submitted video generation", detail: jobId, prompt, modelId: selection.modelId, assetIds: inputAssetIds });
       }
       session.agent.execution.generationCount += 1;
-      session.agent.execution.spentUsd += actualCost ?? 0;
     });
   }
   if (name === "poll_video") {
     const sessionId = requiredString(args, "sessionId");
     const jobId = requiredString(args, "jobId");
     const response = await openRouter(`/videos/${encodeURIComponent(jobId)}`);
+    const remoteStatus = normalizeVideoStatus(response.status);
     const currentSession = (await readEnvelope()).sessions.find((item) => item.id === sessionId);
     const currentMatch = currentSession?.threads.video.flatMap((thread) => thread.attempts.map((attempt) => ({ thread, attempt }))).find(({ attempt }) => attempt.jobId === jobId);
     if (!currentMatch) throw new Error(`Video job ${jobId} is not registered in this session.`);
+    await mutateSession(sessionId, (session) => {
+      recordAttemptCost(session, currentMatch.thread.id, currentMatch.attempt.id, responseCost(response));
+    });
     const urls = Array.isArray(response.unsigned_urls) ? response.unsigned_urls : [];
     const data = Array.isArray(response.data) ? response.data as Array<Record<string, unknown>> : [];
     const remoteSource = typeof urls[0] === "string" ? urls[0] : typeof data[0]?.url === "string" ? data[0].url : "";
-    const preservedSource = response.status === "completed" && !currentMatch.attempt.assetIds.length
+    const preservedSource = remoteStatus === "completed" && !currentMatch.attempt.assetIds.length
       ? await downloadGeneratedVideo(jobId, remoteSource)
       : "";
     return mutateSession(sessionId, (session) => {
       const match = session.threads.video.flatMap((thread) => thread.attempts.map((attempt) => ({ thread, attempt }))).find(({ attempt }) => attempt.jobId === jobId);
       if (!match) throw new Error(`Video job ${jobId} is not registered in this session.`);
       const { thread, attempt } = match;
-      updateThreadAttempt(session, thread.id, attempt.id, { status: response.status === "completed" ? "completed" : response.status === "failed" ? "failed" : "in_progress", progress: typeof response.progress === "number" ? response.progress : undefined, error: typeof response.error === "string" ? response.error : undefined, pollAttempts: (attempt.pollAttempts ?? 0) + 1, lastPolledAt: new Date().toISOString() });
-      if (response.status === "completed" || response.status === "failed") {
+      const now = new Date().toISOString();
+      const terminalFailure = remoteStatus === "failed" || remoteStatus === "cancelled" || remoteStatus === "expired";
+      const status = remoteStatus === "completed"
+        ? "completed"
+        : remoteStatus === "cancelled" ? "canceled"
+          : terminalFailure ? "failed" : "in_progress";
+      const error = terminalFailure
+        ? String(response.error ?? `Video generation ${remoteStatus}.`)
+        : typeof response.error === "string" ? response.error : undefined;
+      updateThreadAttempt(session, thread.id, attempt.id, {
+        status,
+        progress: remoteStatus === "completed" ? 100 : typeof response.progress === "number" ? response.progress : undefined,
+        error,
+        pollAttempts: (attempt.pollAttempts ?? 0) + 1,
+        lastPolledAt: now,
+        nextPollAt: status === "in_progress" ? new Date(Date.now() + videoPollIntervalMs).toISOString() : undefined,
+        completedAt: status === "in_progress" ? attempt.completedAt : now,
+      });
+      if (remoteStatus === "completed" || terminalFailure) {
         session.agent.execution.currentJobIds = session.agent.execution.currentJobIds.filter((id) => id !== jobId);
       }
-      if (response.status === "failed") {
-        session.agent.execution.lastError = typeof response.error === "string" ? response.error : "Video generation failed.";
+      if (terminalFailure) {
+        session.agent.execution.lastError = error;
       }
-      if (response.status === "completed" && preservedSource && !attempt.assetIds.length) {
+      if (remoteStatus === "completed" && preservedSource && !attempt.assetIds.length) {
         const snapshot = attempt.snapshot;
         const asset = bridgeAsset(session, {
           name: `agent-video-${jobId}.mp4`, kind: "video", mimeType: "video/mp4",
@@ -2796,7 +2901,6 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
           generationBackend: "openrouter", threadId: thread.id, attemptId: attempt.id,
         });
         updateThreadAttempt(session, thread.id, attempt.id, { status: "completed", assetIds: [asset.id], completedAt: new Date().toISOString() });
-        recordAttemptCost(session, thread.id, attempt.id, responseCost(response));
         appendActivity(session, { kind: "generation", title: "Video generation completed", detail: jobId, modelId: String(snapshot?.modelId ?? attempt.modelId ?? ""), generationBackend: "openrouter", assetIds: [asset.id] });
       }
     });
@@ -2939,6 +3043,9 @@ input.on("line", (line) => {
     catch { errorResponse(null, new Error("Invalid JSON-RPC message.")); return; }
     const id = request.id;
     if (request.method === "initialize") {
+      if (existsSync(sessionsPath)) {
+        await withSessionStoreLock(() => readEnvelope({ persistMigration: true }));
+      }
       const params = request.params as { clientInfo?: { name?: string } } | undefined;
       initializedClientName = typeof params?.clientInfo?.name === "string" ? params.clientInfo.name : "";
       response(id, {

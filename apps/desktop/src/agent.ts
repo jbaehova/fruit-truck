@@ -164,8 +164,15 @@ export type CustomSkillDraft = {
   status: "proposed" | "approved" | "saved" | "rejected";
 };
 
+export type ActualCostEntry = {
+  id: string;
+  category: "generation" | "prompt_enhancement";
+  actualCostUsd: number;
+  recordedAt: string;
+};
+
 export type AgentSessionState = {
-  schemaVersion: 1 | 2 | 3;
+  schemaVersion: 1 | 2 | 3 | 4;
   connection: {
     status: "disconnected" | "waiting" | "claimed";
     claimedAt?: string;
@@ -201,6 +208,7 @@ export type AgentSessionState = {
   execution: {
     currentJobIds: string[];
     generationCount: number;
+    costLedger: ActualCostEntry[];
     spentUsd: number;
     retryCount: number;
     lastError?: string;
@@ -214,7 +222,7 @@ const uid = (prefix: string) => `${prefix}-${crypto.randomUUID()}`;
 
 export function createAgentState(intent = ""): AgentSessionState {
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     connection: { status: "disconnected" },
     controlMode: "human",
     runStatus: "idle",
@@ -245,6 +253,7 @@ export function createAgentState(intent = ""): AgentSessionState {
     execution: {
       currentJobIds: [],
       generationCount: 0,
+      costLedger: [],
       spentUsd: 0,
       retryCount: 0,
     },
@@ -255,6 +264,8 @@ export function createAgentState(intent = ""): AgentSessionState {
 
 export function normalizeAgentState(value: AgentSessionState): AgentSessionState {
   const fallback = createAgentState(value?.brief?.originalIntent ?? "");
+  const resetLegacyCosts = (value.schemaVersion ?? 1) < 4;
+  const costLedger = resetLegacyCosts ? [] : normalizeCostLedger(value.execution?.costLedger);
   const legacyImageGeneration = value.imageGeneration ?? (
     value.connection?.status === "claimed"
       ? {
@@ -293,14 +304,82 @@ export function normalizeAgentState(value: AgentSessionState): AgentSessionState
     execution: {
       currentJobIds: value.execution?.currentJobIds ?? [],
       generationCount: value.execution?.generationCount ?? 0,
-      spentUsd: value.execution?.spentUsd ?? 0,
+      costLedger,
+      spentUsd: totalActualCostUsd(costLedger),
       retryCount: value.execution?.retryCount ?? 0,
       lastError: value.execution?.lastError,
     },
     currentStepIds: Array.isArray(value.currentStepIds)
       ? value.currentStepIds
       : value.currentStepId ? [value.currentStepId] : [],
-    schemaVersion: 3,
+    schemaVersion: 4,
+  };
+}
+
+function normalizeCostLedger(value: unknown): ActualCostEntry[] {
+  if (!Array.isArray(value)) return [];
+  const entries = new Map<string, ActualCostEntry>();
+  for (const candidate of value) {
+    if (!candidate || typeof candidate !== "object") continue;
+    const entry = candidate as Partial<ActualCostEntry>;
+    if (!entry.id || (entry.category !== "generation" && entry.category !== "prompt_enhancement")) continue;
+    if (typeof entry.actualCostUsd !== "number" || !Number.isFinite(entry.actualCostUsd) || entry.actualCostUsd < 0) continue;
+    if (typeof entry.recordedAt !== "string" || !entry.recordedAt) continue;
+    entries.set(entry.id, { ...entry } as ActualCostEntry);
+  }
+  return [...entries.values()];
+}
+
+function decimalParts(value: number) {
+  const [mantissa, exponentText] = value.toString().toLowerCase().split("e");
+  const exponent = Number(exponentText ?? 0);
+  const negative = mantissa.startsWith("-");
+  const unsigned = negative ? mantissa.slice(1) : mantissa;
+  const [whole, fractional = ""] = unsigned.split(".");
+  let coefficient = BigInt(`${whole}${fractional}` || "0");
+  if (negative) coefficient = -coefficient;
+  let scale = fractional.length - exponent;
+  if (scale < 0) {
+    coefficient *= 10n ** BigInt(-scale);
+    scale = 0;
+  }
+  return { coefficient, scale };
+}
+
+export function totalActualCostUsd(entries: ActualCostEntry[]) {
+  const parts = entries.flatMap((entry) => Number.isFinite(entry.actualCostUsd)
+    ? [decimalParts(entry.actualCostUsd)]
+    : []);
+  const scale = parts.reduce((maximum, part) => Math.max(maximum, part.scale), 0);
+  const coefficient = parts.reduce(
+    (sum, part) => sum + part.coefficient * 10n ** BigInt(scale - part.scale),
+    0n,
+  );
+  const negative = coefficient < 0n;
+  const digits = (negative ? -coefficient : coefficient).toString().padStart(scale + 1, "0");
+  const decimal = scale
+    ? `${digits.slice(0, -scale)}.${digits.slice(-scale)}`
+    : digits;
+  return Number(`${negative ? "-" : ""}${decimal}`);
+}
+
+export function recordActualCost(
+  state: AgentSessionState,
+  entry: Omit<ActualCostEntry, "recordedAt"> & { recordedAt?: string },
+): AgentSessionState {
+  if (!entry.id || !Number.isFinite(entry.actualCostUsd) || entry.actualCostUsd < 0) return state;
+  const costLedger = state.execution.costLedger.filter((candidate) => candidate.id !== entry.id);
+  costLedger.push({
+    ...entry,
+    recordedAt: entry.recordedAt ?? now(),
+  });
+  return {
+    ...state,
+    execution: {
+      ...state.execution,
+      costLedger,
+      spentUsd: totalActualCostUsd(costLedger),
+    },
   };
 }
 
@@ -710,6 +789,14 @@ export function validateAgentState(state: AgentSessionState): string[] {
   if (state.execution) {
     if (state.execution.generationCount < 0 || state.execution.retryCount < 0 || state.execution.spentUsd < 0) {
       errors.push("Execution counters and cost must be non-negative.");
+    }
+    const costIds = new Set(state.execution.costLedger.map((entry) => entry.id));
+    if (costIds.size !== state.execution.costLedger.length) errors.push("Actual cost entry IDs must be unique.");
+    if (state.execution.costLedger.some((entry) => !entry.id || !Number.isFinite(entry.actualCostUsd) || entry.actualCostUsd < 0)) {
+      errors.push("Actual cost entries must contain finite non-negative USD values.");
+    }
+    if (state.execution.spentUsd !== totalActualCostUsd(state.execution.costLedger)) {
+      errors.push("Tracked spend must equal the actual cost ledger total.");
     }
   }
   return errors;

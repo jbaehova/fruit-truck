@@ -211,7 +211,7 @@ export function SettingsDialog({
                   <div><strong id="settings-agent-skills-title">{t("agentSkills")}</strong><small>{t("agentSkillsHint")}</small></div>
                   <Button size="xs" variant="outline" onClick={() => importRef.current?.click()}><Upload /> {t("import")}</Button>
                 </header>
-                <Input ref={importRef} className="sr-only" type="file" accept=".md,text/markdown,text/plain" onChange={(event) => {
+                <input ref={importRef} hidden tabIndex={-1} type="file" accept=".md,text/markdown,text/plain" onChange={(event) => {
                   const file = event.target.files?.[0];
                   event.target.value = "";
                   if (!file) return;

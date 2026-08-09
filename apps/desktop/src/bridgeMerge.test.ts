@@ -74,6 +74,82 @@ test("bridge merge preserves primitive-array additions and one-sided deletions",
   assert.deepEqual(merged.agent.mustInclude, ["logo", "location", "product"]);
 });
 
+test("bridge merge recomputes spend from concurrent cost ledger additions", () => {
+  const base = {
+    id: "session-cost",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+    agent: {
+      revision: 1,
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      execution: { costLedger: [], spentUsd: 0 },
+    },
+  };
+  const local = {
+    ...base,
+    agent: {
+      ...base.agent,
+      revision: 2,
+      execution: {
+        costLedger: [{ id: "generation:local", actualCostUsd: 0.1 }],
+        spentUsd: 0.1,
+      },
+    },
+  };
+  const remote = {
+    ...base,
+    agent: {
+      ...base.agent,
+      revision: 2,
+      execution: {
+        costLedger: [{ id: "generation:remote", actualCostUsd: 0.2 }],
+        spentUsd: 0.2,
+      },
+    },
+  };
+
+  const merged = mergeBridgeSession(base, local, remote);
+  assert.equal(merged.agent.execution.spentUsd, 0.3);
+  assert.deepEqual(merged.agent.execution.costLedger.map((entry) => entry.id), ["generation:remote", "generation:local"]);
+});
+
+test("bridge merge keeps the newest correction for the same cost entry", () => {
+  const entry = (actualCostUsd: number, recordedAt: string) => ({
+    id: "generation:attempt-1",
+    category: "generation",
+    actualCostUsd,
+    recordedAt,
+  });
+  const base = {
+    id: "session-cost-correction",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+    agent: {
+      revision: 1,
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      execution: { costLedger: [entry(0.05, "2026-01-01T00:00:00.000Z")], spentUsd: 0.05 },
+    },
+  };
+  const local = {
+    ...base,
+    agent: {
+      ...base.agent,
+      revision: 2,
+      execution: { costLedger: [entry(0.5, "2026-01-01T00:00:02.000Z")], spentUsd: 0.5 },
+    },
+  };
+  const remote = {
+    ...base,
+    agent: {
+      ...base.agent,
+      revision: 2,
+      execution: { costLedger: [entry(0.1, "2026-01-01T00:00:01.000Z")], spentUsd: 0.1 },
+    },
+  };
+
+  const merged = mergeBridgeSession(base, local, remote);
+  assert.equal(merged.agent.execution.spentUsd, 0.5);
+  assert.deepEqual(merged.agent.execution.costLedger, local.agent.execution.costLedger);
+});
+
 test("bridge merge does not resurrect keyed items deleted on either side", () => {
   const base = {
     id: "session-1",

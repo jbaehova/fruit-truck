@@ -81,7 +81,7 @@ export function GenerationResultDialog({
             </header>
 
             <main className="generation-result-stage">
-              {selected ? <AssetPreview key={selected.id} asset={selected} controls={selected.kind === "video"} /> : null}
+              {selected ? <AssetPreview key={selected.id} asset={selected} controls={selected.kind === "video"} transparentControls={selected.kind === "video"} /> : null}
               {resultAssets.length > 1 ? (
                 <div className="generation-result-candidates" role="group" aria-label={t("generationCandidates")}>
                   {resultAssets.map((asset, index) => (

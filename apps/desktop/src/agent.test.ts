@@ -5,6 +5,7 @@ import {
   createAgentState,
   createCustomSkillDraft,
   normalizeAgentState,
+  recordActualCost,
   resolveAgentDecision,
   resolveAgentDecisionFromDesktop,
   resolveAgentDecisionFromChat,
@@ -15,6 +16,61 @@ import {
   validatePlanStepTransition,
   type AgentSessionState,
 } from "./agent.ts";
+
+test("actual cost ledger sums distinct charges and updates duplicate operation IDs", () => {
+  const initial = createAgentState();
+  const generated = recordActualCost(initial, {
+    id: "generation:one",
+    category: "generation",
+    actualCostUsd: 0.040000009,
+  });
+  const enhanced = recordActualCost(generated, {
+    id: "prompt-enhancement:one",
+    category: "prompt_enhancement",
+    actualCostUsd: 0.00123456,
+  });
+  const corrected = recordActualCost(enhanced, {
+    id: "generation:one",
+    category: "generation",
+    actualCostUsd: 0.05,
+  });
+
+  assert.equal(corrected.execution.costLedger.length, 2);
+  assert.equal(corrected.execution.spentUsd, 0.05123456);
+  assert.equal(corrected.execution.costLedger.find((entry) => entry.id === "generation:one")?.actualCostUsd, 0.05);
+});
+
+test("actual cost ledger preserves confirmed charges below eight decimal places", () => {
+  const actualCostUsd = 0.000000004;
+  const recorded = recordActualCost(createAgentState(), {
+    id: "prompt-enhancement:micro",
+    category: "prompt_enhancement",
+    actualCostUsd,
+  });
+
+  assert.equal(recorded.execution.costLedger[0]?.actualCostUsd, actualCostUsd);
+  assert.equal(recorded.execution.spentUsd, actualCostUsd);
+  assert.equal(normalizeAgentState(recorded).execution.spentUsd, actualCostUsd);
+});
+
+test("agent schema 4 resets legacy tracked spend and retains current cost ledgers", () => {
+  const current = recordActualCost(createAgentState(), {
+    id: "generation:current",
+    category: "generation",
+    actualCostUsd: 0.12,
+  });
+  assert.equal(normalizeAgentState(current).execution.spentUsd, 0.12);
+
+  const legacy = {
+    ...current,
+    schemaVersion: 3 as const,
+    execution: { ...current.execution, spentUsd: 99 },
+  };
+  const migrated = normalizeAgentState(legacy);
+  assert.equal(migrated.schemaVersion, 4);
+  assert.deepEqual(migrated.execution.costLedger, []);
+  assert.equal(migrated.execution.spentUsd, 0);
+});
 
 function productionState(): AgentSessionState {
   const state = createAgentState("Create a live action 9:16 Instagram reel, 15 seconds long.");
@@ -356,6 +412,12 @@ test("publishing an agent session preserves state and waits without drafting a p
     execution: {
       currentJobIds: ["job-existing"],
       generationCount: 2,
+      costLedger: [{
+        id: "generation:attempt-existing",
+        category: "generation" as const,
+        actualCostUsd: 0.4,
+        recordedAt: new Date().toISOString(),
+      }],
       spentUsd: 0.4,
       retryCount: 1,
     },

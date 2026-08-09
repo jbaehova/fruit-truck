@@ -41,36 +41,49 @@ Los modelos generativos rara vez coinciden en sus entradas. Uno admite semilla y
 
 ## Funciones
 
-- **Descubrimiento en vivo** — carga los catálogos de modelos de imagen y vídeo directamente desde OpenRouter.
-- **Controles según capacidades** — muestra únicamente los parámetros compatibles con el modelo elegido.
-- **Flujos de imagen y vídeo** — procesa tanto resultados de imagen como tareas de vídeo asíncronas.
-- **Referencias flexibles** — asigna archivos como referencias generales, fotogramas iniciales o finales cuando el modelo lo permite.
+- **Primera ejecución guiada** — presenta el flujo y guarda localmente la clave de OpenRouter antes de cargar el espacio de trabajo.
+- **Modelos y precios en vivo** — carga directamente desde OpenRouter los catálogos de imagen y vídeo y sus precios publicados.
+- **Controles según capacidades** — muestra solo los parámetros compatibles, limita los rangos numéricos y mantiene disponible el enrutamiento avanzado de proveedores.
+- **Creación de imagen y vídeo** — admite generación de imágenes y vídeos, edición de imagen con máscara semántica, vídeo a partir de imágenes de referencia o fotogramas inicial/final y mejora de prompts basada en imágenes.
+- **Entradas numeradas estables** — copia las cargas en la sesión y permite citarlas de forma consistente como `@1`, `@2`, etc.
+- **Hilos de generación independientes** — separa prompts, modelos, opciones, historial y trabajo en segundo plano entre pestañas paralelas de generación de imágenes y vídeos.
 - **Inspector de solicitudes** — muestra el JSON exacto antes de enviarlo y omite del visor los cuerpos base64 de gran tamaño.
-- **Enrutamiento avanzado** — acepta ajustes opcionales de proveedor y transferencia mediante JSON.
-- **Continuidad de tareas** — recuerda una tarea de vídeo activa y reanuda el sondeo tras reiniciar.
+- **Revisión y continuación de resultados** — permite revisar candidatos y comenzar una edición de imagen, una generación de vídeo o una nueva entrada desde el resultado elegido.
+- **Continuidad de tareas y costes** — restaura tareas activas, consulta vídeos hasta completarlos y registra cada intento con su coste estimado o real.
+- **Decisiones visuales desde agentes** — empieza en Codex, Claude Code o Hermes; abre Fruit Truck cuando necesites puntos de control de medios, modelos, cargas, montaje o aprobación.
+- **Imágenes nativas de Codex** — las sesiones de Codex eligen una vez entre la generación/edición integrada y OpenRouter; Claude Code y Hermes usan OpenRouter.
+- **Control compartido** — el panel derecho `Agente / Recursos` reúne estado, acción actual, progreso, pausa/parada y traspaso junto al lienzo de generación.
+- **Controles nativos de Mac** — los atajos, menús, navegación por elementos enfocados y comandos limitados al modal agilizan el espacio a ventana completa.
+- **Resultados trazables** — la procedencia y la evaluación permanecen disponibles en cada vista previa sin añadir un panel general al espacio principal.
+- **Medios locales gestionados** — las cargas viven en `~/.fruit-truck/assets`; los resultados generados y montados, en `~/.fruit-truck/generated`, conservando el formato real y las dimensiones solicitadas.
 - **Credenciales locales** — guarda la clave de OpenRouter en los datos locales de la app de escritorio, fuera de vistas previas y registros.
 
 ## Cómo funciona
 
 ```mermaid
 flowchart LR
-    A[Catálogo en vivo de OpenRouter] --> B[Mapa de capacidades]
-    B --> C[Controles por modelo]
-    C --> D[Vista previa de la solicitud]
+    A[Catálogo y precios de OpenRouter] --> B[Mapa de capacidades]
+    B --> C[Controles por hilo]
+    C --> D[Vista previa saneada]
     D --> E[API de OpenRouter]
-    E --> F[Resultado de imagen]
-    E --> G[Sondeo de tarea de vídeo]
+    E --> F[Revisión de candidatos]
+    E --> G[Sondeo persistente de vídeo]
+    F --> H[Recursos locales gestionados]
+    G --> H
 ```
 
-1. Fruit Truck obtiene los catálogos en vivo de modelos de imagen y vídeo.
-2. Los metadatos del modelo elegido determinan qué entradas, referencias y opciones aparecen.
-3. El prompt y los ajustes se convierten en una solicitud válida para el proveedor.
-4. Puedes inspeccionar el JSON saneado antes de generar.
-5. Las imágenes aparecen al instante; las tareas de vídeo se guardan y consultan hasta finalizar.
+1. En la primera ejecución, Fruit Truck guía la adición de una clave de OpenRouter almacenada solo en el dispositivo.
+2. Obtiene catálogos, capacidades, disponibilidad de endpoints y precios publicados de imagen y vídeo.
+3. Cada hilo conserva su modo, modelo, prompt, `@entradas` numeradas y opciones.
+4. Los ajustes se convierten en una solicitud válida que puedes revisar sin cuerpos de medios incrustados.
+5. Las imágenes pasan de inmediato a la revisión de candidatos; las tareas de vídeo persisten y continúan en segundo plano.
+6. Los resultados elegidos se guardan como recursos locales y pueden alimentar ediciones de imagen, generación de vídeo guiada por imágenes o solicitudes posteriores.
 
 ## Inicio rápido
 
 ### Requisitos previos
+
+Estos requisitos solo son necesarios para compilar Fruit Truck desde el código fuente. Quienes instalen el DMG no necesitan Node.js, Rust, Homebrew, FFmpeg ni FFprobe.
 
 | Requisito | Notas |
 | --- | --- |
@@ -84,11 +97,36 @@ flowchart LR
 ```bash
 git clone https://github.com/jbaehova/fruit-truck.git
 cd fruit-truck/apps/desktop
-npm install
+npm ci
 npm run tauri:dev
 ```
 
-Cuando se abra la aplicación, añade tu clave de OpenRouter en **Settings**. Los catálogos de modelos se cargarán automáticamente.
+También puedes ejecutar `./run.sh` desde la raíz del repositorio. Requiere Node.js 24+ y puede seleccionar una instalación compatible aunque una versión antigua aparezca antes en `PATH`. En macOS inicia el proceso de desarrollo con el nombre visible **Fruit Truck**. Para usar la vista de desarrollo solo en navegador, ejecuta `./run.sh --web` o `npm run dev` desde `apps/desktop`.
+
+El renderizado de escritorio desde el árbol de código usa `ffmpeg` y `ffprobe` del `PATH` del desarrollador. Homebrew es una forma opcional de obtenerlos, no un requisito. Los DMG de publicación incluyen ejecutables Universal propios.
+
+En una instalación nueva, la guía inicial configura OpenRouter antes de abrir el espacio de trabajo. Después puedes cambiar la clave en **Ajustes**; los catálogos se cargarán automáticamente.
+
+### Conectar un agente local
+
+Fruit Truck incluye en el repositorio un servidor MCP stdio independiente y Agent Skills. Hasta que `@fruit-truck/agent-kit` se publique en npm, instala directamente el paquete del repositorio:
+
+```bash
+cd agent-kit
+npm run build
+npm install --global .
+fruit-truck-agent-kit install codex --configure
+# o: fruit-truck-agent-kit install claude --configure
+# o: fruit-truck-agent-kit install hermes --configure
+```
+
+El instalador copia [`fruit-truck-agent`](../../agent-kit/skills/fruit-truck-agent/SKILL.md) y [`story-driven-short-form`](../../agent-kit/skills/story-driven-short-form/SKILL.md) al directorio personal de Skills del destino y puede registrar `fruit-truck-mcp`. Consulta la [guía de Agent Kit](../../agent-kit/README.md) para instalación, configuración manual y actualizaciones. El manifiesto de compatibilidad actual admite el escritorio `>=0.6.0 <0.7.0`.
+
+Empieza desde el agente local con una intención aproximada como «Crea un reel de 15 segundos sobre descubrir un perfume en una tienda antigua durante una noche lluviosa». El agente crea la sesión y comprueba Fruit Truck antes de tomar el control. En macOS, la aplicación instalada puede iniciarse en segundo plano, pero nunca solicita el foco. Las ambigüedades narrativas de texto permanecen en el chat del agente; los puntos de control de medios, modelos, cargas, montaje y aprobación esperan de forma duradera en Fruit Truck hasta que los abras.
+
+En una sesión controlada por Codex, la primera tarea de imagen permite elegir entre la generación integrada de Codex y OpenRouter; la elección dura toda la sesión. Las opciones de OpenRouter muestran precios publicados cuando están disponibles. El agente prepara el orden y los rangos finales de los clips, y el usuario los revisa y renderiza en **Crear vídeo final**. Las compilaciones distribuidas para macOS usan FFmpeg/FFprobe LGPL incluidos para entradas MP4, MOV y WebM, y codifican el H.264 final mediante Apple VideoToolbox cuando está disponible.
+
+Las cargas se copian a `~/.fruit-truck/assets`; los medios generados y los recursos antiguos exclusivos de IndexedDB se materializan en el almacenamiento gestionado antes de que el puente los publique. El JSON de sesión y del puente guarda `localPath`, no medios Base64. Las importaciones locales rechazan archivos vacíos y aplican límites de seguridad de 30 MB para imágenes y 700 MB para vídeos.
 
 ## Seguridad
 
@@ -101,7 +139,7 @@ En la aplicación Tauri, la clave de OpenRouter se guarda en:
 - En macOS y Linux, el directorio se restringe a `0700` y el archivo de credenciales a `0600`.
 - La clave aparece oculta en la interfaz y se excluye de las vistas previas y los registros.
 - Las llamadas de red pasan por el proceso de Rust, que solo permite las rutas de OpenRouter utilizadas por la aplicación.
-- Los vídeos generados se almacenan en el directorio de caché de aplicaciones del sistema operativo.
+- Los vídeos generados compartidos con agentes locales se restringen a `~/.fruit-truck/generated`.
 
 > [!NOTE]
 > La vista de desarrollo de Vite en el navegador usa almacenamiento local como alternativa de desarrollo. Usa la aplicación Tauri para gestionar credenciales de escritorio.
@@ -114,14 +152,25 @@ Ejecuta las comprobaciones desde `apps/desktop`:
 npm run test:unit
 npm run check
 npm run build
+npm run test:e2e
 cd src-tauri && cargo test
 ```
+
+Playwright se ejecuta sin interfaz a 1920×1080 y cubre la primera ejecución en ambos idiomas de la aplicación, el diseño de ventana completa Agente/Recursos, distintivos de decisiones pasivas, revisión visual, montaje y gestión de Agent Skills.
+
+### Empaquetado de medios en macOS
+
+`npm run bundle:mac:universal` compila FFmpeg 8.1.2 desde su archivo fuente verificado para Apple Silicon e Intel, combina ambas arquitecturas, valida que solo enlace bibliotecas del sistema macOS y lo incorpora al paquete. Después crea el DMG Universal con `src-tauri/tauri.release.conf.json`.
+
+La compilación de FFmpeg desactiva componentes GPL y no libres. El renderizado usa un solo grafo de filtros para recortar, reiniciar marcas de tiempo, escalar conservando la relación de aspecto, rellenar, normalizar a 30 fps y concatenar, seguido de una codificación `h264_videotoolbox`. `allow_sw=1` ofrece la alternativa por software de Apple si el hardware no está disponible. Consulta los [avisos de terceros](../../THIRD_PARTY_NOTICES.md) y la [guía de publicación](../RELEASING.md).
 
 ### Estructura del proyecto
 
 ```text
 fruit-truck/
+├── agent-kit/              # Skills de núcleo/flujo y configuración MCP
 ├── apps/desktop/
+│   ├── scripts/            # Servidor MCP para agentes locales
 │   ├── src/                 # Espacio React y constructor de solicitudes
 │   └── src-tauri/           # Credenciales y proxy de OpenRouter
 └── assets/readme/           # Recursos gráficos del README

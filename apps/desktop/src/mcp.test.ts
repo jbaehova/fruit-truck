@@ -17,7 +17,7 @@ import { createServer } from "node:http";
 import test from "node:test";
 import { resolveAgentDecisionFromDesktop, type AgentHost, type AgentSessionState } from "./agent.ts";
 import { materializeAgentSession, serializeAgentSessionForBridge, type AgentBridgeSession } from "./agentBridge.ts";
-import type { GenerationThread } from "./studio.ts";
+import { createSession, type GenerationThread } from "./studio.ts";
 
 type BridgeAsset = {
   id: string;
@@ -60,7 +60,7 @@ function writeStoredEnvelope(dataDirectory: string, envelope: StoredEnvelope) {
     writeFileSync(join(root, file), JSON.stringify(session, null, 2));
     return { id: session.id, file };
   });
-  writeFileSync(indexPath, JSON.stringify({ schemaVersion: 3, revision: envelope.revision, sessionFiles }, null, 2));
+  writeFileSync(indexPath, JSON.stringify({ schemaVersion: 4, revision: envelope.revision, sessionFiles }, null, 2));
 }
 
 function storedEnvelopeText(dataDirectory: string) {
@@ -78,6 +78,7 @@ function spawnMcp(dataDirectory: string, host: AgentHost, codexHome?: string, op
       env: {
         ...process.env,
         FRUIT_TRUCK_HOME: dataDirectory,
+        FRUIT_TRUCK_VIDEO_POLL_INTERVAL_MS: "100",
         ...(codexHome ? { CODEX_HOME: codexHome } : {}),
         ...(openRouterBase ? { FRUIT_TRUCK_OPENROUTER_BASE: openRouterBase } : {}),
       },
@@ -142,6 +143,53 @@ function resolveInFruitTruck(
   writeStoredEnvelope(dataDirectory, envelope);
 }
 
+test("MCP startup durably removes legacy video edit threads and jobs", async (context) => {
+  const dataDirectory = mkdtempSync(join(tmpdir(), "fruit-truck-mcp-edit-migration-"));
+  const session = createSession("Legacy edit migration");
+  const serialized = await serializeAgentSessionForBridge(session);
+  const editThread = {
+    ...structuredClone(serialized.threads!.video[0]),
+    id: "legacy-edit-thread",
+    videoWorkflow: "edit",
+    attempts: [{
+      id: "legacy-edit-attempt",
+      status: "in_progress",
+      backend: "openrouter",
+      draftRevision: 0,
+      requestedBy: "agent",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      inputAssetIds: [],
+      assetIds: [],
+      jobId: "legacy-edit-job",
+    }],
+  };
+  serialized.threads!.video = [editThread as GenerationThread];
+  serialized.activeThreadIds!.video = editThread.id;
+  serialized.agent.execution.currentJobIds = ["legacy-edit-job", "generate-job"];
+  writeFileSync(join(dataDirectory, "agent-sessions.json"), JSON.stringify({
+    schemaVersion: 4,
+    revision: 7,
+    sessions: [serialized],
+  }, null, 2));
+
+  const server = spawnMcp(dataDirectory, "claude");
+  context.after(() => {
+    stopMcp(server.child);
+    rmSync(dataDirectory, { recursive: true, force: true });
+  });
+  const initialized = await server.request("initialize", {});
+  assert.equal((initialized.result as { serverInfo: { name: string } }).serverInfo.name, "fruit-truck");
+
+  const migrated = readStoredEnvelope(dataDirectory);
+  assert.equal(migrated.revision, 8);
+  assert.equal(migrated.sessions[0].threads.video.length, 1);
+  assert.notEqual(migrated.sessions[0].threads.video[0].id, editThread.id);
+  assert.deepEqual(migrated.sessions[0].threads.video[0].attempts, []);
+  assert.deepEqual(migrated.sessions[0].agent.execution.currentJobIds, ["generate-job"]);
+  assert.doesNotMatch(JSON.stringify(migrated), /videoWorkflow|video_reference|videoEdit|legacy-edit-job/);
+});
+
 test("MCP resolves user choices in agent chat and resumes them durably", async (context) => {
   const dataDirectory = mkdtempSync(join(tmpdir(), "fruit-truck-mcp-"));
   const generatedDirectory = join(dataDirectory, "generated");
@@ -158,7 +206,8 @@ test("MCP resolves user choices in agent chat and resumes them durably", async (
   const initialized = await server.request("initialize", {});
   assert.equal((initialized.result as { serverInfo: { name: string } }).serverInfo.name, "fruit-truck");
   const listed = await server.request("tools/list", {});
-  const toolNames = (listed.result as { tools: Array<{ name: string }> }).tools.map((item) => item.name);
+  const listedTools = (listed.result as { tools: Array<{ name: string }> }).tools;
+  const toolNames = listedTools.map((item) => item.name);
   assert.ok(toolNames.includes("claim_session"));
   assert.ok(toolNames.includes("ensure_desktop"));
   assert.ok(toolNames.includes("resolve_decision"));
@@ -167,6 +216,7 @@ test("MCP resolves user choices in agent chat and resumes them durably", async (
   assert.ok(toolNames.includes("propose_assembly"));
   assert.equal(toolNames.includes("request_image_backend_selection"), false);
   assert.equal(toolNames.includes("register_host_image"), false);
+  assert.doesNotMatch(JSON.stringify(listedTools), /videoWorkflow|video_reference|videoEdit/);
 
   const created = await server.call("create_session", {
     name: "Rainy perfume reel",
@@ -808,7 +858,7 @@ test("OpenRouter thread batches persist media-free attempts and resume independe
   const maskThread = maskSession.threads.image.find((item) => item.id === imageOne.id)!;
   maskThread.draft.prompt = "";
   maskThread.draft.imageEditMode = true;
-  maskThread.draft.imageEditTarget = "#1";
+  maskThread.draft.imageEditTarget = "@1";
   maskThread.draft.maskInstructions = "Turn the selected feathers black.";
   maskThread.draft.maskStrokes = [{ points: [{ x: 0.25, y: 0.25 }, { x: 0.5, y: 0.5 }], size: 0.08, operation: "paint" }];
   maskThread.draft.enhancePrompt = false;
@@ -903,6 +953,40 @@ test("OpenRouter thread batches persist media-free attempts and resume independe
   const finalSession = (await server.call("get_session", { sessionId })).value as BridgeSession;
   assert.equal(finalSession.threads.video.flatMap((thread) => thread.attempts).filter((attempt) => videoAttemptIds.includes(attempt.id) && attempt.status === "completed").length, 2);
   assert.equal(((finalSession as unknown as { jobs?: unknown[] }).jobs ?? []).length, 0);
+
+  stopMcp(server.child);
+  const timedOutEnvelope = readStoredEnvelope(dataDirectory);
+  const timedOutSession = timedOutEnvelope.sessions.find((item) => item.id === sessionId)!;
+  const timedOutThread = timedOutSession.threads.video[0];
+  const timedOutAttemptId = "attempt-timeout-on-poll-error";
+  timedOutThread.attempts.push({
+    id: timedOutAttemptId,
+    status: "in_progress",
+    backend: "openrouter",
+    draftRevision: timedOutThread.revision,
+    requestedBy: "agent",
+    createdAt: new Date(Date.now() - 31 * 60_000).toISOString(),
+    updatedAt: new Date().toISOString(),
+    submittedAt: new Date(Date.now() - 31 * 60_000).toISOString(),
+    modelId: "test/video",
+    inputAssetIds: [],
+    assetIds: [],
+    jobId: "job-timeout-error",
+  });
+  timedOutSession.agent.execution.currentJobIds.push("job-timeout-error");
+  timedOutEnvelope.revision += 1;
+  writeStoredEnvelope(dataDirectory, timedOutEnvelope);
+  server = spawnMcp(dataDirectory, "claude", undefined, base);
+  await server.request("initialize", {});
+  const timedOut = await server.call("await_generation_threads", { sessionId, attemptIds: [timedOutAttemptId], timeoutMs: 1_000 });
+  assert.equal(timedOut.isError, false, String(timedOut.value));
+  assert.equal((timedOut.value as { status: string; outcome: string }).status, "terminal");
+  assert.equal((timedOut.value as { outcome: string }).outcome, "failed");
+  const afterTimeout = (await server.call("get_session", { sessionId })).value as BridgeSession;
+  const failedAfterPollError = afterTimeout.threads.video[0].attempts.find((attempt) => attempt.id === timedOutAttemptId);
+  assert.equal(failedAfterPollError?.status, "failed");
+  assert.match(failedAfterPollError?.error ?? "", /within 30 minutes/i);
+  assert.equal(afterTimeout.agent.execution.currentJobIds.includes("job-timeout-error"), false);
 
   stopMcp(server.child);
   const uncertainEnvelope = readStoredEnvelope(dataDirectory);

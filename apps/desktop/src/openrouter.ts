@@ -1,6 +1,5 @@
 export type GenerationMode = "image" | "video";
-export type VideoWorkflow = "generate" | "edit";
-export type ReferenceRole = "reference" | "first_frame" | "last_frame" | "video_reference";
+export type ReferenceRole = "reference" | "first_frame" | "last_frame";
 
 type CapabilityDescriptor = {
   type: "enum" | "range" | "boolean";
@@ -25,11 +24,10 @@ type VideoPricingLine = {
   minimum: boolean;
   resolution?: string;
   audio?: boolean;
-  workflow?: "text" | "image" | "edit";
+  workflow?: "text" | "image";
 };
 
 export type GenerationCostContext = {
-  videoWorkflow?: VideoWorkflow;
   imageInputCount?: number;
 };
 
@@ -67,7 +65,7 @@ export type VideoModel = {
     input_modalities?: string[];
     output_modalities?: string[];
   };
-  input_reference_types?: Array<"image" | "video" | "audio"> | null;
+  input_reference_types?: Array<"image" | "audio"> | null;
   max_input_references?: number | null;
   supported_resolutions?: string[] | null;
   supported_aspect_ratios?: string[] | null;
@@ -84,7 +82,7 @@ export type GenerationModel = ImageModel | VideoModel;
 
 export function formatUsd(value: number) {
   if (!Number.isFinite(value)) return "";
-  const [whole, fractional = ""] = value.toFixed(8).split(".");
+  const [whole, fractional = ""] = value.toFixed(12).split(".");
   return `$${whole}.${fractional.replace(/0+$/, "").padEnd(2, "0")}`;
 }
 
@@ -137,9 +135,8 @@ function videoPricingLines(model: VideoModel): VideoPricingLine[] {
     const audio = normalized.includes("without_audio")
       ? false
       : normalized.includes("with_audio") ? true : undefined;
-    const workflow = normalized.includes("video_continuation")
-      ? "edit" as const
-      : normalized.includes("image_to_video")
+    if (normalized.includes("video_continuation")) return [];
+    const workflow = normalized.includes("image_to_video")
         ? "image" as const
         : normalized.includes("text_to_video") ? "text" as const : undefined;
     return [{
@@ -220,9 +217,7 @@ function seedanceSecondPrice(model: VideoModel, lines: VideoPricingLine[], optio
 function selectVideoSecondRate(lines: VideoPricingLine[], options: DraftOptions, context: GenerationCostContext) {
   const resolution = typeof options.resolution === "string" ? options.resolution.toLowerCase() : undefined;
   const audio = typeof options.generate_audio === "boolean" ? options.generate_audio : undefined;
-  const desiredWorkflow = context.videoWorkflow === "edit"
-    ? "edit"
-    : (context.imageInputCount ?? 0) > 0 ? "image" : "text";
+  const desiredWorkflow = (context.imageInputCount ?? 0) > 0 ? "image" : "text";
   const scored = lines.filter((line) => line.basis === "second" && !line.minimum).map((line) => {
     let score = 0;
     if (line.resolution) score += line.resolution === resolution ? 4 : -100;
@@ -310,7 +305,6 @@ export type DraftOptions = Record<string, string | number | boolean | undefined>
 
 export type GenerationDraft = {
   mode: GenerationMode;
-  videoWorkflow?: VideoWorkflow;
   model: string;
   prompt: string;
   assets: ReferenceAsset[];
@@ -321,7 +315,6 @@ export type GenerationDraft = {
 export type PromptEnhancementInput = {
   promptModel: string;
   mode: GenerationMode;
-  videoWorkflow?: VideoWorkflow;
   editMode?: boolean;
   editTarget?: string;
   prompt: string;
@@ -333,13 +326,11 @@ export type PromptEnhancementInput = {
 
 export type PromptEnhancementVisual = {
   id: string;
-  kind: "reference" | "edit_target" | "mask_guide" | "video_frame";
+  kind: "reference" | "edit_target" | "mask_guide";
   source: string;
   slot: number;
   name: string;
   role: ReferenceRole;
-  framePosition?: "beginning" | "middle" | "end";
-  timestampSeconds?: number;
 };
 
 export type PromptEnhancementContentPart =
@@ -358,15 +349,29 @@ export type ImageResult = {
   actualCostUsd?: number;
 };
 
+export type VideoStatus = "pending" | "in_progress" | "completed" | "failed" | "cancelled" | "expired";
+
 export type VideoResult = {
   kind: "video";
   jobId: string;
-  status: "pending" | "in_progress" | "completed" | "failed";
+  status: VideoStatus;
   url?: string;
   error?: string;
   progress?: number;
   actualCostUsd?: number;
 };
+
+export function normalizeVideoStatus(value: unknown, fallback: VideoStatus = "in_progress"): VideoStatus {
+  if (value === "canceled") return "cancelled";
+  return value === "pending"
+    || value === "in_progress"
+    || value === "completed"
+    || value === "failed"
+    || value === "cancelled"
+    || value === "expired"
+    ? value
+    : fallback;
+}
 
 export function isTauriRuntime() {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -419,6 +424,7 @@ async function request<T>(method: "GET" | "POST", path: string, body?: unknown):
   for (let retry = 0; ; retry += 1) {
     const response = await fetch(`https://openrouter.ai/api/v1${path}`, {
       method,
+      signal: AbortSignal.timeout(180_000),
       headers: {
         "Content-Type": "application/json",
         ...(key ? { Authorization: `Bearer ${key}` } : {}),
@@ -506,17 +512,13 @@ export function imageReferenceLimit(model: ImageModel | null): number {
   return model?.supported_parameters.input_references?.max ?? 0;
 }
 
-function videoReferenceTypes(model: VideoModel | null): Array<"image" | "video" | "audio"> {
+function videoReferenceTypes(model: VideoModel | null): Array<"image"> {
   if (!model) return [];
-  if (Array.isArray(model.input_reference_types)) return model.input_reference_types;
+  if (Array.isArray(model.input_reference_types)) {
+    return model.input_reference_types.filter((value): value is "image" => value === "image");
+  }
   const declared = model.architecture?.input_modalities ?? [];
-  return declared.filter((value): value is "image" | "video" | "audio" =>
-    value === "image" || value === "video" || value === "audio",
-  );
-}
-
-export function supportsVideoInput(model: VideoModel | null): boolean {
-  return videoReferenceTypes(model).includes("video");
+  return declared.filter((value): value is "image" => value === "image");
 }
 
 export function videoReferenceLimit(model: VideoModel | null): number {
@@ -536,7 +538,6 @@ export function modelInputSignature(
   const parts = ["Text"];
   const referenceTypes = videoReferenceTypes(video);
   if (referenceTypes.includes("image")) parts.push("image");
-  if (referenceTypes.includes("video")) parts.push("video");
   if (video.supported_frame_images?.includes("first_frame")) parts.push("first frame");
   if (video.supported_frame_images?.includes("last_frame")) parts.push("last frame");
   return parts.join(" + ");
@@ -545,16 +546,14 @@ export function modelInputSignature(
 export function allowedAssetRoles(
   mode: GenerationMode,
   model: GenerationModel | null,
-  workflow: VideoWorkflow = "generate",
 ): ReferenceRole[] {
   if (mode === "image") return imageReferenceLimit(model as ImageModel | null) > 0 ? ["reference"] : [];
   const video = model as VideoModel | null;
   const types = videoReferenceTypes(video);
   const roles: ReferenceRole[] = [];
   if (types.includes("image")) roles.push("reference");
-  if (workflow === "edit" && types.includes("video")) roles.push("video_reference");
-  if (workflow === "generate" && video?.supported_frame_images?.includes("first_frame")) roles.push("first_frame");
-  if (workflow === "generate" && video?.supported_frame_images?.includes("last_frame")) roles.push("last_frame");
+  if (video?.supported_frame_images?.includes("first_frame")) roles.push("first_frame");
+  if (video?.supported_frame_images?.includes("last_frame")) roles.push("last_frame");
   return roles;
 }
 
@@ -593,9 +592,6 @@ function parseProviderJson(raw: string): Record<string, unknown> | undefined {
 }
 
 function asReference(asset: ReferenceAsset) {
-  if (asset.mediaType.startsWith("video/")) {
-    return { type: "video_url", video_url: { url: asset.dataUrl } };
-  }
   return { type: "image_url", image_url: { url: asset.dataUrl } };
 }
 
@@ -631,10 +627,9 @@ export function buildRequest(draft: GenerationDraft, model: GenerationModel | nu
       if (supported[key] && value !== undefined && value !== "") payload[key] = value;
     }
     const referenceTypes = videoReferenceTypes(videoModel);
-    const references = draft.assets.filter((asset) => {
-      if (asset.role === "video_reference") return referenceTypes.includes("video");
-      return asset.role === "reference" && referenceTypes.includes("image");
-    });
+    const references = draft.assets.filter((asset) =>
+      asset.role === "reference" && asset.mediaType.startsWith("image/") && referenceTypes.includes("image")
+    );
     const limit = videoReferenceLimit(videoModel);
     const frames = draft.assets.filter((asset) =>
       (asset.role === "first_frame" || asset.role === "last_frame")
@@ -658,7 +653,7 @@ export function buildRequest(draft: GenerationDraft, model: GenerationModel | nu
   if (sentAssets.length) {
     const mapping = sentAssets
       .toSorted((a, b) => a.slot - b.slot)
-      .map((asset) => `#${asset.slot} = ${asset.name} (${asset.role})`)
+      .map((asset) => `@${asset.slot} = ${asset.name} (${asset.role})`)
       .join("; ");
     payload.prompt = `Attached input mapping: ${mapping}. Preserve these identities exactly.\n\n${draft.prompt.trim()}`;
   }
@@ -668,12 +663,10 @@ export function buildRequest(draft: GenerationDraft, model: GenerationModel | nu
 export function productSystemInstruction(input: Omit<PromptEnhancementInput, "promptModel" | "prompt">): string {
   const task = input.mode === "image"
     ? input.editMode ? "image editing" : "image generation"
-    : input.videoWorkflow === "edit" ? "video editing" : "video generation";
+    : "video generation";
   const editRule = input.mode === "image" && input.editMode
     ? `The explicit edit target is "${input.editTarget}". Treat that numbered image as the canvas to modify; other numbered images are context only.`
-    : input.mode === "video" && input.videoWorkflow === "edit"
-      ? "Treat the numbered video reference as the source footage to transform."
-      : "";
+    : "";
   const hasMaskGuide = input.visuals.some((visual) => visual.kind === "mask_guide");
   return [
     `The active Fruit Truck task is ${task}.`,
@@ -694,12 +687,11 @@ export function promptEnhancerInstruction(visualKinds: PromptEnhancementVisual["
     "You are Fruit Truck's prompt enhancer.",
     "Rewrite the user's request into one production-ready media prompt.",
     "Infer the best structure for this request instead of forcing a fixed schema.",
-    "Preserve intent, names, constraints, ambiguity that should remain creative, and every #number reference.",
+    "Preserve intent, names, constraints, ambiguity that should remain creative, and every attached @number reference.",
     "Preserve the user's language and every negative or forbidden condition.",
     hasVisuals ? "Inspect every supplied visual before adding detail, and use only facts that are actually visible." : "",
     "For edits, identify the existing subject and requested attribute precisely while preserving all unrequested identity, anatomy, geometry, texture, lighting, depth, composition, and continuity.",
-    visualKinds.includes("mask_guide") ? "For a mask guide, infer the intended semantic part from the original image, allow its boundary to snap or softly blend to nearby natural edges, and explicitly prevent generation of the painted brush-stroke silhouette as a new object." : "",
-    visualKinds.includes("video_frame") ? "Treat beginning, middle, and end video frames as one time-ordered source clip, not as separate scenes." : "",
+    visualKinds.includes("mask_guide") ? "For a mask guide, infer the intended semantic part from the original image and explicitly prevent generation of the painted brush-stroke silhouette as a new object. Keep simple color, material, or attribute changes attribute-only: do not add pose changes, gestures, finger placement, grasp angles, contact geometry, or limb restyling. Preserve exact overlaps and occlusions around the selected subject, and limit any boundary blending to that subject's own edge." : "",
     "Add useful visual, temporal, camera, material, lighting, composition, and continuity detail only when relevant.",
     "Return only the enhanced prompt. Do not add headings, analysis, JSON, or markdown.",
   ].filter(Boolean).join(" ");
@@ -708,15 +700,12 @@ export function promptEnhancerInstruction(visualKinds: PromptEnhancementVisual["
 export function promptEnhancementUserContent(input: PromptEnhancementInput): PromptEnhancementContentPart[] {
   const referenceCatalog = input.references.length
     ? ["", "Available numbered references:", ...input.references.map((reference) =>
-      `#${reference.slot}: ${reference.name} (${reference.mediaType}, ${reference.role})`,
+      `@${reference.slot}: ${reference.name} (${reference.mediaType}, ${reference.role})`,
     )]
     : [];
   const visualCatalog = input.visuals.length
     ? ["", "Visual inputs, in the same order as the attached images:", ...input.visuals.map((visual, index) => {
-      const frame = visual.kind === "video_frame"
-        ? `, ${visual.framePosition} at ${(visual.timestampSeconds ?? 0).toFixed(2)}s`
-        : "";
-      return `Visual ${index + 1}: #${visual.slot} ${visual.name} (${visual.kind}, ${visual.role}${frame})`;
+      return `Visual ${index + 1}: @${visual.slot} ${visual.name} (${visual.kind}, ${visual.role})`;
     })]
     : [];
   const text = [
@@ -735,23 +724,32 @@ export function promptEnhancementUserContent(input: PromptEnhancementInput): Pro
   ];
 }
 
-export function validateEnhancedPrompt(original: string, enhanced: string, editTarget?: string): string | null {
+export function validateEnhancedPrompt(
+  original: string,
+  enhanced: string,
+  editTarget?: string,
+  validSlots?: Iterable<number>,
+): string | null {
   if (!enhanced.trim()) return "The enhanced prompt is empty.";
-  const tokens = (value: string) => [...value.matchAll(/#(\d+)/g)].map((match) => Number(match[1]));
+  const available = validSlots ? new Set(validSlots) : null;
+  const tokens = (value: string) => [...value.matchAll(/@(\d+)/g)]
+    .map((match) => Number(match[1]))
+    .filter((slot) => !available || available.has(slot));
   const originalTokens = new Set(tokens(`${original} ${editTarget ?? ""}`));
   const enhancedTokens = new Set(tokens(enhanced));
   for (const token of originalTokens) {
-    if (!enhancedTokens.has(token)) return `Prompt enhancement removed #${token}.`;
+    if (!enhancedTokens.has(token)) return `Prompt enhancement removed @${token}.`;
   }
   for (const token of enhancedTokens) {
-    if (!originalTokens.has(token)) return `Prompt enhancement invented #${token}.`;
+    if (!originalTokens.has(token)) return `Prompt enhancement invented @${token}.`;
   }
   return null;
 }
 
-export async function enhancePrompt(input: PromptEnhancementInput): Promise<string> {
+export async function enhancePrompt(input: PromptEnhancementInput, onActualCost?: ActualCostHandler): Promise<string> {
   const response = await request<{
     choices?: Array<{ message?: { content?: string | Array<{ type?: string; text?: string }> } }>;
+    usage?: { cost?: number };
   }>("POST", "/chat/completions", {
     model: input.promptModel,
     reasoning: { effort: input.promptModel.endsWith("luna") ? "xhigh" : "high" },
@@ -764,6 +762,7 @@ export async function enhancePrompt(input: PromptEnhancementInput): Promise<stri
       { role: "user", content: promptEnhancementUserContent(input) },
     ],
   });
+  reportActualCost(response, onActualCost);
   const content = response.choices?.[0]?.message?.content;
   const text = typeof content === "string"
     ? content
@@ -773,16 +772,35 @@ export async function enhancePrompt(input: PromptEnhancementInput): Promise<stri
     input.prompt.trim(),
     input.hasMask ? input.maskInstructions?.trim() ?? "" : "",
   ].filter(Boolean).join("\n");
-  const validationError = validateEnhancedPrompt(originalIntent, text, input.editTarget);
+  const validationError = validateEnhancedPrompt(
+    originalIntent,
+    text,
+    input.editTarget,
+    input.references.map((reference) => reference.slot),
+  );
   if (validationError) throw new Error(validationError);
   return text.trim();
 }
 
-export async function generateImage(payload: Record<string, unknown>): Promise<ImageResult> {
+type ActualCostHandler = (actualCostUsd: number) => void;
+
+function responseCost(response: { usage?: { cost?: number } }) {
+  const cost = response.usage?.cost;
+  return typeof cost === "number" && Number.isFinite(cost) && cost >= 0 ? cost : undefined;
+}
+
+function reportActualCost(response: { usage?: { cost?: number } }, onActualCost?: ActualCostHandler) {
+  const cost = responseCost(response);
+  if (cost != null) onActualCost?.(cost);
+  return cost;
+}
+
+export async function generateImage(payload: Record<string, unknown>, onActualCost?: ActualCostHandler): Promise<ImageResult> {
   const response = await request<{
     data?: Array<{ b64_json?: string; url?: string; local_path?: string; media_type?: string }>;
     usage?: { cost?: number };
   }>("POST", "/images", payload);
+  const actualCostUsd = reportActualCost(response, onActualCost);
   const urls = (response.data ?? []).flatMap((item) => {
     if (item.local_path) return [item.local_path];
     if (item.url) return [item.url];
@@ -790,47 +808,63 @@ export async function generateImage(payload: Record<string, unknown>): Promise<I
     return [];
   });
   if (!urls.length) throw new Error("OpenRouter returned no image data.");
-  return { kind: "image", urls, actualCostUsd: typeof response.usage?.cost === "number" ? response.usage.cost : undefined };
+  return { kind: "image", urls, actualCostUsd };
 }
 
-export async function submitVideo(payload: Record<string, unknown>): Promise<VideoResult> {
-  const response = await request<{ id?: string; job_id?: string; status?: VideoResult["status"]; usage?: { cost?: number } }>(
+export async function submitVideo(payload: Record<string, unknown>, onActualCost?: ActualCostHandler): Promise<VideoResult> {
+  const response = await request<{ id?: string; job_id?: string; status?: unknown; usage?: { cost?: number } }>(
     "POST",
     "/videos",
     payload,
   );
+  const actualCostUsd = reportActualCost(response, onActualCost);
   const jobId = response.id ?? response.job_id;
   if (!jobId) throw new Error("OpenRouter returned no video job ID.");
-  return { kind: "video", jobId, status: response.status ?? "pending", actualCostUsd: typeof response.usage?.cost === "number" ? response.usage.cost : undefined };
+  return { kind: "video", jobId, status: normalizeVideoStatus(response.status, "pending"), actualCostUsd };
 }
 
-export async function pollVideo(jobId: string): Promise<VideoResult> {
+export async function pollVideo(jobId: string, onActualCost?: ActualCostHandler): Promise<VideoResult> {
   const response = await request<{
     id?: string;
-    status?: VideoResult["status"];
+    status?: unknown;
     progress?: number;
     error?: string | { message?: string };
     unsigned_urls?: string[];
     data?: Array<{ url?: string }>;
     usage?: { cost?: number };
   }>("GET", `/videos/${encodeURIComponent(jobId)}`);
+  const actualCostUsd = reportActualCost(response, onActualCost);
   const error = typeof response.error === "string" ? response.error : response.error?.message;
   const url = response.unsigned_urls?.[0] ?? response.data?.[0]?.url;
   return {
     kind: "video",
     jobId,
-    status: response.status ?? "in_progress",
+    status: normalizeVideoStatus(response.status),
     progress: response.progress,
     error,
     url,
-    actualCostUsd: typeof response.usage?.cost === "number" ? response.usage.cost : undefined,
+    actualCostUsd,
   };
 }
 
 export async function cacheVideo(jobId: string): Promise<string> {
-  if (!isTauriRuntime()) throw new Error("Video content caching requires the Tauri app.");
-  const result = await invokeTauri<{ path: string }>("cache_video_content", { jobId });
-  return result.path;
+  if (isTauriRuntime()) {
+    const result = await invokeTauri<{ path: string }>("cache_video_content", { jobId });
+    return result.path;
+  }
+  const key = window.localStorage.getItem("fruit-truck.dev-key");
+  const response = await fetch(`https://openrouter.ai/api/v1/videos/${encodeURIComponent(jobId)}/content?index=0`, {
+    headers: key ? { Authorization: `Bearer ${key}` } : {},
+    signal: AbortSignal.timeout(180_000),
+  });
+  if (!response.ok) throw new Error(`OpenRouter ${response.status}: could not download generated video content.`);
+  const contentType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() || "video/mp4";
+  if (!contentType.startsWith("video/")) throw new Error("Generated video content has an invalid media type.");
+  const declaredSize = Number(response.headers.get("content-length") ?? 0);
+  if (declaredSize > 700 * 1024 * 1024) throw new Error("Generated video exceeds the 700 MB local safety limit.");
+  const blob = await response.blob();
+  if (!blob.size || blob.size > 700 * 1024 * 1024) throw new Error("Generated video exceeds the 700 MB local safety limit.");
+  return URL.createObjectURL(blob.type ? blob : new Blob([blob], { type: contentType }));
 }
 
 export function prettyRequest(payload: Record<string, unknown>): string {
