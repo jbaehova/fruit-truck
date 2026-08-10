@@ -81,7 +81,19 @@ ARCHIVE="${BUILD_ROOT}/ffmpeg-${FFMPEG_VERSION}.tar.xz"
 if [[ -n "${INPUT_SOURCE_ARCHIVE}" ]]; then
   cp -f -- "${INPUT_SOURCE_ARCHIVE}" "${ARCHIVE}"
 else
-  curl --fail --location --retry 3 --output "${ARCHIVE}" "${FFMPEG_SOURCE_URL}"
+  curl \
+    --fail \
+    --location \
+    --http1.1 \
+    --connect-timeout 30 \
+    --max-time 600 \
+    --retry 5 \
+    --retry-all-errors \
+    --retry-delay 5 \
+    --retry-max-time 900 \
+    --remove-on-error \
+    --output "${ARCHIVE}" \
+    "${FFMPEG_SOURCE_URL}"
 fi
 printf '%s  %s\n' "${FFMPEG_SHA256}" "${ARCHIVE}" | shasum -a 256 --check
 
