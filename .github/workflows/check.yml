@@ -83,6 +83,7 @@ jobs:
 
       - name: Run Rust tests
         run: |
+          bash scripts/prepare-core-sidecar.sh
           cargo test --manifest-path src-tauri/Cargo.toml --workspace
           cargo clippy --manifest-path src-tauri/Cargo.toml --workspace --all-targets -- -D warnings
 
