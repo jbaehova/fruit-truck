@@ -6,16 +6,14 @@ import type { Update } from "@tauri-apps/plugin-updater";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useI18n } from "@/i18n";
+import { createRetryableCheck, UPDATE_CHECK_RETRY_DELAYS_MS } from "@/updateCheck";
 
 type UpdatePhase = "ready" | "installing" | "failed";
 
-let updateCheck: Promise<Update | null> | null = null;
-
-async function checkOnce() {
+const checkOnce = createRetryableCheck(async () => {
   const { check } = await import("@tauri-apps/plugin-updater");
-  updateCheck ??= check();
-  return updateCheck;
-}
+  return check();
+});
 
 export function UpdatePrompt() {
   const { t } = useI18n();
@@ -29,10 +27,31 @@ export function UpdatePrompt() {
   useEffect(() => {
     if (!("__TAURI_INTERNALS__" in window)) return;
     let active = true;
-    void checkOnce()
-      .then((available) => { if (active && available) setUpdate(available); })
-      .catch(() => { /* A failed background check should not interrupt the workspace. */ });
-    return () => { active = false; };
+    let retryTimer: number | undefined;
+    let retryIndex = 0;
+
+    const runCheck = () => {
+      void checkOnce()
+        .then((available) => {
+          if (active && available) setUpdate(available);
+        })
+        .catch((error: unknown) => {
+          if (!active) return;
+          const retryDelay = UPDATE_CHECK_RETRY_DELAYS_MS[retryIndex];
+          retryIndex += 1;
+          if (retryDelay === undefined) {
+            console.warn("Fruit Truck could not check for updates after retrying.", error);
+            return;
+          }
+          retryTimer = window.setTimeout(runCheck, retryDelay);
+        });
+    };
+
+    runCheck();
+    return () => {
+      active = false;
+      if (retryTimer !== undefined) window.clearTimeout(retryTimer);
+    };
   }, []);
 
   const dismiss = () => {
