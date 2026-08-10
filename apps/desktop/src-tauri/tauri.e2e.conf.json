@@ -33,6 +33,9 @@
     "externalBin": ["target/bundled-tools/fruit-truckd"],
     "active": true,
     "targets": ["app"],
-    "createUpdaterArtifacts": false
+    "createUpdaterArtifacts": false,
+    "macOS": {
+      "signingIdentity": "-"
+    }
   }
 }
