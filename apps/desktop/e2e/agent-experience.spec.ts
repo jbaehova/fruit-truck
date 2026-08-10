@@ -2,6 +2,28 @@ import { expect, test, type Page } from "@playwright/test";
 import type { StudioState } from "../src/studio";
 
 const STORAGE_KEY = "fruit-truck.studio.v1";
+let studioReloadSequence = 0;
+
+async function reloadWithStudioMutation(
+  page: Page,
+  mutate: (state: StudioState) => void,
+) {
+  const state = await page.evaluate(
+    (key) => JSON.parse(localStorage.getItem(key) ?? "{}") as StudioState,
+    STORAGE_KEY,
+  );
+  mutate(state);
+  const marker = `fruit-truck.e2e-reload-${(studioReloadSequence += 1)}`;
+  await page.addInitScript(
+    ([key, value, once]) => {
+      if (sessionStorage.getItem(once)) return;
+      localStorage.setItem(key, value);
+      sessionStorage.setItem(once, "applied");
+    },
+    [STORAGE_KEY, JSON.stringify(state), marker] as const,
+  );
+  await page.reload();
+}
 
 async function mockImageGeneration(page: Page, imageGate?: Promise<void>, resultCount = 1, inputReferenceLimit = 0) {
   await page.route("https://openrouter.ai/api/v1/**", async (route) => {
@@ -253,8 +275,7 @@ test.beforeEach(async ({ page }) => {
 });
 
 test("top bar shows the active session's exact tracked spend", async ({ page }) => {
-  await page.evaluate((key) => {
-    const state = JSON.parse(localStorage.getItem(key) ?? "{}") as StudioState;
+  await reloadWithStudioMutation(page, (state) => {
     const [active, waiting] = state.sessions;
     const recordedAt = new Date().toISOString();
     active.agent.execution.costLedger = [
@@ -266,9 +287,7 @@ test("top bar shows the active session's exact tracked spend", async ({ page }) 
       { id: "generation:waiting", category: "generation", actualCostUsd: 2.5, recordedAt },
     ];
     waiting.agent.execution.spentUsd = 2.5;
-    localStorage.setItem(key, JSON.stringify(state));
-  }, STORAGE_KEY);
-  await page.reload();
+  });
 
   await expect(page.locator(".app-shell")).toHaveJSProperty("clientWidth", 1920);
   await expect(page.locator(".app-shell")).toHaveJSProperty("clientHeight", 1080);
@@ -333,13 +352,10 @@ test("video polling survives a not-yet-due heartbeat and collects the completed 
 });
 
 test("keyboard shortcuts cover workspace navigation and keep modal close scoped", async ({ page }) => {
-  await page.addInitScript((key) => {
-    const state = JSON.parse(localStorage.getItem(key) ?? "{}") as StudioState;
+  await reloadWithStudioMutation(page, (state) => {
     const session = state.sessions.find((item) => item.id === state.activeSessionId)!;
     session.agent.controlMode = "human";
-    localStorage.setItem(key, JSON.stringify(state));
-  }, STORAGE_KEY);
-  await page.reload();
+  });
 
   const threadRail = page.getByLabel("Generation threads");
   await expect(page.getByRole("button", { name: "New thread" })).toBeEnabled();
@@ -400,13 +416,10 @@ test("keyboard shortcuts cover workspace navigation and keep modal close scoped"
 });
 
 test("asset and text contexts preserve their expected keyboard behavior", async ({ page }) => {
-  await page.evaluate((key) => {
-    const state = JSON.parse(localStorage.getItem(key) ?? "{}") as StudioState;
+  await reloadWithStudioMutation(page, (state) => {
     const session = state.sessions.find((item) => item.id === state.activeSessionId)!;
     session.agent.controlMode = "human";
-    localStorage.setItem(key, JSON.stringify(state));
-  }, STORAGE_KEY);
-  await page.reload();
+  });
 
   const prompt = page.locator(".prompt-field textarea");
   await prompt.fill("Select only this prompt text");
@@ -502,14 +515,11 @@ test("model selector exposes its final row and provider options use compact typo
     }
     await route.fulfill({ status: 404, body: "Not mocked" });
   });
-  await page.evaluate((key) => {
-    const state = JSON.parse(localStorage.getItem(key) ?? "{}") as StudioState;
+  await reloadWithStudioMutation(page, (state) => {
     const session = state.sessions.find((item) => item.id === state.activeSessionId)!;
     session.agent.controlMode = "human";
     session.generationDefaults.modelIds.image = "test/image-1";
-    localStorage.setItem(key, JSON.stringify(state));
-  }, STORAGE_KEY);
-  await page.reload();
+  });
 
   await page.locator(".model-selector-trigger").click();
   await expect.poll(() => page.locator(".model-selector-popup").evaluate((element) => getComputedStyle(element).transform)).toBe("none");
@@ -618,12 +628,10 @@ test("approved video opens dedicated Assembly and provenance stays folded in Ass
 });
 
 test("Settings keeps Agent Skill import and history read-only for session activation", async ({ page }) => {
-  await page.evaluate((key) => {
-    const state = JSON.parse(localStorage.getItem(key) ?? "{}");
-    for (const session of state.sessions ?? []) session.activeVideoJobs = [];
-    localStorage.setItem(key, JSON.stringify(state));
-  }, STORAGE_KEY);
-  await page.reload();
+  await reloadWithStudioMutation(page, (state) => {
+    const legacyState = state as unknown as { sessions: Array<{ activeVideoJobs: unknown[] }> };
+    for (const session of legacyState.sessions) session.activeVideoJobs = [];
+  });
   await page.evaluate(() => {
     const runtime = window as typeof window & {
       __TAURI_INTERNALS__?: {
@@ -659,15 +667,12 @@ test("Settings keeps Agent Skill import and history read-only for session activa
 });
 
 test("Human mode exposes independently runnable generation threads without batch controls", async ({ page }) => {
-  await page.evaluate((key) => {
-    const state = JSON.parse(localStorage.getItem(key) ?? "{}") as StudioState;
+  await reloadWithStudioMutation(page, (state) => {
     const session = state.sessions.find((item) => item.id === state.activeSessionId);
     if (!session) throw new Error("Missing E2E session");
     session.agent.controlMode = "human";
     session.agent.runStatus = "paused";
-    localStorage.setItem(key, JSON.stringify(state));
-  }, STORAGE_KEY);
-  await page.reload();
+  });
 
   await expect(page.getByLabel("Generation threads").locator(".thread-tab")).toHaveCount(1);
   await page.getByRole("button", { name: "New thread" }).click();
@@ -722,8 +727,7 @@ test("legacy input mentions migrate visibly and new image and video tabs keep fo
     }
     await route.fulfill({ status: 404, body: "Not mocked" });
   });
-  await page.evaluate((key) => {
-    const state = JSON.parse(localStorage.getItem(key) ?? "{}") as StudioState;
+  await reloadWithStudioMutation(page, (state) => {
     (state as { schemaVersion: number }).schemaVersion = 3;
     const session = state.sessions.find((item) => item.id === state.activeSessionId)!;
     session.agent.controlMode = "human";
@@ -735,9 +739,7 @@ test("legacy input mentions migrate visibly and new image and video tabs keep fo
     imageThread.draft.references = [{ assetId: "asset-final", slot: 1, role: "reference" }];
     const videoThread = session.threads.video.find((item) => item.id === session.activeThreadIds.video)!;
     videoThread.modelOverrideId = undefined;
-    localStorage.setItem(key, JSON.stringify(state));
-  }, STORAGE_KEY);
-  await page.reload();
+  });
 
   const prompt = page.locator(".prompt-field textarea");
   await expect(prompt).toHaveValue("Use @1 and leave @2 plain.");
@@ -770,8 +772,7 @@ test("legacy input mentions migrate visibly and new image and video tabs keep fo
 });
 
 test("asset-library image drags set the edit target through the pointer drop path", async ({ page }) => {
-  await page.evaluate((key) => {
-    const state = JSON.parse(localStorage.getItem(key) ?? "{}") as StudioState;
+  await reloadWithStudioMutation(page, (state) => {
     const session = state.sessions.find((item) => item.id === state.activeSessionId);
     if (!session) throw new Error("Missing E2E session");
     const thread = session.threads.image.find((item) => item.id === session.activeThreadIds.image);
@@ -783,9 +784,7 @@ test("asset-library image drags set the edit target through the pointer drop pat
       references: [],
     };
     thread.attempts = [];
-    localStorage.setItem(key, JSON.stringify(state));
-  }, STORAGE_KEY);
-  await page.reload();
+  });
 
   const assetTile = page.locator(".asset-tile").filter({ hasText: "fruit-truck-icon.png" });
   const editPanel = page.locator(".edit-media-panel");
@@ -822,8 +821,7 @@ test("asset export downloads without navigating the workspace into the image", a
 });
 
 test("project overview routes failures and archived threads can be restored with history intact", async ({ page }) => {
-  await page.evaluate((key) => {
-    const state = JSON.parse(localStorage.getItem(key) ?? "{}") as StudioState;
+  await reloadWithStudioMutation(page, (state) => {
     const session = state.sessions.find((item) => item.id === state.activeSessionId)!;
     session.agent.controlMode = "human";
     const thread = session.threads.image[0];
@@ -874,9 +872,7 @@ test("project overview routes failures and archived threads can be restored with
       enhancementAttempts: [],
       archivedAt: now,
     });
-    localStorage.setItem(key, JSON.stringify(state));
-  }, STORAGE_KEY);
-  await page.reload();
+  });
 
   await page.getByLabel("Agent and assets panel").getByRole("button", { name: "Agent" }).click();
   await expect(page.getByText("Project overview")).toBeVisible();
@@ -913,8 +909,7 @@ test("mask-only enhancement analyzes the original image and a semantic mask guid
       }),
     });
   });
-  await page.evaluate((key) => {
-    const state = JSON.parse(localStorage.getItem(key) ?? "{}") as StudioState;
+  await reloadWithStudioMutation(page, (state) => {
     const session = state.sessions.find((item) => item.id === state.activeSessionId)!;
     session.agent.controlMode = "human";
     session.mode = "image";
@@ -935,9 +930,7 @@ test("mask-only enhancement analyzes the original image and a semantic mask guid
         points: [{ x: 0.35, y: 0.35 }, { x: 0.55, y: 0.55 }],
       }],
     };
-    localStorage.setItem(key, JSON.stringify(state));
-  }, STORAGE_KEY);
-  await page.reload();
+  });
 
   await expect(page.locator(".app-shell")).toHaveJSProperty("clientWidth", 1920);
   await expect(page.locator(".app-shell")).toHaveJSProperty("clientHeight", 1080);
@@ -965,8 +958,7 @@ test("legacy video edit threads disappear while video generation and library ass
       body: JSON.stringify({ data: [{ id: "test/video", name: "Test video", architecture: { input_modalities: ["text", "image"] } }] }),
     });
   });
-  await page.evaluate((key) => {
-    const state = JSON.parse(localStorage.getItem(key) ?? "{}") as StudioState;
+  await reloadWithStudioMutation(page, (state) => {
     (state as unknown as { schemaVersion: number }).schemaVersion = 4;
     const session = state.sessions.find((item) => item.id === state.activeSessionId)!;
     session.agent.controlMode = "human";
@@ -986,9 +978,7 @@ test("legacy video edit threads disappear while video generation and library ass
     };
     (session.threads.video as unknown[]).push(edit);
     session.activeThreadIds.video = edit.id;
-    localStorage.setItem(key, JSON.stringify(state));
-  }, STORAGE_KEY);
-  await page.reload();
+  });
 
   await expect(page.locator(".composer-header p")).toHaveText("Video generation");
   await expect(page.getByRole("button", { name: "Generate Video" })).toBeVisible();
@@ -1041,8 +1031,7 @@ test("completed generation opens a queued result modal without moving the editor
     await route.fulfill({ status: 404, body: "Not mocked" });
   });
 
-  await page.evaluate((key) => {
-    const state = JSON.parse(localStorage.getItem(key) ?? "{}") as StudioState;
+  await reloadWithStudioMutation(page, (state) => {
     const session = state.sessions.find((item) => item.id === state.activeSessionId)!;
     session.agent.controlMode = "human";
     session.mode = "image";
@@ -1052,9 +1041,7 @@ test("completed generation opens a queued result modal without moving the editor
     thread.draft = { ...thread.draft, prompt: "Create two restrained fruit truck keyframes.", enhancePrompt: false };
     thread.optionOverrides = { n: 2 };
     thread.attempts = [];
-    localStorage.setItem(key, JSON.stringify(state));
-  }, STORAGE_KEY);
-  await page.reload();
+  });
 
   await expect(page.getByRole("heading", { name: "Test image model" })).toBeVisible();
   await expect(page.locator(".generation-result-dialog")).toHaveCount(0);
@@ -1093,8 +1080,7 @@ test("result actions return to the originating thread and pause the remaining co
   let releaseImages!: () => void;
   const imageGate = new Promise<void>((resolve) => { releaseImages = resolve; });
   await mockImageGeneration(page, imageGate, 1, 14);
-  await page.evaluate((key) => {
-    const state = JSON.parse(localStorage.getItem(key) ?? "{}") as StudioState;
+  await reloadWithStudioMutation(page, (state) => {
     const session = state.sessions.find((item) => item.id === state.activeSessionId)!;
     session.agent.controlMode = "human";
     session.mode = "image";
@@ -1123,9 +1109,7 @@ test("result actions return to the originating thread and pause the remaining co
     second.attempts = [];
     session.threads.image = [source, second];
     session.activeThreadIds.image = source.id;
-    localStorage.setItem(key, JSON.stringify(state));
-  }, STORAGE_KEY);
-  await page.reload();
+  });
 
   await page.getByRole("button", { name: "Generate Image" }).click();
   await page.getByRole("button", { name: "Origin two Ready" }).click();
@@ -1177,8 +1161,7 @@ test("generation results wait until an existing dialog closes", async ({ page })
   let releaseImage!: () => void;
   const imageGate = new Promise<void>((resolve) => { releaseImage = resolve; });
   await mockImageGeneration(page, imageGate);
-  await page.evaluate((key) => {
-    const state = JSON.parse(localStorage.getItem(key) ?? "{}") as StudioState;
+  await reloadWithStudioMutation(page, (state) => {
     const session = state.sessions.find((item) => item.id === state.activeSessionId)!;
     session.agent.controlMode = "human";
     session.mode = "image";
@@ -1187,9 +1170,7 @@ test("generation results wait until an existing dialog closes", async ({ page })
     thread.modelOverrideId = "test/image";
     thread.draft = { ...thread.draft, prompt: "Create a deferred result.", enhancePrompt: false };
     thread.attempts = [];
-    localStorage.setItem(key, JSON.stringify(state));
-  }, STORAGE_KEY);
-  await page.reload();
+  });
 
   await page.getByRole("button", { name: "Generate Image" }).click();
   await page.getByRole("button", { name: "Request" }).click();
