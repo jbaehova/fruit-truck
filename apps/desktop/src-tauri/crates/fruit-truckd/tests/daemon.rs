@@ -33,6 +33,84 @@ fn request(socket: &Path, id: u64, method: &str, params: Value) -> Value {
     serde_json::from_str(&line).unwrap()
 }
 
+fn wait_for_daemon(socket: &Path) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if socket.exists() {
+            if let Ok(mut stream) = UnixStream::connect(socket) {
+                stream
+                    .set_read_timeout(Some(Duration::from_millis(250)))
+                    .unwrap();
+                let frame = serde_json::to_vec(&json!({
+                    "jsonrpc": "2.0", "id": 0, "method": "core.handshake", "params": {}
+                }))
+                .unwrap();
+                if stream.write_all(&frame).is_ok() && stream.write_all(b"\n").is_ok() {
+                    let mut line = String::new();
+                    if BufReader::new(stream).read_line(&mut line).is_ok() {
+                        if let Ok(value) = serde_json::from_str::<Value>(&line) {
+                            if value.pointer("/result/protocolVersion") == Some(&Value::from(2)) {
+                                return value;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(Instant::now() < deadline, "daemon never became RPC-ready");
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn concurrent_starts_preserve_the_singleton_socket() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut contenders = (0..16)
+        .map(|_| {
+            Daemon(
+                Command::new(env!("CARGO_BIN_EXE_fruit-truckd"))
+                    .arg("--home")
+                    .arg(directory.path())
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let socket = directory.path().join("run/core.sock");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let handshake = loop {
+        if socket.exists() {
+            if let Ok(stream) = UnixStream::connect(&socket) {
+                drop(stream);
+                break request(&socket, 1, "core.handshake", json!({}));
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "singleton socket never became ready"
+        );
+        thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(
+        handshake.pointer("/result/protocolVersion"),
+        Some(&Value::from(2))
+    );
+    thread::sleep(Duration::from_millis(100));
+    let running = contenders
+        .iter_mut()
+        .map(|daemon| daemon.0.try_wait().unwrap().is_none())
+        .filter(|running| *running)
+        .count();
+    assert_eq!(running, 1, "exactly one Core daemon must retain ownership");
+    assert!(
+        socket.exists(),
+        "losing contenders must not unlink the owner socket"
+    );
+}
+
 fn snapshot() -> Value {
     json!({
       "id": "session-daemon",
@@ -131,7 +209,7 @@ fn mock_video_provider() -> (String, thread::JoinHandle<()>) {
 #[test]
 fn uds_handshake_commit_read_and_event_wait() {
     let directory = tempfile::tempdir().unwrap();
-    let mut child = Daemon(
+    let _daemon = Daemon(
         Command::new(env!("CARGO_BIN_EXE_fruit-truckd"))
             .arg("--home")
             .arg(directory.path())
@@ -142,26 +220,14 @@ fn uds_handshake_commit_read_and_event_wait() {
             .unwrap(),
     );
     let socket = directory.path().join("run/core.sock");
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !socket.exists() && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(10));
-    }
-    if !socket.exists() {
-        let mut stderr = String::new();
-        if let Some(stream) = child.0.stderr.take() {
-            let _ = BufReader::new(stream).read_line(&mut stderr);
-        }
-        panic!("daemon socket was not created: {stderr}");
-    }
-    assert_eq!(
-        socket.metadata().unwrap().permissions().mode() & 0o777,
-        0o600
-    );
-
-    let handshake = request(&socket, 1, "core.handshake", json!({}));
+    let handshake = wait_for_daemon(&socket);
     assert_eq!(
         handshake.pointer("/result/protocolVersion"),
         Some(&Value::from(2))
+    );
+    assert_eq!(
+        socket.metadata().unwrap().permissions().mode() & 0o777,
+        0o600
     );
 
     let wait_presence_socket = socket.clone();
@@ -321,11 +387,7 @@ fn durable_video_task_completes_after_clients_disconnect() {
             .unwrap(),
     );
     let socket = directory.path().join("run/core.sock");
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !socket.exists() && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(10));
-    }
-    assert!(socket.exists());
+    wait_for_daemon(&socket);
 
     let value = video_snapshot(&chrono::Utc::now().to_rfc3339());
     let committed = request(
@@ -387,11 +449,7 @@ fn expired_video_task_fails_without_contacting_provider() {
             .unwrap(),
     );
     let socket = directory.path().join("run/core.sock");
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !socket.exists() && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(10));
-    }
-    assert!(socket.exists());
+    wait_for_daemon(&socket);
 
     let committed = request(
         &socket,
