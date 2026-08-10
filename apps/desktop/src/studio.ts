@@ -1010,6 +1010,7 @@ export async function importGeneratedVideo(
   name: string,
   origin: AssetOrigin,
   jobId: string,
+  duration?: number,
 ): Promise<SessionAsset> {
   const id = crypto.randomUUID();
   if (isTauriRuntime() && /^(?:\/|[A-Za-z]:[\\/])/.test(source)) {
@@ -1023,6 +1024,7 @@ export async function importGeneratedVideo(
       createdAt: new Date().toISOString(),
       localPath: source,
       jobId,
+      duration,
       bridgeAvailability: "available",
     };
   }
@@ -1043,6 +1045,7 @@ export async function importGeneratedVideo(
       blobKey,
       byteSize: blob.size,
       jobId,
+      duration,
     };
   } catch {
     const mimeType = mediaMimeFromSource(source, "video/mp4");
@@ -1055,6 +1058,7 @@ export async function importGeneratedVideo(
       createdAt: new Date().toISOString(),
       externalUrl: source,
       jobId,
+      duration,
     };
   } finally {
     if (source.startsWith("blob:")) URL.revokeObjectURL(source);

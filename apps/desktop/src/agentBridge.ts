@@ -226,7 +226,8 @@ function validSessionAssetReferences(session: Pick<AgentBridgeSession, "assets" 
     const imageThreads = Array.isArray(session.threads?.image) ? session.threads.image : [];
     const videoThreads = Array.isArray(session.threads?.video) ? session.threads.video : [];
     const threads = [...imageThreads, ...videoThreads];
-    const terminalStatuses = new Set(["queued", "enhancing", "awaiting_host", "submitting", "in_progress", "completed", "failed", "uncertain", "canceled"]);
+    const attemptStatuses = new Set(["queued", "enhancing", "awaiting_host", "submitting", "in_progress", "completed", "failed", "uncertain", "canceled"]);
+    const terminalAttemptStatuses = new Set(["completed", "failed", "uncertain", "canceled"]);
     const threadIds: string[] = [];
     const attemptIds: string[] = [];
 
@@ -239,11 +240,12 @@ function validSessionAssetReferences(session: Pick<AgentBridgeSession, "assets" 
       if (!thread.draft || typeof thread.draft !== "object" || !Array.isArray(thread.draft.references)) return false;
       if (!Array.isArray(thread.attempts)) return false;
       if (!thread.draft.references.every((reference) => reference && assetIds.has(reference.assetId))) return false;
+      if (thread.attempts.filter((attempt) => !terminalAttemptStatuses.has(attempt.status)).length > 1) return false;
 
       threadIds.push(thread.id);
       for (const attempt of thread.attempts) {
         if (!attempt || typeof attempt !== "object" || typeof attempt.id !== "string") return false;
-        if (!terminalStatuses.has(attempt.status)) return false;
+        if (!attemptStatuses.has(attempt.status)) return false;
         if (!Array.isArray(attempt.inputAssetIds) || !attempt.inputAssetIds.every((id) => assetIds.has(id))) return false;
         if (!Array.isArray(attempt.assetIds) || !attempt.assetIds.every((id) => assetIds.has(id))) return false;
         if (attempt.snapshot) {
@@ -293,6 +295,57 @@ export async function waitForAgentBridge(
   return recoverAgentBridgeEnvelope(value);
 }
 
+export type AgentBridgeEvent = {
+  cursor: number;
+  sessionId: string;
+  sessionSequence: number;
+  revision: number;
+  type: string;
+  createdAtMs: number;
+};
+
+export function recordAgentTelemetry(
+  name: string,
+  durationUs: number,
+  fields: Record<string, number | boolean> = {},
+) {
+  if (!isTauriRuntime()) return;
+  void invoke("record_agent_telemetry", {
+    traceId: crypto.randomUUID(),
+    name,
+    durationUs: Math.max(0, Math.round(durationUs)),
+    fields,
+  }).catch(() => undefined);
+}
+
+export async function waitForAgentBridgeEvents(
+  afterEvent: number,
+  timeoutMs = 20_000,
+): Promise<{ events: AgentBridgeEvent[]; cursor: number; timedOut: boolean; resetRequired: boolean }> {
+  const started = performance.now();
+  const value = await invoke<{ events: AgentBridgeEvent[]; cursor: number; timedOut: boolean; resetRequired: boolean }>(
+    "wait_for_agent_session_events",
+    { afterEvent, timeoutMs },
+  );
+  const newest = value.events.reduce((latest, event) => Math.max(latest, event.createdAtMs), 0);
+  recordAgentTelemetry("desktop.event_wake", (performance.now() - started) * 1_000, {
+    eventCount: value.events.length,
+    timedOut: value.timedOut,
+    resetRequired: value.resetRequired,
+    commitToWakeUs: newest ? Math.max(0, Date.now() - newest) * 1_000 : 0,
+  });
+  return value;
+}
+
+export async function readAgentBridgeSession(sessionId: string): Promise<AgentBridgeSession> {
+  const value = await invoke<{ projection: AgentBridgeSession }>("read_agent_session", {
+    sessionId,
+    view: "recovery",
+  });
+  const recovered = recoverAgentBridgeEnvelope({ schemaVersion: 4, revision: 0, sessions: [value.projection] });
+  return recovered.sessions[0];
+}
+
 export function materializeAgentSession(value: AgentBridgeSession): StudioSession {
   const base = createSession(value.name || "Agent session");
   const threads = value.threads ? {
@@ -319,6 +372,19 @@ export function materializeAgentSession(value: AgentBridgeSession): StudioSessio
     agent: normalizeAgentState(value.agent),
     agentBridge: true,
   };
+}
+
+export function preserveLocalAssetMetadata(
+  incoming: SessionAsset[],
+  local: SessionAsset[],
+): SessionAsset[] {
+  const localById = new Map(local.map((asset) => [asset.id, asset]));
+  return incoming.map((asset) => {
+    const existing = localById.get(asset.id);
+    return existing
+      ? { ...asset, blobKey: existing.blobKey, fingerprint: existing.fingerprint }
+      : asset;
+  });
 }
 
 function serializeAgentSession(session: StudioSession): AgentBridgeSession {
@@ -389,6 +455,96 @@ export async function writeSerializedAgentBridgeSession(
     session,
     expectedRevision,
   });
+}
+
+export type AgentProjectionPatch = {
+  op: "set" | "remove";
+  path: string;
+  value?: unknown;
+};
+
+function pointerSegment(value: string) {
+  return value.replaceAll("~", "~0").replaceAll("/", "~1");
+}
+
+export function diffAgentBridgeSession(
+  base: AgentBridgeSession,
+  next: AgentBridgeSession,
+): AgentProjectionPatch[] {
+  const patches: AgentProjectionPatch[] = [];
+  const coreOwned = new Set([
+    "/id",
+    "/createdAt",
+    "/updatedAt",
+    "/coreRevision",
+    "/coreUpdatedAtMs",
+    "/agent/revision",
+    "/agent/updatedAt",
+    "/agent/updatedAtMs",
+    "/fastReceipts",
+  ]);
+  const walk = (left: unknown, right: unknown, path: string) => {
+    if (coreOwned.has(path) || JSON.stringify(stableBridgeValue(left)) === JSON.stringify(stableBridgeValue(right))) return;
+    if (Array.isArray(left) || Array.isArray(right)
+      || !left || typeof left !== "object"
+      || !right || typeof right !== "object") {
+      if (right === undefined) patches.push({ op: "remove", path });
+      else patches.push({ op: "set", path, value: right });
+      return;
+    }
+    const keys = [...new Set([...Object.keys(left), ...Object.keys(right)])].sort();
+    for (const key of keys) {
+      walk(
+        (left as Record<string, unknown>)[key],
+        (right as Record<string, unknown>)[key],
+        `${path}/${pointerSegment(key)}`,
+      );
+    }
+  };
+  walk(base, next, "");
+  return patches;
+}
+
+export async function commitAgentOperations(
+  sessionId: string,
+  baseRevision: number,
+  requestKey: string,
+  ops: Array<Record<string, unknown>>,
+): Promise<{ receipt: { revision: number; eventCursor: number; replayed: boolean }; session: AgentBridgeSession }> {
+  const started = performance.now();
+  const value = await invoke<{
+    receipt: { revision: number; eventCursor: number; replayed: boolean };
+    session: AgentBridgeSession;
+  }>("commit_agent_operations", { sessionId, baseRevision, requestKey, ops });
+  if (!validBridgeSession(value.session)) throw new Error("Core returned an invalid agent session projection.");
+  recordAgentTelemetry("desktop.command_receipt", (performance.now() - started) * 1_000, {
+    operationCount: ops.length,
+    responseBytes: new TextEncoder().encode(JSON.stringify(value)).byteLength,
+    replayed: value.receipt.replayed,
+  });
+  return value;
+}
+
+export async function commitAgentOperationsWithConflictRetry(
+  sessionId: string,
+  baseRevision: number,
+  requestKey: string,
+  ops: Array<Record<string, unknown>>,
+  maxAttempts = 4,
+) {
+  let revision = baseRevision;
+  let lastError: unknown;
+  const attempts = Math.max(1, Math.floor(maxAttempts));
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return await commitAgentOperations(sessionId, revision, requestKey, ops);
+    } catch (error) {
+      lastError = error;
+      if (!String(error).includes("AGENT_SESSION_CONFLICT") || attempt + 1 >= attempts) throw error;
+      revision = (await readAgentBridgeSession(sessionId)).agent.revision;
+    }
+  }
+  throw lastError;
 }
 
 export type SavedCustomSkill = {

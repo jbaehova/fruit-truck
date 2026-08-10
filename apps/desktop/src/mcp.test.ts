@@ -15,14 +15,19 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { createServer } from "node:http";
 import test from "node:test";
+import { coreRequest } from "../scripts/core-client.ts";
 import { resolveAgentDecisionFromDesktop, type AgentHost, type AgentSessionState } from "./agent.ts";
 import { materializeAgentSession, serializeAgentSessionForBridge, type AgentBridgeSession } from "./agentBridge.ts";
+import { canonicalAgentSession } from "./agentCompat.ts";
 import { createSession, type GenerationThread } from "./studio.ts";
 
 type BridgeAsset = {
   id: string;
+  kind?: "image" | "video";
   localPath?: string;
   externalUrl?: string;
+  duration?: number;
+  jobId?: string;
 };
 
 type BridgeSession = {
@@ -67,18 +72,26 @@ function storedEnvelopeText(dataDirectory: string) {
   return JSON.stringify(readStoredEnvelope(dataDirectory));
 }
 
-function spawnMcp(dataDirectory: string, host: AgentHost, codexHome?: string, openRouterBase?: string) {
+function spawnMcp(
+  dataDirectory: string,
+  host: AgentHost,
+  codexHome?: string,
+  openRouterBase?: string,
+  toolProfile: "legacy" | "fast" = "legacy",
+  coreMode: "off" | "shadow" | "canonical" = "off",
+) {
   const child = spawn(
     process.execPath,
     host === "unknown"
-      ? ["scripts/mcp-server.ts"]
-      : ["scripts/mcp-server.ts", "--agent-host", host],
+      ? ["scripts/mcp-server.ts", "--tool-profile", toolProfile]
+      : ["scripts/mcp-server.ts", "--agent-host", host, "--tool-profile", toolProfile],
     {
       cwd: process.cwd(),
       env: {
         ...process.env,
         FRUIT_TRUCK_HOME: dataDirectory,
         FRUIT_TRUCK_VIDEO_POLL_INTERVAL_MS: "100",
+        FRUIT_TRUCK_CORE_MODE: coreMode,
         ...(codexHome ? { CODEX_HOME: codexHome } : {}),
         ...(openRouterBase ? { FRUIT_TRUCK_OPENROUTER_BASE: openRouterBase } : {}),
       },
@@ -86,17 +99,29 @@ function spawnMcp(dataDirectory: string, host: AgentHost, codexHome?: string, op
     },
   );
   let nextId = 1;
-  const waiting = new Map<number, (value: Record<string, unknown>) => void>();
+  const waiting = new Map<number, {
+    resolve: (value: Record<string, unknown>) => void;
+    reject: (error: Error) => void;
+  }>();
   createInterface({ input: child.stdout }).on("line", (line) => {
     const value = JSON.parse(line) as { id?: number };
     if (value.id != null) {
-      waiting.get(value.id)?.(value as Record<string, unknown>);
+      waiting.get(value.id)?.resolve(value as Record<string, unknown>);
       waiting.delete(value.id);
     }
   });
+  const rejectPending = (reason: string) => {
+    for (const pending of waiting.values()) pending.reject(new Error(reason));
+    waiting.clear();
+  };
+  child.once("error", (error) => rejectPending(`MCP process failed: ${error.message}`));
+  child.once("exit", (code, signal) => rejectPending(`MCP process exited before replying (code=${code ?? "none"}, signal=${signal ?? "none"}).`));
   const request = (method: string, params: Record<string, unknown>) => {
     const id = nextId++;
-    const result = new Promise<Record<string, unknown>>((resolve) => waiting.set(id, resolve));
+    if (child.exitCode != null || child.signalCode != null) {
+      return Promise.reject(new Error("MCP process is not running."));
+    }
+    const result = new Promise<Record<string, unknown>>((resolve, reject) => waiting.set(id, { resolve, reject }));
     child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
     return result;
   };
@@ -112,9 +137,641 @@ function spawnMcp(dataDirectory: string, host: AgentHost, codexHome?: string, op
   return { child, request, call };
 }
 
+function stopCore(dataDirectory: string) {
+  const lock = join(dataDirectory, "run", "core.lock");
+  if (!existsSync(lock)) return;
+  const pid = Number(readFileSync(lock, "utf8"));
+  if (Number.isInteger(pid) && pid > 1) {
+    try { process.kill(pid, "SIGTERM"); } catch { /* already stopped */ }
+  }
+}
+
+async function stopCoreAndWait(dataDirectory: string, previousPid: number) {
+  stopCore(dataDirectory);
+  const deadline = Date.now() + 3_000;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(previousPid, 0);
+    } catch {
+      return;
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+  }
+  assert.fail("Core did not exit after shutdown");
+}
+
+test("MCP shadow mode replays state to Core without exposing private telemetry fields", async (context) => {
+  const dataDirectory = mkdtempSync(join(tmpdir(), "fruit-truck-mcp-shadow-"));
+  const server = spawnMcp(dataDirectory, "claude", undefined, undefined, "legacy", "shadow");
+  context.after(() => {
+    stopMcp(server.child);
+    stopCore(dataDirectory);
+    rmSync(dataDirectory, { recursive: true, force: true });
+  });
+  await server.request("initialize", { clientInfo: { name: "Claude" } });
+  const created = await server.call("create_session", { intent: "private shadow intent", name: "Shadow fixture" });
+  const sessionId = (created.value as BridgeSession).id;
+  await server.call("claim_session", { sessionId, agentName: "shadow-agent" });
+  await server.call("update_brief", { sessionId, patch: { goal: "private shadow goal" } });
+
+  const core = await coreRequest(dataDirectory, "session.read", { sessionId, view: "recovery" }) as {
+    projection: BridgeSession;
+  };
+  assert.equal(core.projection.agent.brief.goal, "private shadow goal");
+  assert.equal(core.projection.agent.connection.status, "claimed");
+
+  await new Promise((resolveWait) => setTimeout(resolveWait, 30));
+  const telemetry = readFileSync(join(dataDirectory, "telemetry", "mcp-spans.jsonl"), "utf8");
+  assert.doesNotMatch(telemetry, /private shadow intent|private shadow goal|shadow-agent|session-/);
+  const comparison = telemetry.trim().split("\n").map((line) => JSON.parse(line) as { name?: string; fields?: { semanticMismatch?: boolean } })
+    .filter((item) => item.name === "core.shadow_compare");
+  assert.ok(comparison.length >= 3);
+  assert.ok(comparison.every((item) => item.fields?.semanticMismatch === false));
+});
+
+test("canonical MCP mode imports legacy state and leaves Core as the only new writer", async (context) => {
+  const dataDirectory = mkdtempSync(join(tmpdir(), "fruit-truck-mcp-canonical-"));
+  const legacySession = await serializeAgentSessionForBridge(createSession("Legacy canonical fixture"));
+  legacySession.agent = {
+    ...legacySession.agent,
+    connection: { status: "waiting" },
+    runStatus: "idle",
+    brief: { ...legacySession.agent.brief, originalIntent: "legacy intent", goal: "legacy goal" },
+    revision: 17,
+  };
+  writeFileSync(join(dataDirectory, "agent-sessions.json"), JSON.stringify({
+    schemaVersion: 4,
+    revision: 29,
+    sessions: [legacySession],
+  }, null, 2));
+
+  const server = spawnMcp(dataDirectory, "claude", undefined, undefined, "legacy", "canonical");
+  context.after(() => {
+    stopMcp(server.child);
+    stopCore(dataDirectory);
+    rmSync(dataDirectory, { recursive: true, force: true });
+  });
+  await server.request("initialize", { clientInfo: { name: "Claude" } });
+  const imported = await server.call("get_session", { sessionId: legacySession.id });
+  assert.equal(imported.isError, false);
+  assert.equal((imported.value as BridgeSession).agent.brief.goal, "legacy goal");
+  assert.equal((imported.value as BridgeSession).agent.revision, 1);
+
+  const claimed = await server.call("claim_session", { sessionId: legacySession.id, agentName: "canonical-agent" });
+  assert.equal(claimed.isError, false);
+  const updated = await server.call("update_brief", {
+    sessionId: legacySession.id,
+    patch: { goal: "Core canonical goal" },
+  });
+  assert.equal(updated.isError, false);
+  assert.equal((updated.value as BridgeSession).agent.revision, 3);
+
+  const core = await coreRequest(dataDirectory, "session.read", { sessionId: legacySession.id, view: "recovery" }) as {
+    revision: number;
+    projection: BridgeSession;
+  };
+  assert.equal(core.revision, 3);
+  assert.equal(core.projection.agent.brief.goal, "Core canonical goal");
+  assert.ok(existsSync(join(dataDirectory, "core.sqlite3")));
+  assert.ok(existsSync(join(dataDirectory, "legacy-backup-v4", "agent-sessions.json")));
+  const recovery = readStoredEnvelope(dataDirectory);
+  assert.equal(recovery.sessions[0].agent.brief.goal, "Core canonical goal");
+  assert.equal(recovery.sessions[0].agent.revision, 3);
+});
+
+test("canonical MCP mode preserves concurrent commands for different sessions", async (context) => {
+  const dataDirectory = mkdtempSync(join(tmpdir(), "fruit-truck-mcp-core-concurrency-"));
+  const first = spawnMcp(dataDirectory, "claude", undefined, undefined, "legacy", "canonical");
+  const second = spawnMcp(dataDirectory, "claude", undefined, undefined, "legacy", "canonical");
+  context.after(() => {
+    stopMcp(first.child);
+    stopMcp(second.child);
+    stopCore(dataDirectory);
+    rmSync(dataDirectory, { recursive: true, force: true });
+  });
+  await Promise.all([
+    first.request("initialize", { clientInfo: { name: "Claude" } }),
+    second.request("initialize", { clientInfo: { name: "Claude" } }),
+  ]);
+  const createAndClaim = async (server: ReturnType<typeof spawnMcp>, intent: string) => {
+    const created = await server.call("create_session", { intent });
+    const id = (created.value as BridgeSession).id;
+    const claimed = await server.call("claim_session", { sessionId: id, agentName: `agent-${intent}` });
+    assert.equal(claimed.isError, false);
+    return id;
+  };
+  const firstId = await createAndClaim(first, "first");
+  const secondId = await createAndClaim(second, "second");
+  const [firstUpdate, secondUpdate] = await Promise.all([
+    first.call("update_brief", { sessionId: firstId, patch: { goal: "first concurrent goal" } }),
+    second.call("update_brief", { sessionId: secondId, patch: { goal: "second concurrent goal" } }),
+  ]);
+  assert.equal(firstUpdate.isError, false);
+  assert.equal(secondUpdate.isError, false);
+  const envelope = await coreRequest(dataDirectory, "session.read_all", {}) as StoredEnvelope;
+  assert.equal(envelope.sessions.find((item) => item.id === firstId)?.agent.brief.goal, "first concurrent goal");
+  assert.equal(envelope.sessions.find((item) => item.id === secondId)?.agent.brief.goal, "second concurrent goal");
+});
+
+test("canonical MCP rejects mutation from a different agent host", async (context) => {
+  const dataDirectory = mkdtempSync(join(tmpdir(), "fruit-truck-mcp-wrong-host-"));
+  const claude = spawnMcp(dataDirectory, "claude", undefined, undefined, "legacy", "canonical");
+  const codex = spawnMcp(dataDirectory, "codex", undefined, undefined, "legacy", "canonical");
+  context.after(() => {
+    stopMcp(claude.child);
+    stopMcp(codex.child);
+    stopCore(dataDirectory);
+    rmSync(dataDirectory, { recursive: true, force: true });
+  });
+  await Promise.all([
+    claude.request("initialize", { clientInfo: { name: "Claude" } }),
+    codex.request("initialize", { clientInfo: { name: "Codex" } }),
+  ]);
+  const created = await claude.call("create_session", { intent: "Protect host ownership" });
+  const sessionId = (created.value as BridgeSession).id;
+  const claimed = await claude.call("claim_session", { sessionId, agentName: "claude-owner" });
+  assert.equal(claimed.isError, false, String(claimed.value));
+
+  const rejected = await codex.call("update_brief", {
+    sessionId,
+    patch: { goal: "Must not be written by another host" },
+  });
+  assert.equal(rejected.isError, true);
+  assert.match(String(rejected.value), /belongs to the claude agent host/i);
+  const core = await coreRequest(dataDirectory, "session.read", { sessionId, view: "recovery" }) as {
+    projection: BridgeSession;
+  };
+  assert.notEqual(core.projection.agent.brief.goal, "Must not be written by another host");
+});
+
+test("canonical fast MCP rebases concurrent typed commands for one session", async (context) => {
+  const dataDirectory = mkdtempSync(join(tmpdir(), "fruit-truck-mcp-core-same-session-"));
+  const first = spawnMcp(dataDirectory, "claude", undefined, undefined, "fast", "canonical");
+  const second = spawnMcp(dataDirectory, "claude", undefined, undefined, "fast", "canonical");
+  context.after(() => {
+    stopMcp(first.child);
+    stopMcp(second.child);
+    stopCore(dataDirectory);
+    rmSync(dataDirectory, { recursive: true, force: true });
+  });
+  await Promise.all([
+    first.request("initialize", { clientInfo: { name: "Claude" } }),
+    second.request("initialize", { clientInfo: { name: "Claude" } }),
+  ]);
+  const opened = await first.call("session_open", {
+    requestKey: "same-session-open",
+    intent: "Preserve concurrent typed updates",
+    agentName: "same-session-agent",
+  });
+  assert.equal(opened.isError, false, String(opened.value));
+  const sessionId = (opened.value as { sessionId: string }).sessionId;
+
+  const [brief, requirement] = await Promise.all([
+    first.call("session_commit", {
+      sessionId,
+      requestKey: "same-session-brief",
+      baseRevision: 1,
+      ops: [{ type: "update_brief", patch: { goal: "Concurrent goal" } }],
+    }),
+    second.call("session_commit", {
+      sessionId,
+      requestKey: "same-session-requirement",
+      baseRevision: 1,
+      ops: [{
+        type: "upsert_requirements",
+        requirements: [{ id: "duration", label: "Duration", value: "8 seconds", status: "confirmed", source: "user", blocking: false }],
+      }],
+    }),
+  ]);
+  assert.equal(brief.isError, false, String(brief.value));
+  assert.equal(requirement.isError, false, String(requirement.value));
+
+  const read = await first.call("session_read", { sessionId, view: "recovery" });
+  assert.equal(read.isError, false, String(read.value));
+  const projection = (read.value as { projection: BridgeSession }).projection;
+  assert.equal(projection.agent.brief.goal, "Concurrent goal");
+  assert.equal(projection.agent.requirements.find((item) => item.id === "duration")?.value, "8 seconds");
+  assert.equal(projection.agent.revision, 3);
+
+  const queued = await first.call("session_commit", {
+    sessionId,
+    requestKey: "same-session-decision",
+    baseRevision: 3,
+    ops: [{
+      type: "queue_decision",
+      requestKey: "same-session-decision-entity",
+      title: "Approve concurrency result",
+      prompt: "Approve?",
+      kind: "approval",
+      channel: "agent_chat",
+      blocking: true,
+      options: [{ id: "approve", label: "Approve" }, { id: "revise", label: "Revise" }],
+    }],
+  });
+  assert.equal(queued.isError, false, String(queued.value));
+  const withDecision = await first.call("session_read", { sessionId, view: "recovery" });
+  const decisionId = ((withDecision.value as { projection: BridgeSession }).projection.agent.decisions)
+    .find((item) => item.requestKey === "same-session-decision-entity")!.id;
+  const resolutions = await Promise.all([
+    first.call("session_commit", {
+      sessionId,
+      requestKey: "same-session-resolution-one",
+      baseRevision: 4,
+      ops: [{ type: "resolve_decision", decisionId, userResponse: "Approved", optionId: "approve" }],
+    }),
+    second.call("session_commit", {
+      sessionId,
+      requestKey: "same-session-resolution-two",
+      baseRevision: 4,
+      ops: [{ type: "resolve_decision", decisionId, userResponse: "Also approved", optionId: "approve" }],
+    }),
+  ]);
+  assert.equal(resolutions.filter((item) => !item.isError).length, 1);
+  assert.equal(resolutions.filter((item) => item.isError).length, 1);
+  assert.match(String(resolutions.find((item) => item.isError)?.value), /already resolved/i);
+});
+
+test("canonical fast MCP restarts Core after the cached daemon exits", async (context) => {
+  const dataDirectory = mkdtempSync(join(tmpdir(), "fruit-truck-mcp-core-restart-"));
+  const server = spawnMcp(dataDirectory, "claude", undefined, undefined, "fast", "canonical");
+  context.after(() => {
+    stopMcp(server.child);
+    stopCore(dataDirectory);
+    rmSync(dataDirectory, { recursive: true, force: true });
+  });
+  await server.request("initialize", { clientInfo: { name: "Claude" } });
+  const opened = await server.call("session_open", {
+    requestKey: "restart-open",
+    name: "Restart fixture",
+    intent: "Survive a Core restart",
+    agentName: "restart-agent",
+  });
+  assert.equal(opened.isError, false, String(opened.value));
+  const sessionId = (opened.value as { sessionId: string }).sessionId;
+  const firstPid = Number(readFileSync(join(dataDirectory, "run", "core.lock"), "utf8"));
+
+  await stopCoreAndWait(dataDirectory, firstPid);
+  const read = await server.call("session_read", { sessionId, view: "resume" });
+
+  assert.equal(read.isError, false, String(read.value));
+  assert.equal((read.value as { projection: { identity: { id: string } } }).projection.identity.id, sessionId);
+  const secondPid = Number(readFileSync(join(dataDirectory, "run", "core.lock"), "utf8"));
+  assert.notEqual(secondPid, firstPid);
+});
+
+test("fast session_open supports publish then claim without weakening creation idempotency", async (context) => {
+  const dataDirectory = mkdtempSync(join(tmpdir(), "fruit-truck-mcp-fast-open-"));
+  const server = spawnMcp(dataDirectory, "claude", undefined, undefined, "fast", "canonical");
+  context.after(() => {
+    stopMcp(server.child);
+    stopCore(dataDirectory);
+    rmSync(dataDirectory, { recursive: true, force: true });
+  });
+  const initialized = await server.request("initialize", { clientInfo: { name: "Claude" } });
+  assert.match(String((initialized.result as { instructions?: string }).instructions), /session_open/);
+  const published = await server.call("session_open", {
+    requestKey: "publish-then-claim",
+    name: "Publish then claim",
+    intent: "Wait for the desktop before claiming",
+  });
+  assert.equal(published.isError, false, String(published.value));
+  const publishedValue = published.value as {
+    sessionId: string;
+    revision: number;
+    receipt: { changed: string[]; replayed: boolean; eventCursor: number };
+    projection: { connection: { status: string } };
+  };
+  assert.equal(publishedValue.revision, 1);
+  assert.deepEqual(publishedValue.receipt.changed, ["session"]);
+  assert.equal(publishedValue.receipt.replayed, false);
+  assert.ok(publishedValue.receipt.eventCursor >= 1);
+  assert.equal(publishedValue.projection.connection.status, "waiting");
+
+  const claimed = await server.call("session_open", {
+    sessionId: publishedValue.sessionId,
+    requestKey: "publish-then-claim",
+    agentName: "claiming-agent",
+  });
+  assert.equal(claimed.isError, false, String(claimed.value));
+  const claimedValue = claimed.value as {
+    revision: number;
+    receipt: { changed: string[]; replayed: boolean; eventCursor: number };
+    projection: { connection: { status: string } };
+  };
+  assert.equal(claimedValue.revision, 2);
+  assert.deepEqual(claimedValue.receipt.changed, ["connection"]);
+  assert.equal(claimedValue.receipt.replayed, false);
+  assert.ok(claimedValue.receipt.eventCursor >= publishedValue.receipt.eventCursor);
+  assert.equal(
+    claimedValue.projection.connection.status,
+    "claimed",
+  );
+
+  const mismatched = await server.call("session_open", {
+    sessionId: publishedValue.sessionId,
+    requestKey: "publish-then-claim",
+    intent: "A conflicting replacement intent",
+  });
+  assert.equal(mismatched.isError, true);
+  assert.match(String(mismatched.value), /IDEMPOTENCY_KEY_REUSED/);
+});
+
+test("fast MCP profile batches local operations atomically and keeps receipts compact", async (context) => {
+  const dataDirectory = mkdtempSync(join(tmpdir(), "fruit-truck-mcp-fast-"));
+  const server = spawnMcp(dataDirectory, "claude", undefined, undefined, "fast");
+  context.after(() => {
+    stopMcp(server.child);
+    rmSync(dataDirectory, { recursive: true, force: true });
+  });
+  await server.request("initialize", { clientInfo: { name: "Claude" } });
+  const listed = await server.request("tools/list", {});
+  const tools = (listed.result as { tools: Array<{ name: string }> }).tools;
+  assert.deepEqual(tools.map((item) => item.name), [
+    "session_open", "session_read", "session_commit", "task_wait",
+    "ensure_desktop", "list_models", "run_generation_threads",
+  ]);
+  assert.ok(Buffer.byteLength(JSON.stringify(tools)) < 5 * 1024);
+
+  const opened = await server.call("session_open", {
+    requestKey: "open-fast-fixture",
+    name: "Fast fixture",
+    intent: "Create a two-shot product film",
+    agentName: "fast-test-agent",
+  });
+  assert.equal(opened.isError, false);
+  const openValue = opened.value as {
+    sessionId: string;
+    revision: number;
+    receipt: { replayed: boolean };
+    projection: { runStatus: string };
+  };
+  assert.equal(openValue.receipt.replayed, false);
+  assert.equal(openValue.revision, 1);
+  assert.equal(openValue.projection.runStatus, "working");
+  const resumedOpen = await server.call("session_open", {
+    sessionId: openValue.sessionId,
+    requestKey: "open-fast-fixture",
+    agentName: "fast-test-agent",
+  });
+  assert.equal(resumedOpen.isError, false, String(resumedOpen.value));
+  assert.equal((resumedOpen.value as { receipt: { replayed: boolean } }).receipt.replayed, true);
+  const mismatchedOpen = await server.call("session_open", {
+    sessionId: openValue.sessionId,
+    requestKey: "open-fast-fixture",
+    intent: "A different production",
+  });
+  assert.equal(mismatchedOpen.isError, true);
+  assert.match(String(mismatchedOpen.value), /IDEMPOTENCY_KEY_REUSED/);
+
+  const ops = [{
+    type: "update_brief",
+    patch: { goal: "A restrained two-shot product film" },
+  }, {
+    type: "upsert_requirements",
+    requirements: [{ id: "duration", label: "Duration", value: "8 seconds", status: "confirmed", source: "user", blocking: false }],
+  }, {
+    type: "replace_plan",
+    steps: [{ id: "shot-one", title: "Generate hero shot", description: "Create shot one", status: "in_progress", dependsOn: [] }],
+  }, {
+    type: "create_thread",
+    requestKey: "thread-fast-one",
+    mode: "video",
+    name: "Hero shot",
+    outputRole: "hero_video",
+    planStepId: "shot-one",
+  }, {
+    type: "queue_decision",
+    requestKey: "decision-fast-one",
+    title: "Approve direction",
+    prompt: "Choose whether to continue.",
+    kind: "approval",
+    channel: "fruit_truck_ui",
+    blocking: true,
+    planStepId: "shot-one",
+    options: [{ id: "approve", label: "Approve" }, { id: "revise", label: "Revise" }],
+  }];
+  const committed = await server.call("session_commit", {
+    sessionId: openValue.sessionId,
+    requestKey: "commit-fast-one",
+    baseRevision: openValue.revision,
+    ops,
+  });
+  assert.equal(committed.isError, false);
+  const receipt = committed.value as { revision: number; replayed: boolean; changed: string[] };
+  assert.equal(receipt.revision, 2);
+  assert.equal(receipt.replayed, false);
+  assert.ok(Buffer.byteLength(JSON.stringify(receipt)) < 1024);
+
+  const replay = await server.call("session_commit", {
+    sessionId: openValue.sessionId,
+    requestKey: "commit-fast-one",
+    baseRevision: openValue.revision,
+    ops,
+  });
+  assert.equal(replay.isError, false);
+  assert.equal((replay.value as { revision: number; replayed: boolean }).revision, 2);
+  assert.equal((replay.value as { replayed: boolean }).replayed, true);
+
+  const reused = await server.call("session_commit", {
+    sessionId: openValue.sessionId,
+    requestKey: "commit-fast-one",
+    baseRevision: openValue.revision,
+    ops: [{ type: "update_brief", patch: { goal: "Different payload" } }],
+  });
+  assert.equal(reused.isError, true);
+  assert.match(String(reused.value), /IDEMPOTENCY_KEY_REUSED/);
+
+  const rejected = await server.call("session_commit", {
+    sessionId: openValue.sessionId,
+    requestKey: "commit-fast-rollback",
+    baseRevision: 2,
+    ops: [
+      { type: "update_brief", patch: { goal: "Must roll back" } },
+      { type: "mark_step", stepId: "missing-step", status: "completed" },
+    ],
+  });
+  assert.equal(rejected.isError, true);
+  const read = await server.call("session_read", { sessionId: openValue.sessionId, view: "resume" });
+  assert.equal(read.isError, false);
+  const readValue = read.value as { revision: number; projection: { brief: { goal: string } } };
+  assert.equal(readValue.revision, 2);
+  assert.equal(readValue.projection.brief.goal, "A restrained two-shot product film");
+  assert.ok(Buffer.byteLength(JSON.stringify(read.value)) < 8 * 1024);
+
+  const stored = readStoredEnvelope(dataDirectory).sessions[0];
+  const decisionId = stored.agent.decisions.find((item) => item.requestKey === "decision-fast-one")!.id;
+  const wait = server.call("task_wait", {
+    sessionId: openValue.sessionId,
+    afterEvent: 2,
+    decisionIds: [decisionId],
+    timeoutMs: 300,
+  });
+  const ping = await Promise.race([
+    server.request("ping", {}),
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error("ping was blocked behind task_wait")), 150)),
+  ]);
+  assert.deepEqual(ping.result, {});
+  const waited = await wait;
+  assert.equal(waited.isError, false);
+  assert.equal((waited.value as { status: string }).status, "pending");
+  const storedAfterWait = readStoredEnvelope(dataDirectory).sessions[0];
+  assert.equal(storedAfterWait.agent.decisions.length, stored.agent.decisions.length);
+  assert.equal(
+    [...storedAfterWait.threads.image, ...storedAfterWait.threads.video].flatMap((thread) => thread.attempts).length,
+    0,
+  );
+});
+
+test("legacy JSON, v1 Core adapter, and v2 fast path preserve the same workflow semantics", async (context) => {
+  type CompatibilityLane = {
+    name: string;
+    dataDirectory: string;
+    server: ReturnType<typeof spawnMcp>;
+    calls: number;
+  };
+  const lanes: CompatibilityLane[] = [
+    { name: "legacy-json", dataDirectory: mkdtempSync(join(tmpdir(), "fruit-truck-compat-json-")), server: undefined as never, calls: 0 },
+    { name: "v1-core", dataDirectory: mkdtempSync(join(tmpdir(), "fruit-truck-compat-v1-")), server: undefined as never, calls: 0 },
+    { name: "v2-core", dataDirectory: mkdtempSync(join(tmpdir(), "fruit-truck-compat-v2-")), server: undefined as never, calls: 0 },
+  ];
+  lanes[0].server = spawnMcp(lanes[0].dataDirectory, "claude", undefined, undefined, "legacy", "off");
+  lanes[1].server = spawnMcp(lanes[1].dataDirectory, "claude", undefined, undefined, "legacy", "canonical");
+  lanes[2].server = spawnMcp(lanes[2].dataDirectory, "claude", undefined, undefined, "fast", "canonical");
+  context.after(() => {
+    for (const lane of lanes) {
+      stopMcp(lane.server.child);
+      stopCore(lane.dataDirectory);
+      rmSync(lane.dataDirectory, { recursive: true, force: true });
+    }
+  });
+  await Promise.all(lanes.map((lane) => lane.server.request("initialize", { clientInfo: { name: "Claude" } })));
+
+  const intent = "Create a restrained product film";
+  const name = "Compatibility fixture";
+  const agentName = "compatibility-agent";
+  const briefPatch = { goal: "Create one restrained eight-second hero shot", outputSpec: "16:9, 1080p" };
+  const requirements = [{
+    id: "duration",
+    label: "Duration",
+    value: "8 seconds",
+    status: "confirmed",
+    source: "user",
+    blocking: false,
+  }];
+  const steps = [{
+    id: "hero-shot",
+    title: "Create hero shot",
+    description: "Generate and review the hero shot",
+    status: "in_progress",
+    dependsOn: [],
+  }];
+  const decision = {
+    requestKey: "compat-direction-v1",
+    title: "Approve direction",
+    prompt: "Approve this restrained hero direction?",
+    kind: "approval",
+    channel: "agent_chat",
+    presentation: "form",
+    selectionMode: "single",
+    allowNote: true,
+    blocking: true,
+    options: [{ id: "approve", label: "Approve" }, { id: "revise", label: "Revise" }],
+  };
+
+  const call = async (lane: CompatibilityLane, toolName: string, args: Record<string, unknown>) => {
+    lane.calls += 1;
+    const result = await lane.server.call(toolName, args);
+    assert.equal(result.isError, false, `${lane.name}:${toolName} failed: ${String(result.value)}`);
+    return result.value;
+  };
+
+  const runLegacyLane = async (lane: CompatibilityLane) => {
+    const created = await call(lane, "create_session", { intent, name }) as AgentBridgeSession;
+    await call(lane, "claim_session", { sessionId: created.id, agentName });
+    await call(lane, "update_brief", { sessionId: created.id, patch: briefPatch });
+    await call(lane, "upsert_requirements", { sessionId: created.id, requirements });
+    await call(lane, "replace_plan", { sessionId: created.id, steps });
+    const queued = await call(lane, "queue_decision", {
+      sessionId: created.id,
+      ...decision,
+      relatedStepId: "hero-shot",
+    }) as { decisionId: string };
+    const pending = await call(lane, "get_session", { sessionId: created.id }) as AgentBridgeSession;
+    await call(lane, "resolve_decision", {
+      sessionId: created.id,
+      decisionId: queued.decisionId,
+      userResponse: "Approved direction",
+      optionId: "approve",
+      note: "Keep the pace restrained.",
+    });
+    const resolved = await call(lane, "get_session", { sessionId: created.id }) as AgentBridgeSession;
+    return [canonicalAgentSession(pending), canonicalAgentSession(resolved)];
+  };
+
+  const runFastLane = async (lane: CompatibilityLane) => {
+    const opened = await call(lane, "session_open", {
+      requestKey: "compat-open-v1",
+      intent,
+      name,
+      agentName,
+    }) as { sessionId: string; revision: number };
+    await call(lane, "session_commit", {
+      sessionId: opened.sessionId,
+      requestKey: "compat-setup-v1",
+      baseRevision: opened.revision,
+      ops: [
+        { type: "update_brief", patch: briefPatch },
+        { type: "upsert_requirements", requirements },
+        { type: "replace_plan", steps },
+        { type: "queue_decision", ...decision, planStepId: "hero-shot" },
+      ],
+    });
+    const pendingRead = await call(lane, "session_read", {
+      sessionId: opened.sessionId,
+      view: "recovery",
+    }) as { revision: number; projection: AgentBridgeSession };
+    const decisionId = pendingRead.projection.agent.decisions.find((item) => item.requestKey === decision.requestKey)?.id;
+    assert.ok(decisionId, "v2-core did not persist the compatibility decision");
+    await call(lane, "session_commit", {
+      sessionId: opened.sessionId,
+      requestKey: "compat-resolve-v1",
+      baseRevision: pendingRead.revision,
+      ops: [{
+        type: "resolve_decision",
+        decisionId,
+        userResponse: "Approved direction",
+        optionId: "approve",
+        note: "Keep the pace restrained.",
+      }],
+    });
+    const resolvedRead = await call(lane, "session_read", {
+      sessionId: opened.sessionId,
+      view: "recovery",
+    }) as { projection: AgentBridgeSession };
+    return [canonicalAgentSession(pendingRead.projection), canonicalAgentSession(resolvedRead.projection)];
+  };
+
+  const [legacy, v1Core, v2Core] = await Promise.all([
+    runLegacyLane(lanes[0]),
+    runLegacyLane(lanes[1]),
+    runFastLane(lanes[2]),
+  ]);
+  assert.deepEqual(v1Core, legacy);
+  assert.deepEqual(v2Core, legacy);
+  assert.ok(lanes[2].calls <= 12, `v2 scenario used ${lanes[2].calls} tool calls`);
+  assert.ok(lanes[2].calls < lanes[0].calls, "v2 fast path did not reduce tool round trips");
+});
+
 function stopMcp(child: ChildProcessWithoutNullStreams) {
   child.stdin.end();
   child.kill();
+}
+
+async function stopMcpAndWait(child: ChildProcessWithoutNullStreams) {
+  if (child.exitCode != null || child.signalCode != null) return;
+  const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+  stopMcp(child);
+  await exited;
 }
 
 function resolveInFruitTruck(
@@ -245,6 +902,19 @@ test("MCP resolves user choices in agent chat and resumes them durably", async (
     selectedAt: (claimed.value as { imageGeneration: { selectedAt: string } }).imageGeneration.selectedAt,
   });
 
+  const duplicateAssembly = await server.call("queue_decision", {
+    sessionId: createdSession.id,
+    requestKey: "duplicate-assembly-v1",
+    title: "Duplicate assembly review",
+    prompt: "This must be rejected in favor of propose_assembly.",
+    kind: "feedback",
+    blocking: true,
+    channel: "fruit_truck_ui",
+    presentation: "assembly_review",
+  });
+  assert.equal(duplicateAssembly.isError, true);
+  assert.match(String(duplicateAssembly.value), /propose_assembly/i);
+
   const queued = await server.call("queue_decision", {
     sessionId: createdSession.id,
     requestKey: "finish-choice-v1",
@@ -317,7 +987,7 @@ test("MCP resolves user choices in agent chat and resumes them durably", async (
     1,
   );
 
-  stopMcp(server.child);
+  await stopMcpAndWait(server.child);
   server = spawnMcp(dataDirectory, "claude");
   await server.request("initialize", {});
   const restoredPending = await server.call("get_session", { sessionId: createdSession.id });
@@ -443,6 +1113,62 @@ test("MCP resolves user choices in agent chat and resumes them durably", async (
   const stored = storedEnvelopeText(dataDirectory);
   assert.equal(/data:(?:image|video)\//i.test(stored), false);
   assert.equal(/;base64,/i.test(stored), false);
+});
+
+test("propose_assembly assigns render-safe IDs to agent-supplied clips", async (context) => {
+  const dataDirectory = mkdtempSync(join(tmpdir(), "fruit-truck-assembly-mcp-"));
+  const generatedDirectory = join(dataDirectory, "generated");
+  const generatedVideo = join(generatedDirectory, "shot.mp4");
+  mkdirSync(generatedDirectory, { recursive: true, mode: 0o700 });
+  writeFileSync(generatedVideo, Buffer.from("video-fixture"), { mode: 0o600 });
+
+  const server = spawnMcp(dataDirectory, "hermes");
+  context.after(() => {
+    stopMcp(server.child);
+    rmSync(dataDirectory, { recursive: true, force: true });
+  });
+  await server.request("initialize", {});
+  const created = await server.call("create_session", {
+    name: "Assembly IDs",
+    intent: "Assemble one approved video shot.",
+  });
+  const sessionId = (created.value as BridgeSession).id;
+  await server.call("claim_session", { sessionId, agentName: "assembly-test" });
+  const registered = await server.call("register_asset", {
+    sessionId,
+    name: "shot.mp4",
+    kind: "video",
+    mimeType: "video/mp4",
+    origin: "generated",
+    source: generatedVideo,
+    role: "shot",
+  });
+  const assetId = (registered.value as BridgeSession).assets.at(-1)?.id;
+  assert.ok(assetId);
+  const approval = await server.call("queue_decision", {
+    sessionId,
+    requestKey: "approve-shot-v1",
+    title: "Approve shot",
+    prompt: "Approve the generated shot.",
+    kind: "approval",
+    blocking: true,
+    relatedAssetIds: [assetId],
+    options: [{ id: "approve", label: "Approve" }, { id: "revise", label: "Revise" }],
+  });
+  await server.call("resolve_decision", {
+    sessionId,
+    decisionId: (approval.value as { decisionId: string }).decisionId,
+    userResponse: "Approve it.",
+    optionId: "approve",
+  });
+  const proposed = await server.call("propose_assembly", {
+    sessionId,
+    requestKey: "assembly-v1",
+    clips: [{ assetId, startSeconds: 0, endSeconds: 3, order: 0 }],
+  });
+  assert.equal(proposed.isError, false, String(proposed.value));
+  const proposedClip = (proposed.value as { assembly: BridgeSession["agent"]["assembly"] }).assembly.clips[0];
+  assert.match(proposedClip.id, /^assembly-/);
 });
 
 test("Codex selects an image backend per session and registers built-in outputs", async (context) => {
@@ -638,7 +1364,7 @@ test("Codex selects an image backend per session and registers built-in outputs"
   assert.match(String(outsideRejected.value), /generated_images directory/i);
   rmSync(outside, { force: true });
 
-  stopMcp(server.child);
+  await stopMcpAndWait(server.child);
   server = spawnMcp(dataDirectory, "claude", codexHome);
   await server.request("initialize", {});
   const wrongHost = await server.call("register_host_image", {
@@ -702,7 +1428,7 @@ test("OpenRouter thread batches persist media-free attempts and resume independe
         ],
       }] });
     }
-    if (request.method === "GET" && request.url === "/videos/models") return sendJson(200, { data: [{ id: "test/video", name: "Test video", input_reference_types: ["image"], max_input_references: 2, pricing_skus: { standard: "$0.25" } }] });
+    if (request.method === "GET" && request.url === "/videos/models") return sendJson(200, { data: [{ id: "test/video", name: "Test video", input_reference_types: ["image"], max_input_references: 2, supported_durations: [4], pricing_skus: { standard: "$0.25" } }] });
     if (request.method === "POST" && request.url === "/chat/completions") {
       enhancementCalls += 1;
       const messages = body.messages as Array<{ content?: string | Array<{ type?: string; text?: string }> }>;
@@ -917,7 +1643,7 @@ test("OpenRouter thread batches persist media-free attempts and resume independe
   const videoTwo = (await server.call("create_generation_thread", { sessionId, requestKey: "video-two", mode: "video", name: "Video two" })).value as { thread: GenerationThread };
   for (const target of [videoOne, videoTwo.thread]) {
     const fresh = ((await server.call("get_session", { sessionId })).value as BridgeSession).threads.video.find((item) => item.id === target.id)!;
-    const result = await server.call("update_generation_thread", { sessionId, threadId: target.id, expectedThreadRevision: fresh.revision, patch: { prompt: `Video ${target.id}`, enhancePrompt: false } });
+    const result = await server.call("update_generation_thread", { sessionId, threadId: target.id, expectedThreadRevision: fresh.revision, patch: { prompt: `Video ${target.id}`, enhancePrompt: false, options: { duration: 4 } } });
     assert.equal(result.isError, false, String(result.value));
   }
   current = (await server.call("get_session", { sessionId })).value as BridgeSession;
@@ -937,7 +1663,7 @@ test("OpenRouter thread batches persist media-free attempts and resume independe
   assert.equal(videos.isError, false, String(videos.value));
   const videoAttemptIds = (videos.value as { attempts: Array<{ attemptId: string }> }).attempts.map((item) => item.attemptId);
   await new Promise((resolve) => setTimeout(resolve, 150));
-  stopMcp(server.child);
+  await stopMcpAndWait(server.child);
   const roundTrip = readStoredEnvelope(dataDirectory);
   const roundTripIndex = roundTrip.sessions.findIndex((item) => item.id === sessionId);
   assert.notEqual(roundTripIndex, -1);
@@ -952,9 +1678,13 @@ test("OpenRouter thread batches persist media-free attempts and resume independe
   assert.equal((videoDone.value as { outcome: string }).outcome, "completed");
   const finalSession = (await server.call("get_session", { sessionId })).value as BridgeSession;
   assert.equal(finalSession.threads.video.flatMap((thread) => thread.attempts).filter((attempt) => videoAttemptIds.includes(attempt.id) && attempt.status === "completed").length, 2);
+  const generatedVideos = finalSession.assets.filter((asset) => asset.kind === "video" && asset.jobId?.startsWith("job-"));
+  assert.equal(generatedVideos.length, 2);
+  assert.ok(generatedVideos.every((asset) => asset.duration === 4));
+  assert.ok(finalSession.agent.artifacts.filter((artifact) => generatedVideos.some((asset) => asset.id === artifact.assetId)).every((artifact) => Boolean(artifact.prompt)));
   assert.equal(((finalSession as unknown as { jobs?: unknown[] }).jobs ?? []).length, 0);
 
-  stopMcp(server.child);
+  await stopMcpAndWait(server.child);
   const timedOutEnvelope = readStoredEnvelope(dataDirectory);
   const timedOutSession = timedOutEnvelope.sessions.find((item) => item.id === sessionId)!;
   const timedOutThread = timedOutSession.threads.video[0];
@@ -988,7 +1718,7 @@ test("OpenRouter thread batches persist media-free attempts and resume independe
   assert.match(failedAfterPollError?.error ?? "", /within 30 minutes/i);
   assert.equal(afterTimeout.agent.execution.currentJobIds.includes("job-timeout-error"), false);
 
-  stopMcp(server.child);
+  await stopMcpAndWait(server.child);
   const uncertainEnvelope = readStoredEnvelope(dataDirectory);
   const uncertainSession = uncertainEnvelope.sessions.find((item) => item.id === sessionId)!;
   const uncertainThread = uncertainSession.threads.image[0];
@@ -1014,7 +1744,7 @@ test("OpenRouter thread batches persist media-free attempts and resume independe
   assert.equal((uncertain.value as { status: string; outcome: string }).status, "terminal");
   assert.equal((uncertain.value as { outcome: string }).outcome, "uncertain");
 
-  stopMcp(server.child);
+  await stopMcpAndWait(server.child);
   const cancelEnvelope = readStoredEnvelope(dataDirectory);
   const cancelThread = cancelEnvelope.sessions.find((item) => item.id === sessionId)!.threads.image[0];
   const cancelId = "attempt-forced-cancel";

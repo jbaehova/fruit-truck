@@ -196,11 +196,13 @@ export function DecisionWorkspace({
                         <span>
                           <strong>{option.label}{option.recommended ? <em>{t("recommended")}</em> : null}</strong>
                           {option.description ? <small>{option.description}</small> : null}
-                          <span className="decision-option-meta">
-                            {option.inputStructure ? <b>{option.inputStructure}</b> : null}
-                            {option.compatibility ? <b>{option.compatibility}</b> : null}
-                            <b className="price">{option.price || t("priceUnavailable")}</b>
-                          </span>
+                          {decision.presentation === "model_picker" ? (
+                            <span className="decision-option-meta">
+                              {option.inputStructure ? <b>{option.inputStructure}</b> : null}
+                              {option.compatibility ? <b>{option.compatibility}</b> : null}
+                              <b className="price">{option.price || t("priceUnavailable")}</b>
+                            </span>
+                          ) : null}
                           {option.constraints ? <small>{option.constraints}</small> : null}
                         </span>
                       </button>

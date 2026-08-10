@@ -31,6 +31,9 @@ jobs:
             apps/desktop/package-lock.json
             agent-kit/package-lock.json
 
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Install desktop dependencies
         run: npm ci
 
@@ -80,8 +83,8 @@ jobs:
 
       - name: Run Rust tests
         run: |
-          cargo test --manifest-path src-tauri/Cargo.toml
-          cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+          cargo test --manifest-path src-tauri/Cargo.toml --workspace
+          cargo clippy --manifest-path src-tauri/Cargo.toml --workspace --all-targets -- -D warnings
 
       - name: Build native desktop test bundle
         run: npm run build:e2e:desktop

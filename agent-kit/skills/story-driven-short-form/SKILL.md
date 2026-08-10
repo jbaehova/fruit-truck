@@ -20,6 +20,8 @@ Merge beats when duration is short. Add a beat only when it changes information 
 
 Propose shot count, shot duration, composition, camera movement, lighting, and color autonomously. When one changes a user-owned identity, required story event, or hard distribution constraint, queue a chat decision and resolve only from the user's reply.
 
+Choose generation durations only from the selected video model's live `supported_durations`. When the desired editorial beat is shorter than the minimum generation duration, generate the nearest supported duration and set shorter in/out points during final assembly.
+
 ## Preserve continuity
 
 Detect recurring people, characters, products, outfits, props, logos, and locations. Plan the smallest useful character, product, or environment sheets before keyframes.

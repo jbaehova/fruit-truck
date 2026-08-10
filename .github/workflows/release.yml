@@ -100,18 +100,26 @@ jobs:
           APP_VERSION=$(node -e "process.stdout.write(require('./src-tauri/tauri.conf.json').version)")
           test "$RELEASE_TAG" = "v$APP_VERSION"
 
+      - name: Build Universal Fruit Truck Core helper
+        run: bash apps/desktop/scripts/build-core-sidecar-universal.sh
+
       - name: Run desktop checks
         working-directory: apps/desktop
         run: |
           npm run test:unit
           npm run check
-          cargo test --manifest-path src-tauri/Cargo.toml
+          cargo test --manifest-path src-tauri/Cargo.toml --workspace
 
       - name: Build Universal DMG and create draft release
         id: tauri
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
@@ -123,18 +131,40 @@ jobs:
 
             Signed in-app updates are supported for users on 0.2.0 or newer. Users upgrading from 0.1.x must install this DMG once; later releases can be installed from inside the app.
 
-            This build is ad-hoc signed and is not notarized by Apple. After copying the app to Applications, try to open it once, then go to System Settings → Privacy & Security → Open Anyway.
+            This build is signed with a Developer ID certificate and notarized by Apple.
           releaseDraft: true
           prerelease: false
           generateReleaseNotes: true
           args: --target universal-apple-darwin --bundles app,dmg --config src-tauri/tauri.release.conf.json
           releaseAssetNamePattern: Fruit-Truck-macOS-universal[ext]
 
+      - name: Notarize and staple Universal DMG
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          DMG_PATH=$(find apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/dmg -name '*.dmg' -print -quit)
+          test -n "$DMG_PATH"
+          xcrun notarytool submit "$DMG_PATH" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+          xcrun stapler staple "$DMG_PATH"
+
       - name: Verify app bundle is self-contained
         run: |
           APP_PATH=$(find apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos -name 'Fruit Truck.app' -print -quit)
+          DMG_PATH=$(find apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/dmg -name '*.dmg' -print -quit)
           test -n "$APP_PATH"
+          test -n "$DMG_PATH"
           bash apps/desktop/scripts/verify-app-bundle-media-tools.sh "$APP_PATH"
+          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+          codesign --verify --strict --verbose=2 "$DMG_PATH"
+          xcrun stapler validate "$DMG_PATH"
+          spctl --assess --type execute --verbose=2 "$APP_PATH"
+          spctl --assess --type open --context context:primary-signature --verbose=2 "$DMG_PATH"
 
       - name: Upload DMG, FFmpeg compliance assets, and checksums
         env:
@@ -143,7 +173,7 @@ jobs:
         run: |
           DMG_PATH=$(find apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/dmg -name '*.dmg' -print -quit)
           test -n "$DMG_PATH"
-          bash apps/desktop/scripts/clean-dmg-volume-icon.sh "$DMG_PATH" Fruit-Truck-macOS-universal.dmg
+          cp "$DMG_PATH" Fruit-Truck-macOS-universal.dmg
           gh release upload "$RELEASE_TAG" Fruit-Truck-macOS-universal.dmg --clobber
           DMG_HASH=$(shasum -a 256 Fruit-Truck-macOS-universal.dmg | cut -d ' ' -f 1)
           printf '%s  %s\n' "$DMG_HASH" "Fruit-Truck-macOS-universal.dmg" > Fruit-Truck-macOS-universal.dmg.sha256

@@ -2,7 +2,7 @@
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Fruit Truck",
   "mainBinaryName": "Fruit Truck",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "identifier": "ui.fruittruck.desktop",
   "build": {
     "frontendDist": "../dist",
@@ -40,10 +40,11 @@
     "active": true,
     "targets": ["dmg"],
     "createUpdaterArtifacts": true,
+    "externalBin": ["target/bundled-tools/fruit-truckd"],
     "icon": ["icons/icon.icns"],
     "macOS": {
       "bundleName": "Fruit Truck",
-      "signingIdentity": "-"
+      "signingIdentity": "Developer ID Application: SEOKHYUN BAE (B686K45XCF)"
     }
   },
   "plugins": {

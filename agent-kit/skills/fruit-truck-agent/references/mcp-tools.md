@@ -1,5 +1,7 @@
 # MCP tool guide
 
+This is the legacy/recovery tool catalog. The default fast profile exposes only `session_open`, `session_read`, `session_commit`, `task_wait`, `ensure_desktop`, `list_models`, `run_generation_threads`, and, for Codex, `register_host_image`. Do not assume the remaining tools are callable unless the MCP server was explicitly installed with the legacy profile.
+
 ## Session and desktop presence
 
 - `create_session(intent, name?, workflowSkills?)`: create a durable agent-first session.

@@ -1,6 +1,6 @@
 # Releasing Fruit Truck for macOS
 
-Fruit Truck is distributed as one Universal DMG for Apple Silicon and Intel Macs. The app is ad-hoc signed and intentionally not notarized with Apple.
+Fruit Truck is distributed as one Universal DMG for Apple Silicon and Intel Macs. The app is signed with a Developer ID Application certificate and notarized by Apple.
 
 The DMG is self-contained. It includes Universal `ffmpeg` and `ffprobe`
 executables and does not require Homebrew or any other package manager on the
@@ -12,6 +12,8 @@ user's Mac.
 2. Under **Build and deployment**, select **GitHub Actions** as the source.
 3. Ensure GitHub Actions has permission to create releases under **Settings → Actions → General → Workflow permissions**.
 4. Store the Tauri updater private key and password as `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` repository secrets. Never commit the private key.
+5. Export the Developer ID Application identity as a password-protected PKCS#12 file and store its base64 contents and password as `APPLE_CERTIFICATE` and `APPLE_CERTIFICATE_PASSWORD` repository secrets.
+6. Store the developer account email, app-specific password, and Team ID as `APPLE_ID`, `APPLE_PASSWORD`, and `APPLE_TEAM_ID` repository secrets.
 
 ## Publish a release
 
@@ -35,8 +37,8 @@ npm run bundle:mac:universal
 Commit the version, then create and push the matching tag:
 
 ```bash
-git tag v0.6.0
-git push origin v0.6.0
+git tag v0.6.1
+git push origin v0.6.1
 ```
 
 The release workflow will:
@@ -45,12 +47,12 @@ The release workflow will:
 2. Build separate LGPL-only Apple Silicon and Intel media tools.
 3. Combine them as Universal executables and reject Homebrew or other non-system runtime links.
 4. Build a Universal macOS DMG containing the tools and their license notices.
-5. Ad-hoc sign the application without an Apple Developer account.
-6. Verify the tools run from inside the `.app` with a system-only `PATH`.
-7. Remove the DMG volume icon metadata so hidden files never overlap the installer window.
+5. Sign the application and bundled executables with the Developer ID identity and hardened runtime.
+6. Notarize and staple the app, then submit the signed outer DMG and staple its own notarization ticket.
+7. Verify Gatekeeper acceptance and that the tools run from inside the `.app` with a system-only `PATH`.
 8. Create and sign the `.app.tar.gz` in-app updater bundle.
 9. Upload `latest.json`, the updater bundle, and its signature.
-10. Upload the DMG, checksums, corresponding FFmpeg source archive, and exact build configuration.
+10. Upload the byte-identical notarized DMG, checksums, corresponding FFmpeg source archive, and exact build configuration.
 11. Publish the GitHub Release as `latest`.
 
 The landing page always downloads the latest release from:
@@ -61,12 +63,8 @@ https://github.com/jbaehova/fruit-truck/releases/latest/download/Fruit-Truck-mac
 
 ## First launch for users
 
-Because the app is not notarized, users must approve it once:
-
 1. Open the DMG and drag Fruit Truck to Applications.
-2. Try to open Fruit Truck once.
-3. Open **System Settings → Privacy & Security**.
-4. Select **Open Anyway**.
+2. Open Fruit Truck from Applications. The Developer ID signature and stapled Apple notarization ticket allow a normal Gatekeeper launch.
 
 ## Updating an installed app
 
@@ -100,7 +98,7 @@ system-only `PATH`.
 
 Before publishing, smoke-test on a Mac without Homebrew:
 
-1. Install the DMG and approve the non-notarized app using the steps above.
+1. Install the signed and notarized DMG using the steps above.
 2. Import at least one WebM clip and one MP4 or MOV clip.
 3. Render them in **Make final video**.
 4. Confirm the final MP4 plays and Activity Monitor shows hardware video

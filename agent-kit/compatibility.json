@@ -4,7 +4,7 @@
   "desktop": {
     "minimum": "0.6.0",
     "maximumExclusive": "0.7.0",
-    "bridgeSchemaVersion": 3
+    "bridgeSchemaVersion": 4
   },
   "mcpProtocolVersion": "2025-06-18"
 }

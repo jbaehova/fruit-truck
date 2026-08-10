@@ -3,7 +3,8 @@
   "bundle": {
     "externalBin": [
       "target/bundled-tools/ffmpeg",
-      "target/bundled-tools/ffprobe"
+      "target/bundled-tools/ffprobe",
+      "target/bundled-tools/fruit-truckd"
     ],
     "resources": {
       "target/bundled-tools/licenses/": "licenses/"

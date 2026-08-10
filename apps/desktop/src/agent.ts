@@ -276,14 +276,8 @@ export function normalizeAgentState(value: AgentSessionState): AgentSessionState
       }
       : fallback.imageGeneration
   );
-  return {
-    ...fallback,
-    ...value,
-    connection: { ...fallback.connection, ...value.connection },
-    brief: { ...fallback.brief, ...value.brief },
-    imageGeneration: { ...fallback.imageGeneration, ...legacyImageGeneration },
-    modelSelections: { ...fallback.modelSelections, ...value.modelSelections },
-    decisions: (value.decisions ?? []).map((item) => ({
+  const normalizedDecisions = (value.decisions ?? [])
+    .map((item) => ({
       ...item,
       channel: item.channel ?? (item.resolution?.channel === "legacy_desktop" ? "fruit_truck_ui" : "agent_chat"),
       presentation: item.presentation ?? (
@@ -296,11 +290,70 @@ export function normalizeAgentState(value: AgentSessionState): AgentSessionState
       allowNote: item.allowNote ?? item.kind === "feedback",
       semanticKey: item.semanticKey ?? legacyDecisionSemanticKey(item.title),
       resolution: item.resolution ? {
-        channel: "legacy_desktop",
+        channel: "legacy_desktop" as const,
         ...item.resolution,
       } : undefined,
-    })),
-    assembly: { ...fallback.assembly, ...value.assembly, clips: value.assembly?.clips ?? [] },
+    }));
+  const decisions = normalizedDecisions.filter((item) => item.presentation !== "assembly_review" || (
+    item.kind === "approval"
+    && item.options.some((option) => option.id === "rendered")
+    && item.options.some((option) => option.id === "revise")
+  ));
+  const discardedInvalidCheckpoints = decisions.length !== normalizedDecisions.length;
+  const pendingBlockingDecision = decisions.some((item) => item.status === "pending" && item.blocking);
+  const pendingUiDecision = decisions.findLast((item) => item.status === "pending" && item.channel === "fruit_truck_ui");
+  const recoveredRunStatus = discardedInvalidCheckpoints
+    && value.connection?.status === "claimed"
+    && value.controlMode === "agent"
+    && (value.runStatus === "waiting" || value.runStatus === "working")
+    ? pendingBlockingDecision ? "waiting" as const : "working" as const
+    : value.runStatus;
+  const recoveredUiAttention = discardedInvalidCheckpoints
+    ? pendingUiDecision
+      ? { requestedAt: pendingUiDecision.createdAt, decisionId: pendingUiDecision.id }
+      : undefined
+    : value.uiAttention;
+  const recoveredApprovals = new Map<string, ArtifactApproval>();
+  for (const decision of decisions) {
+    if (decision.kind !== "approval" || decision.status !== "resolved") continue;
+    const selectedAssetIds = decision.resolution?.selectedAssetIds ?? [];
+    const affectedAssetIds = selectedAssetIds.length ? selectedAssetIds : decision.relatedAssetIds;
+    if (!affectedAssetIds.length) continue;
+    const approval = decision.resolution?.optionId === "revise" || decision.resolution?.optionId === "reject"
+      ? "rejected"
+      : decision.resolution?.optionId === "approve" || selectedAssetIds.length
+        ? "approved"
+        : undefined;
+    if (!approval) continue;
+    for (const assetId of affectedAssetIds) recoveredApprovals.set(assetId, approval);
+  }
+  return {
+    ...fallback,
+    ...value,
+    connection: { ...fallback.connection, ...value.connection },
+    brief: { ...fallback.brief, ...value.brief },
+    imageGeneration: { ...fallback.imageGeneration, ...legacyImageGeneration },
+    modelSelections: { ...fallback.modelSelections, ...value.modelSelections },
+    runStatus: recoveredRunStatus,
+    uiAttention: recoveredUiAttention,
+    plan: value.runStatus === "completed"
+      ? (value.plan ?? []).map((item) => item.status === "skipped" ? item : { ...item, status: "completed" as const })
+      : value.plan ?? [],
+    decisions,
+    artifacts: (value.artifacts ?? []).map((artifact) => {
+      const approval = recoveredApprovals.get(artifact.assetId);
+      return approval ? { ...artifact, approval } : artifact;
+    }),
+    assembly: {
+      ...fallback.assembly,
+      ...value.assembly,
+      clips: (value.assembly?.clips ?? []).map((clip, index) => ({
+        ...clip,
+        id: typeof clip.id === "string" && clip.id
+          ? clip.id
+          : `assembly-${clip.assetId}-${clip.order}-${index}`,
+      })),
+    },
     execution: {
       currentJobIds: value.execution?.currentJobIds ?? [],
       generationCount: value.execution?.generationCount ?? 0,
@@ -309,9 +362,11 @@ export function normalizeAgentState(value: AgentSessionState): AgentSessionState
       retryCount: value.execution?.retryCount ?? 0,
       lastError: value.execution?.lastError,
     },
-    currentStepIds: Array.isArray(value.currentStepIds)
-      ? value.currentStepIds
-      : value.currentStepId ? [value.currentStepId] : [],
+    currentStepIds: value.runStatus === "completed"
+      ? []
+      : Array.isArray(value.currentStepIds)
+        ? value.currentStepIds
+        : value.currentStepId ? [value.currentStepId] : [],
     schemaVersion: 4,
   };
 }
@@ -444,7 +499,11 @@ export function resolveAgentDecision(
     ? resolutionContext.selectedAssetIds
     : target.relatedAssetIds;
   const approval = target.kind === "approval" && approvalAssetIds.length
-    ? optionId === "approve" ? "approved" as const : optionId === "revise" || optionId === "reject" ? "rejected" as const : undefined
+    ? optionId === "revise" || optionId === "reject"
+      ? "rejected" as const
+      : optionId === "approve" || Boolean(resolutionContext?.selectedAssetIds?.length)
+        ? "approved" as const
+        : undefined
     : undefined;
   const finalApproval = target.semanticKey === "final_approval" && optionId === "approve";
   const completed = !pendingBlocking && (
@@ -458,11 +517,13 @@ export function resolveAgentDecision(
   const customSkillStatus = target.semanticKey === "custom_skill_approval"
     ? optionId === "approve" ? "approved" as const : "rejected" as const
     : undefined;
-  const plan = target.relatedStepId && (finalApproval || approval)
-    ? state.plan.map((item) => item.id === target.relatedStepId
-      ? { ...item, status: approval === "rejected" ? "waiting" as const : "completed" as const }
-      : item)
-    : state.plan;
+  const plan = finalApproval
+    ? state.plan.map((item) => item.status === "skipped" ? item : { ...item, status: "completed" as const })
+    : target.relatedStepId && approval
+      ? state.plan.map((item) => item.id === target.relatedStepId
+        ? { ...item, status: approval === "rejected" ? "waiting" as const : "completed" as const }
+        : item)
+      : state.plan;
   let brief = state.brief;
   let requirements = state.requirements;
   const confirmedValue = [selected?.label, note].filter(Boolean).join(" · ") || "Confirmed";
@@ -501,6 +562,7 @@ export function resolveAgentDecision(
       : state.controlMode === "human" || state.runStatus === "paused" || state.runStatus === "idle"
         ? state.runStatus
         : pendingBlocking ? "waiting" : "working",
+    currentStepIds: completed ? [] : state.currentStepIds,
     activity: [...state.activity, {
       id: uid("activity"),
       createdAt,

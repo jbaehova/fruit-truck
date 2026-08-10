@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   materializeAgentSession,
+  preserveLocalAssetMetadata,
   recoverAgentBridgeEnvelope,
   recoverBridgeGenerationState,
   serializeAgentSessionForBridge,
@@ -9,6 +10,32 @@ import {
   type AgentBridgeSession,
 } from "./agentBridge.ts";
 import { createSession } from "./studio.ts";
+
+test("Core asset updates and deletions replace durable metadata without losing local blob handles", () => {
+  const createdAt = "2026-01-01T00:00:00.000Z";
+  const local = [
+    {
+      id: "asset-updated", name: "old.png", kind: "image" as const, mimeType: "image/png",
+      origin: "generated" as const, createdAt, blobKey: "blob-local", fingerprint: "fingerprint-local",
+    },
+    {
+      id: "asset-deleted", name: "deleted.png", kind: "image" as const, mimeType: "image/png",
+      origin: "generated" as const, createdAt, blobKey: "blob-deleted",
+    },
+  ];
+  const incoming = [{
+    id: "asset-updated", name: "canonical.png", kind: "image" as const, mimeType: "image/png",
+    origin: "generated" as const, createdAt, localPath: "/managed/canonical.png",
+  }];
+
+  const merged = preserveLocalAssetMetadata(incoming, local);
+
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].name, "canonical.png");
+  assert.equal(merged[0].localPath, "/managed/canonical.png");
+  assert.equal(merged[0].blobKey, "blob-local");
+  assert.equal(merged[0].fingerprint, "fingerprint-local");
+});
 
 test("bridge generation recovery preserves a session while isolating malformed optional state", () => {
   const session = createSession("Recovery");
@@ -77,6 +104,21 @@ test("validBridgeSession rejects duplicate and malformed thread state", () => {
   const malformedAttempts = structuredClone(validBridge);
   (malformedAttempts.threads.video[0] as { attempts?: unknown }).attempts = null;
   assert.equal(validBridgeSession(malformedAttempts), false);
+
+  const concurrentAttempts = structuredClone(validBridge);
+  const createdAt = "2026-01-01T00:00:00.000Z";
+  concurrentAttempts.threads.image[0].attempts = ["one", "two"].map((id) => ({
+    id: `attempt-${id}`,
+    status: "queued" as const,
+    backend: "openrouter" as const,
+    draftRevision: 0,
+    requestedBy: "agent" as const,
+    createdAt,
+    updatedAt: createdAt,
+    inputAssetIds: [],
+    assetIds: [],
+  }));
+  assert.equal(validBridgeSession(concurrentAttempts), false);
 
   const malformedDraft = structuredClone(validBridge);
   (malformedDraft.threads.image[0] as { draft?: unknown }).draft = null;

@@ -30,6 +30,7 @@
     }
   },
   "bundle": {
+    "externalBin": ["target/bundled-tools/fruit-truckd"],
     "active": true,
     "targets": ["app"],
     "createUpdaterArtifacts": false

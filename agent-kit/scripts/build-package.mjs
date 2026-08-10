@@ -25,11 +25,17 @@ const compile = async (source, destination) => {
   }).outputText
     .replaceAll("../src/agent.ts", "../src/agent.js")
     .replaceAll("../src/openrouter.ts", "../src/openrouter.js")
-    .replaceAll("../src/mask.ts", "../src/mask.js");
+    .replaceAll("../src/mask.ts", "../src/mask.js")
+    .replaceAll("../src/videoPolling.ts", "../src/videoPolling.js")
+    .replaceAll("./core-client.ts", "./core-client.js")
+    .replaceAll("./telemetry.ts", "./telemetry.js");
   await writeFile(destination, output, { mode: 0o755 });
 };
 
 await compile(join(desktop, "scripts", "mcp-server.ts"), join(dist, "scripts", "mcp-server.js"));
+await compile(join(desktop, "scripts", "core-client.ts"), join(dist, "scripts", "core-client.js"));
+await compile(join(desktop, "scripts", "telemetry.ts"), join(dist, "scripts", "telemetry.js"));
 await compile(join(desktop, "src", "agent.ts"), join(dist, "src", "agent.js"));
 await compile(join(desktop, "src", "openrouter.ts"), join(dist, "src", "openrouter.js"));
 await compile(join(desktop, "src", "mask.ts"), join(dist, "src", "mask.js"));
+await compile(join(desktop, "src", "videoPolling.ts"), join(dist, "src", "videoPolling.js"));

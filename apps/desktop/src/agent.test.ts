@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { diffAgentBridgeSession, serializeAgentSessionForBridge } from "./agentBridge.ts";
+import { createSession } from "./studio.ts";
 import {
   assemblyDurationSeconds,
   createAgentState,
@@ -244,6 +246,173 @@ test("Fruit Truck UI decisions record selected media and cannot resolve chat che
   assert.equal(resolved.artifacts[0]?.approval, "approved");
 });
 
+test("media-grid approval options approve their selected asset candidates", () => {
+  const createdAt = new Date().toISOString();
+  const base = productionState();
+  const state: AgentSessionState = {
+    ...base,
+    artifacts: ["asset-a", "asset-b"].map((assetId) => ({
+      assetId,
+      role: "video_candidate",
+      parentAssetIds: [],
+      approval: "unreviewed" as const,
+    })),
+    decisions: [{
+      id: "decision-videos",
+      title: "Approve video clips",
+      prompt: "Choose the clips to approve.",
+      kind: "approval",
+      channel: "fruit_truck_ui",
+      presentation: "media_grid",
+      selectionMode: "multiple",
+      minSelections: 1,
+      maxSelections: 2,
+      status: "pending",
+      blocking: true,
+      relatedAssetIds: ["asset-a", "asset-b"],
+      options: [
+        { id: "shot-a", label: "Shot A", assetId: "asset-a" },
+        { id: "shot-b", label: "Shot B", assetId: "asset-b" },
+      ],
+      createdAt,
+    }],
+  };
+  const resolved = resolveAgentDecisionFromDesktop(
+    state,
+    "decision-videos",
+    ["shot-a", "shot-b"],
+    ["asset-a", "asset-b"],
+  );
+  assert.deepEqual(resolved.artifacts.map((artifact) => artifact.approval), ["approved", "approved"]);
+
+  const persistedWithOldBug = {
+    ...resolved,
+    artifacts: resolved.artifacts.map((artifact) => ({ ...artifact, approval: "unreviewed" as const })),
+  };
+  const normalized = normalizeAgentState(persistedWithOldBug);
+  assert.deepEqual(normalized.artifacts.map((artifact) => artifact.approval), ["approved", "approved"]);
+
+  const rejectedAfterApproval = normalizeAgentState({
+    ...persistedWithOldBug,
+    artifacts: persistedWithOldBug.artifacts.map((artifact) => ({ ...artifact, approval: "unreviewed" as const })),
+    decisions: [...persistedWithOldBug.decisions, {
+      id: "decision-revise-a",
+      title: "Revise shot A",
+      prompt: "Reject the first approved shot and generate a replacement.",
+      kind: "approval",
+      channel: "agent_chat",
+      presentation: "form",
+      selectionMode: "single",
+      status: "resolved",
+      blocking: true,
+      relatedAssetIds: ["asset-a"],
+      options: [
+        { id: "approve", label: "Approve" },
+        { id: "revise", label: "Revise" },
+      ],
+      resolution: {
+        optionId: "revise",
+        selectedOptionIds: ["revise"],
+        selectedAssetIds: [],
+        channel: "agent_chat",
+        resolvedAt: new Date(Date.now() + 1_000).toISOString(),
+      },
+      createdAt: new Date(Date.now() + 500).toISOString(),
+    }],
+  });
+  assert.deepEqual(rejectedAfterApproval.artifacts.map((artifact) => artifact.approval), ["rejected", "approved"]);
+});
+
+test("normalization drops invalid duplicate assembly checkpoints", () => {
+  const base = createAgentState();
+  const createdAt = new Date().toISOString();
+  const normalized = normalizeAgentState({
+    ...base,
+    connection: { status: "claimed", claimedAt: createdAt, claimedBy: "migration-test" },
+    controlMode: "agent",
+    runStatus: "waiting",
+    uiAttention: { requestedAt: createdAt, decisionId: "decision-invalid-assembly" },
+    decisions: [{
+      id: "decision-invalid-assembly",
+      title: "Duplicate assembly review",
+      prompt: "This was incorrectly queued after propose_assembly.",
+      kind: "feedback",
+      channel: "fruit_truck_ui",
+      presentation: "assembly_review",
+      selectionMode: "single",
+      status: "pending",
+      blocking: true,
+      relatedAssetIds: [],
+      options: [],
+      createdAt,
+    }],
+  });
+  assert.deepEqual(normalized.decisions, []);
+  assert.equal(normalized.runStatus, "working");
+  assert.equal(normalized.uiAttention, undefined);
+});
+
+test("normalization keeps waiting for surviving blockers after dropping an invalid checkpoint", () => {
+  const base = createAgentState();
+  const createdAt = new Date().toISOString();
+  const validDecision = {
+    id: "decision-valid-ui",
+    title: "Choose a direction",
+    prompt: "Choose the surviving direction.",
+    kind: "choice" as const,
+    channel: "fruit_truck_ui" as const,
+    presentation: "form" as const,
+    selectionMode: "single" as const,
+    status: "pending" as const,
+    blocking: true,
+    relatedAssetIds: [],
+    options: [{ id: "continue", label: "Continue" }],
+    createdAt,
+  };
+  const normalized = normalizeAgentState({
+    ...base,
+    connection: { status: "claimed", claimedAt: createdAt, claimedBy: "migration-test" },
+    controlMode: "agent",
+    runStatus: "waiting",
+    uiAttention: { requestedAt: createdAt, decisionId: "decision-invalid-assembly" },
+    decisions: [validDecision, {
+      id: "decision-invalid-assembly",
+      title: "Duplicate assembly review",
+      prompt: "This invalid checkpoint should be discarded.",
+      kind: "feedback",
+      channel: "fruit_truck_ui",
+      presentation: "assembly_review",
+      selectionMode: "single",
+      status: "pending",
+      blocking: true,
+      relatedAssetIds: [],
+      options: [],
+      createdAt,
+    }],
+  });
+  assert.deepEqual(normalized.decisions.map((decision) => decision.id), [validDecision.id]);
+  assert.equal(normalized.runStatus, "waiting");
+  assert.equal(normalized.uiAttention?.decisionId, validDecision.id);
+});
+
+test("normalization gives legacy assembly clips stable render keys", () => {
+  const base = createAgentState();
+  const legacyClip = {
+    assetId: "asset-video",
+    startSeconds: 0,
+    endSeconds: 3,
+    order: 0,
+  };
+  const normalized = normalizeAgentState({
+    ...base,
+    assembly: {
+      ...base.assembly,
+      clips: [legacyClip as AgentSessionState["assembly"]["clips"][number]],
+    },
+  });
+  assert.equal(normalized.assembly.clips[0].id, "assembly-asset-video-0-0");
+});
+
 test("Codex image backend selection is session-scoped and user-owned", () => {
   const createdAt = new Date().toISOString();
   const base = createAgentState("Generate a product still.");
@@ -298,6 +467,7 @@ test("final approval completes the run and its checkpoint", () => {
   const state = productionState();
   const finalState = {
     ...state,
+    currentStepIds: ["production", "complete"],
     artifacts: [{
       assetId: "asset-final",
       role: "final_video",
@@ -320,8 +490,9 @@ test("final approval completes the run and its checkpoint", () => {
   };
   const approved = resolveAgentDecision(finalState, "decision-final", "approve");
   assert.equal(approved.runStatus, "completed");
-  assert.equal(approved.plan.find((step) => step.id === "complete")?.status, "completed");
+  assert.ok(approved.plan.every((step) => step.status === "completed" || step.status === "skipped"));
   assert.equal(approved.artifacts[0].approval, "approved");
+  assert.deepEqual(approved.currentStepIds, []);
 });
 
 test("final approval waits for every other blocking decision before completing", () => {
@@ -537,4 +708,17 @@ test("assembly duration matches the confirmed final length", () => {
   assert.equal(assemblyDurationSeconds(clips), 15);
   assert.equal(validateAssemblyDuration(state, 15), null);
   assert.match(validateAssemblyDuration(state, 14) ?? "", /confirmed output length/i);
+});
+
+test("Desktop projection diff excludes Core-owned metadata and replaces array leaves", async () => {
+  const base = await serializeAgentSessionForBridge(createSession("Patch fixture"));
+  const next = structuredClone(base);
+  next.updatedAt = "2030-01-01T00:00:00.000Z";
+  next.agent.updatedAt = "2030-01-01T00:00:00.000Z";
+  next.agent.revision += 9;
+  next.agent.brief.goal = "Patched through Core";
+  next.agent.requirements = [{ id: "duration", label: "Duration", value: "8 seconds", status: "confirmed", source: "user", blocking: false }];
+  const patches = diffAgentBridgeSession(base, next);
+  assert.deepEqual(patches.map((patch) => patch.path), ["/agent/brief/goal", "/agent/requirements"]);
+  assert.ok(patches.every((patch) => !patch.path.includes("revision") && !patch.path.includes("updatedAt")));
 });

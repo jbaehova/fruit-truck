@@ -25,7 +25,7 @@ Run only the line for the agent you use. Omit `--configure` to copy Skills witho
 - Codex Skills are copied to `~/.agents/skills`; the CLI registers the stdio server in the shared Codex `config.toml`.
 - Claude Code Skills are copied to `~/.claude/skills`; MCP is registered at user scope.
 - Hermes Skills are copied to `~/.hermes/skills`; MCP is added to `~/.hermes/config.yaml`.
-- The generated MCP command includes `--agent-host <target>`. Codex uses this stable host identity to expose its session-level built-in image-generation option; the other targets stay on OpenRouter.
+- The generated MCP command includes `--agent-host <target> --tool-profile fast`. The fast profile exposes at most eight tools and uses compact reads, atomic commits, receipts, and event-style waits. Pass `--tool-profile=legacy` during install or print-config to expose every low-level compatibility tool.
 
 Restart Codex if a newly created top-level skill directory is not detected. Claude Code watches an existing Skills directory live. In Hermes, run `/reload-mcp` after configuration changes.
 
@@ -33,4 +33,4 @@ Restart Codex if a newly created top-level skill directory is not detected. Clau
 
 Rebuild and reinstall from the updated checkout, then run `fruit-truck-agent-kit install <codex|claude|hermes> --force`.
 
-The package refuses its own release build when its version and desktop compatibility manifest disagree. Start with `create_session`, call `ensure_desktop` for background-safe presence, and then `claim_session`. Resolve prose decisions in agent chat; await media/model/upload/assembly decisions from Fruit Truck. Run `fruit-truck-mcp --agent-host <codex|claude|hermes>` directly to verify stdio initialization.
+The package refuses its own release build when its version and desktop compatibility manifest disagree. Start with `session_open`, call `ensure_desktop` for background-safe presence, and claim by repeating `session_open` with the returned session ID. Resolve prose decisions in agent chat; await media/model/upload/assembly decisions from Fruit Truck. Run `fruit-truck-mcp --agent-host <codex|claude|hermes> --tool-profile fast` directly to verify stdio initialization.

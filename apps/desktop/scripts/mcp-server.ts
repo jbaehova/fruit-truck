@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { createInterface } from "node:readline";
-import { mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, stat, unlink, watch, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { delimiter, isAbsolute, join, relative, resolve } from "node:path";
@@ -8,6 +9,8 @@ import { spawn } from "node:child_process";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import { PNG } from "pngjs";
+import { configuredCoreMode, coreRequest } from "./core-client.ts";
+import { currentTrace, recordSpan, span, withTrace } from "./telemetry.ts";
 import {
   createCustomSkillDraft,
   createAgentState,
@@ -80,10 +83,27 @@ type BridgeSession = {
   activeThreadIds: { image: string; video: string };
   assets: BridgeAsset[];
   agent: AgentSessionState;
+  fastOpenRequestKey?: string;
+  fastOpenRequestHash?: string;
+  fastReceipts?: Array<{
+    requestKey: string;
+    requestHash: string;
+    receipt: CommandReceipt;
+  }>;
 };
 
 type Envelope = { schemaVersion: 1 | 2 | 3 | 4; revision: number; sessions: BridgeSession[] };
 type ToolResult = Record<string, unknown> | Array<unknown> | string | number | boolean | null;
+type CommandReceipt = {
+  ok: true;
+  sessionId: string;
+  revision: number;
+  commandId: string;
+  changed: string[];
+  eventCursor: number;
+  next?: { kind: string; id: string };
+  replayed: boolean;
+};
 
 const dataDirectory = process.env.FRUIT_TRUCK_HOME
   ? resolve(process.env.FRUIT_TRUCK_HOME)
@@ -107,6 +127,12 @@ const configuredAgentHost = (() => {
   const inline = process.argv.find((value) => value.startsWith("--agent-host="))?.slice("--agent-host=".length);
   const value = inline ?? (index >= 0 ? process.argv[index + 1] : undefined);
   return value === "codex" || value === "claude" || value === "hermes" ? value : undefined;
+})();
+const configuredToolProfile = (() => {
+  const index = process.argv.findIndex((value) => value === "--tool-profile");
+  const inline = process.argv.find((value) => value.startsWith("--tool-profile="))?.slice("--tool-profile=".length);
+  const value = inline ?? (index >= 0 ? process.argv[index + 1] : process.env.FRUIT_TRUCK_TOOL_PROFILE);
+  return value === "fast" ? "fast" : "legacy";
 })();
 let initializedClientName = "";
 
@@ -137,8 +163,13 @@ const BASE_TOOLS = [
     workflowSkills: { type: "array", items: { type: "string", minLength: 1, maxLength: 100 }, maxItems: 12 },
   }, ["intent"]),
   tool("list_sessions", "List resumable Fruit Truck agent sessions and their current checkpoint.", {}),
-  tool("get_session", "Read the complete structured production state for one session.", {
+  tool("get_session", "Read the complete v1 state, or request a bounded v2 view/delta by passing view.", {
     sessionId: { type: "string" },
+    view: { enum: ["summary", "resume", "decisions", "threads", "artifacts", "recovery"] },
+    sinceRevision: { type: "integer", minimum: 0 }, afterEvent: { type: "integer", minimum: 0 },
+    threadIds: { type: "array", maxItems: 64, items: { type: "string" } },
+    decisionIds: { type: "array", maxItems: 64, items: { type: "string" } },
+    assetIds: { type: "array", maxItems: 64, items: { type: "string" } },
   }, ["sessionId"]),
   tool("claim_session", "Claim a connection-waiting session before planning or execution. This changes the visible Agent panel from waiting to working.", {
     sessionId: { type: "string" },
@@ -177,7 +208,7 @@ const BASE_TOOLS = [
   tool("ensure_desktop", "Ensure Fruit Truck is running without stealing focus. On macOS the app is launched in the background when installed.", {
     sessionId: { type: "string" },
   }, ["sessionId"]),
-  tool("queue_decision", "Record a meaningful chat or Fruit Truck UI checkpoint.", {
+  tool("queue_decision", "Record a meaningful chat or Fruit Truck UI checkpoint. Assembly review checkpoints are created only by propose_assembly; never queue a second one.", {
     sessionId: { type: "string" }, requestKey: { type: "string", minLength: 1, maxLength: 200 },
     title: { type: "string" }, prompt: { type: "string" },
     semanticKey: { enum: ["deliverable_usage", "visual_approach", "output_spec", "identity_refs", "final_approval"] },
@@ -214,7 +245,7 @@ const BASE_TOOLS = [
     mode: { enum: ["image", "video"] },
     threadIds: { type: "array", maxItems: 64, uniqueItems: true, items: { type: "string" } },
   }, ["mode"]),
-  tool("request_model_selection", "Record a compatible-model choice checkpoint, then present its candidates in agent chat. This tool never chooses for the user.", {
+  tool("request_model_selection", "Queue a compatible-model choice in the Fruit Truck UI. Await that UI decision; never choose or resolve its candidates in agent chat.", {
     sessionId: { type: "string" }, requestKey: { type: "string", minLength: 1, maxLength: 200 },
     mode: { enum: ["image", "video"] },
     candidates: { type: "array", minItems: 1, maxItems: 12, items: { type: "object", required: ["id", "label"], properties: {
@@ -234,7 +265,7 @@ const BASE_TOOLS = [
     sessionId: { type: "string" }, name: { type: "string" }, sourceUrl: { type: "string" },
     sourcePageUrl: { type: "string" }, license: { type: "string" }, role: { type: "string" },
   }, ["sessionId", "name", "sourceUrl", "role"]),
-  tool("evaluate_asset", "Record separate technical and aesthetic evaluation. Queue approval and resolve it only from the user's agent-chat reply.", {
+  tool("evaluate_asset", "Record separate technical and aesthetic evaluation without inferring approval. Queue a separate explicit user checkpoint through the channel appropriate to that decision.", {
     sessionId: { type: "string" }, assetId: { type: "string" }, technical: { type: "string" },
     aesthetic: { type: "string" }, recommendation: { type: "string" },
   }, ["sessionId", "assetId", "technical", "aesthetic", "recommendation"]),
@@ -329,7 +360,42 @@ const CODEX_TOOLS = [
   }, ["sessionId", "threadId", "attemptId", "error"]),
 ];
 
+const FAST_TOOLS = [
+  tool("session_open", "Create, resume, or claim a session and return only the compact resume projection.", {
+    sessionId: { type: "string" }, requestKey: { type: "string", minLength: 1, maxLength: 200 },
+    name: { type: "string", maxLength: 100 }, intent: { type: "string", maxLength: 20_000 },
+    agentName: { type: "string", maxLength: 100 },
+    workflowSkills: { type: "array", maxItems: 12, items: { type: "string" } },
+  }, ["requestKey"]),
+  tool("session_read", "Read a bounded session projection or unchanged/delta response.", {
+    sessionId: { type: "string" }, view: { enum: ["summary", "resume", "decisions", "threads", "artifacts", "recovery"] },
+    sinceRevision: { type: "integer", minimum: 0 }, afterEvent: { type: "integer", minimum: 0 },
+    threadIds: { type: "array", maxItems: 64, items: { type: "string" } },
+    decisionIds: { type: "array", maxItems: 64, items: { type: "string" } },
+    assetIds: { type: "array", maxItems: 64, items: { type: "string" } },
+  }, ["sessionId"]),
+  tool("session_commit", "Atomically validate and commit up to 64 local bookkeeping operations with one session revision.", {
+    sessionId: { type: "string" }, requestKey: { type: "string", minLength: 1, maxLength: 200 },
+    baseRevision: { type: "integer", minimum: 0 },
+    ops: { type: "array", minItems: 1, maxItems: 64, items: { type: "object", required: ["type"], additionalProperties: true, properties: { type: { type: "string" } } } },
+  }, ["sessionId", "requestKey", "baseRevision", "ops"]),
+  tool("task_wait", "Wait for a decision or generation attempt change without blocking other MCP requests.", {
+    sessionId: { type: "string" }, afterEvent: { type: "integer", minimum: 0 }, timeoutMs: { type: "integer", minimum: 100, maximum: 25_000 },
+    decisionIds: { type: "array", maxItems: 64, items: { type: "string" } },
+    attemptIds: { type: "array", maxItems: 64, items: { type: "string" } },
+  }, ["sessionId"]),
+];
+
 function availableTools() {
+  if (configuredToolProfile === "fast") {
+    const common = [
+      ...FAST_TOOLS,
+      ...BASE_TOOLS.filter((item) => ["ensure_desktop", "list_models", "run_generation_threads"].includes(item.name)),
+    ];
+    return detectedAgentHost() === "codex"
+      ? [...common, ...CODEX_TOOLS.filter((item) => item.name === "register_host_image")]
+      : common;
+  }
   return detectedAgentHost() === "codex" ? [...BASE_TOOLS, ...CODEX_TOOLS] : BASE_TOOLS;
 }
 
@@ -557,7 +623,192 @@ function envelopeValuesEqual(left: unknown, right: unknown) {
   return JSON.stringify(stableEnvelopeValue(left)) === JSON.stringify(stableEnvelopeValue(right));
 }
 
-async function readEnvelope(options: { persistMigration?: boolean } = {}): Promise<Envelope> {
+function compactAttempt(attempt: GenerationAttempt | undefined) {
+  if (!attempt) return undefined;
+  return {
+    id: attempt.id,
+    status: attempt.status,
+    backend: attempt.backend,
+    modelId: attempt.modelId,
+    jobId: attempt.jobId,
+    assetIds: attempt.assetIds,
+    error: attempt.error,
+    progress: attempt.progress,
+    createdAt: attempt.createdAt,
+    updatedAt: attempt.updatedAt,
+    completedAt: attempt.completedAt,
+  };
+}
+
+function compactThread(thread: GenerationThread, detailed = false) {
+  const active = thread.attempts.find((attempt) => !TERMINAL_ATTEMPT_STATUSES.has(attempt.status));
+  const latest = thread.attempts.at(-1);
+  const prepared = Boolean(thread.draft.prompt.trim() || thread.draft.references.length);
+  return {
+    id: thread.id,
+    requestKey: thread.requestKey,
+    name: thread.name,
+    mode: thread.mode,
+    revision: thread.revision,
+    outputRole: thread.outputRole,
+    archivedAt: thread.archivedAt,
+    modelOverrideId: thread.modelOverrideId,
+    prepared,
+    ...(detailed ? {
+      draft: thread.draft,
+      optionOverrides: thread.optionOverrides,
+      providerJsonOverride: thread.providerJsonOverride,
+    } : {}),
+    activeAttempt: compactAttempt(active),
+    latestAttempt: compactAttempt(latest),
+  };
+}
+
+function sessionSummary(session: BridgeSession) {
+  const threads = [...session.threads.image, ...session.threads.video];
+  return {
+    id: session.id,
+    name: session.name,
+    updatedAt: session.updatedAt,
+    revision: session.agent.revision,
+    connection: session.agent.connection,
+    controlMode: session.agent.controlMode,
+    runStatus: session.agent.runStatus,
+    currentStepIds: session.agent.currentStepIds,
+    pendingDecisions: session.agent.decisions.filter((item) => item.status === "pending").length,
+    activeAttempts: threads.flatMap((thread) => thread.attempts).filter((attempt) => !TERMINAL_ATTEMPT_STATUSES.has(attempt.status)).length,
+    actualCostUsd: session.agent.execution.spentUsd,
+  };
+}
+
+function projectSession(session: BridgeSession, args: Record<string, unknown>) {
+  const view = typeof args.view === "string" ? args.view : "resume";
+  if (view === "summary") return sessionSummary(session);
+  if (view === "recovery") return session;
+  if (view === "decisions") {
+    const ids = new Set(Array.isArray(args.decisionIds) ? args.decisionIds.filter((item): item is string => typeof item === "string") : []);
+    return {
+      decisions: session.agent.decisions.filter((decision) => ids.size ? ids.has(decision.id) : decision.status === "pending"),
+    };
+  }
+  if (view === "threads") {
+    const ids = new Set(Array.isArray(args.threadIds) ? args.threadIds.filter((item): item is string => typeof item === "string") : []);
+    const threads = [...session.threads.image, ...session.threads.video]
+      .filter((thread) => !ids.size || ids.has(thread.id))
+      .map((thread) => compactThread(thread, ids.size > 0));
+    return { generationDefaults: session.generationDefaults, threads };
+  }
+  if (view === "artifacts") {
+    const ids = new Set(Array.isArray(args.assetIds) ? args.assetIds.filter((item): item is string => typeof item === "string") : []);
+    return {
+      assets: session.assets.filter((asset) => !ids.size || ids.has(asset.id)),
+      artifacts: session.agent.artifacts.filter((artifact) => !ids.size || ids.has(artifact.assetId)),
+      assembly: session.agent.assembly,
+    };
+  }
+  if (view !== "resume") throw new Error(`Unsupported session view: ${view}`);
+  const pendingDecision = session.agent.decisions.find((decision) => decision.status === "pending");
+  const activeThreads = [...session.threads.image, ...session.threads.video]
+    .filter((thread) => !thread.archivedAt && (
+      thread.attempts.length > 0
+      || Boolean(thread.draft.prompt.trim())
+      || thread.draft.references.length > 0
+    ))
+    .map((thread) => compactThread(thread));
+  return {
+    identity: { id: session.id, name: session.name, mode: session.mode, updatedAt: session.updatedAt },
+    connection: session.agent.connection,
+    controlMode: session.agent.controlMode,
+    runStatus: session.agent.runStatus,
+    brief: session.agent.brief,
+    blockingRequirements: session.agent.requirements.filter((item) => item.blocking && item.status === "missing"),
+    activeSteps: session.agent.plan.filter((item) => item.status === "in_progress" || item.status === "waiting"),
+    pendingDecision,
+    activeThreads,
+    generationDefaults: session.generationDefaults,
+    imageGeneration: session.agent.imageGeneration,
+    modelSelections: session.agent.modelSelections,
+    actualCostUsd: session.agent.execution.spentUsd,
+  };
+}
+
+function sessionReadResult(session: BridgeSession, args: Record<string, unknown>, eventCursor: number) {
+  if (typeof args.sinceRevision === "number" && args.sinceRevision === session.agent.revision) {
+    return { sessionId: session.id, revision: session.agent.revision, eventCursor, unchanged: true };
+  }
+  return {
+    sessionId: session.id,
+    revision: session.agent.revision,
+    eventCursor,
+    view: typeof args.view === "string" ? args.view : "resume",
+    resetRequired: typeof args.afterEvent === "number" && args.afterEvent !== eventCursor,
+    projection: projectSession(session, args),
+    events: [],
+  };
+}
+
+function nextAction(session: BridgeSession) {
+  const decision = session.agent.decisions.find((item) => item.status === "pending");
+  if (decision) return { kind: "decision", id: decision.id };
+  const attempt = [...session.threads.image, ...session.threads.video]
+    .flatMap((thread) => thread.attempts)
+    .find((item) => !TERMINAL_ATTEMPT_STATUSES.has(item.status));
+  return attempt ? { kind: "attempt", id: attempt.id } : undefined;
+}
+
+function shadowComparableSession(value: BridgeSession) {
+  const comparable = structuredClone(value) as BridgeSession & { coreRevision?: number; coreUpdatedAtMs?: number };
+  delete comparable.coreRevision;
+  delete comparable.coreUpdatedAtMs;
+  comparable.agent.revision = 0;
+  delete (comparable.agent as AgentSessionState & { updatedAtMs?: number }).updatedAtMs;
+  return stableEnvelopeValue(comparable);
+}
+
+async function initializeCoreState(envelope: Envelope) {
+  const mode = configuredCoreMode();
+  if (mode === "off") return;
+  await span(dataDirectory, mode === "shadow" ? "core.shadow_import" : "core.import", async () => {
+    await coreRequest(dataDirectory, "session.import_legacy", envelope);
+  }, { sessionCount: envelope.sessions.length });
+}
+
+async function shadowCoreCommit(session: BridgeSession) {
+  if (configuredCoreMode() !== "shadow") return;
+  try {
+    const current = await coreRequest(dataDirectory, "session.read", {
+      sessionId: session.id,
+      view: "recovery",
+    }).catch((error) => {
+      if ((error as Error & { code?: string }).code === "SESSION_NOT_FOUND") return { revision: 0 };
+      throw error;
+    }) as { revision?: number };
+    await coreRequest(dataDirectory, "shadow.commit_snapshot", {
+      sessionId: session.id,
+      baseRevision: current.revision ?? 0,
+      snapshot: session,
+      commandId: currentTrace()?.commandId ?? crypto.randomUUID(),
+      changed: ["legacy-shadow"],
+      eventType: "session.shadowed",
+    });
+    const recovered = await coreRequest(dataDirectory, "session.read", {
+      sessionId: session.id,
+      view: "recovery",
+    }) as { projection?: BridgeSession };
+    recordSpan(dataDirectory, "core.shadow_compare", 0, {
+      semanticMismatch: !recovered.projection
+        || !envelopeValuesEqual(shadowComparableSession(session), shadowComparableSession(recovered.projection)),
+    });
+  } catch (error) {
+    recordSpan(dataDirectory, "core.shadow_error", 0, { failed: true });
+    console.error("Fruit Truck Core shadow failed:", error instanceof Error ? error.message : String(error));
+  }
+}
+
+async function readLegacyEnvelopeUninstrumented(
+  options: { persistMigration?: boolean } = {},
+  consistencyAttempt = 0,
+): Promise<Envelope> {
   if (!existsSync(sessionsPath)) return emptyEnvelope();
   const metadata = await stat(sessionsPath);
   if (metadata.size > MAX_AGENT_READ_BYTES) {
@@ -569,15 +820,24 @@ async function readEnvelope(options: { persistMigration?: boolean } = {}): Promi
   if (Array.isArray(stored.sessions)) {
     value = stored;
   } else if (Array.isArray(stored.sessionFiles)) {
-    const sessions = await Promise.all(stored.sessionFiles.map(async ({ id, file }) => {
-      if (!/^[A-Za-z0-9_-]{1,128}$/.test(id) || !/^[A-Za-z0-9_.-]+\.json$/.test(file)) throw new Error("Agent session index contains an invalid file reference.");
-      const path = join(sessionsDirectory, file);
-      const metadata = await stat(path);
-      if (metadata.size > MAX_AGENT_SESSION_BYTES) throw new Error(`Agent session ${id} exceeds the 50 MB per-session limit.`);
-      const session = JSON.parse(await readFile(path, "utf8")) as BridgeSession;
-      if (session.id !== id) throw new Error(`Agent session file ${file} does not match index ID ${id}.`);
-      return session;
-    }));
+    let sessions: BridgeSession[];
+    try {
+      sessions = await Promise.all(stored.sessionFiles.map(async ({ id, file }) => {
+        if (!/^[A-Za-z0-9_-]{1,128}$/.test(id) || !/^[A-Za-z0-9_.-]+\.json$/.test(file)) throw new Error("Agent session index contains an invalid file reference.");
+        const path = join(sessionsDirectory, file);
+        const metadata = await stat(path);
+        if (metadata.size > MAX_AGENT_SESSION_BYTES) throw new Error(`Agent session ${id} exceeds the 50 MB per-session limit.`);
+        const session = JSON.parse(await readFile(path, "utf8")) as BridgeSession;
+        if (session.id !== id) throw new Error(`Agent session file ${file} does not match index ID ${id}.`);
+        return session;
+      }));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT" && consistencyAttempt < 7) {
+        await new Promise((resolveWait) => setTimeout(resolveWait, 5));
+        return readLegacyEnvelopeUninstrumented(options, consistencyAttempt + 1);
+      }
+      throw error;
+    }
     value = { schemaVersion: 4, revision: stored.revision, sessions };
   } else {
     throw new Error("Agent session store has an unsupported schema.");
@@ -596,7 +856,37 @@ async function readEnvelope(options: { persistMigration?: boolean } = {}): Promi
   return value;
 }
 
-async function writeEnvelope(value: Envelope) {
+async function readCoreEnvelope() {
+  const value = await coreRequest(dataDirectory, "session.read_all", {}) as Envelope;
+  return {
+    ...value,
+    schemaVersion: 4 as const,
+    sessions: value.sessions.map(normalizeBridgeSession),
+  };
+}
+
+async function readCoreSessionEnvelope(sessionId: string): Promise<Envelope> {
+  const value = await coreRequest(dataDirectory, "session.read", {
+    sessionId,
+    view: "recovery",
+  }) as { eventCursor: number; projection: BridgeSession };
+  return {
+    schemaVersion: 4,
+    revision: value.eventCursor,
+    sessions: [normalizeBridgeSession(value.projection)],
+  };
+}
+
+async function readEnvelopeUninstrumented(options: { persistMigration?: boolean } = {}): Promise<Envelope> {
+  if (configuredCoreMode() === "canonical") return readCoreEnvelope();
+  return readLegacyEnvelopeUninstrumented(options);
+}
+
+async function readEnvelope(options: { persistMigration?: boolean } = {}): Promise<Envelope> {
+  return span(dataDirectory, "store.read_normalize", () => readEnvelopeUninstrumented(options));
+}
+
+async function writeLegacyEnvelopeUninstrumented(value: Envelope) {
   await mkdir(dataDirectory, { recursive: true, mode: 0o700 });
   await mkdir(sessionsDirectory, { recursive: true, mode: 0o700 });
   const compacted: Envelope = {
@@ -613,7 +903,7 @@ async function writeEnvelope(value: Envelope) {
   const sessionFiles: Array<{ id: string; file: string }> = [];
   for (const session of compacted.sessions) {
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(session.id)) throw new Error(`Agent session ID ${session.id} is invalid.`);
-    const file = `${session.id}-${compacted.revision}.json`;
+    const file = `${session.id}.json`;
     const path = join(sessionsDirectory, file);
     const temporary = `${path}.${process.pid}.tmp`;
     const serialized = JSON.stringify(session, null, 2);
@@ -634,6 +924,52 @@ async function writeEnvelope(value: Envelope) {
   }
 }
 
+async function writeCoreEnvelope(value: Envelope, sessionIds?: string[]) {
+  const current = await readCoreEnvelope();
+  const currentById = new Map(current.sessions.map((session) => [session.id, session]));
+  const selected = sessionIds?.length ? new Set(sessionIds) : undefined;
+  for (const proposed of value.sessions.filter((session) => !selected || selected.has(session.id))) {
+    const existing = currentById.get(proposed.id);
+    if (existing && envelopeValuesEqual(shadowComparableSession(existing), shadowComparableSession(proposed))) continue;
+    const baseRevision = existing?.agent.revision ?? 0;
+    const commandId = currentTrace()?.commandId ?? crypto.randomUUID();
+    if (existing) {
+      const patches = projectionPatches(existing, proposed);
+      if (!patches.length) continue;
+      await coreRequest(dataDirectory, "session.commit", {
+        sessionId: proposed.id,
+        baseRevision,
+        commandId,
+        requestKey: `adapter-write:${commandId}`,
+        requestHash: requestHash({ sessionId: proposed.id, baseRevision, patches }),
+        ops: [{ type: "apply_projection_patch", actor: "agent", patches }],
+      });
+    } else {
+      await coreRequest(dataDirectory, "session.commit_snapshot", {
+        sessionId: proposed.id,
+        baseRevision,
+        snapshot: proposed,
+        commandId,
+        changed: ["session"],
+        eventType: "session.created",
+      });
+    }
+  }
+}
+
+async function writeEnvelopeUninstrumented(value: Envelope, sessionIds?: string[]) {
+  if (configuredCoreMode() === "canonical") return writeCoreEnvelope(value, sessionIds);
+  return writeLegacyEnvelopeUninstrumented(value);
+}
+
+async function writeEnvelope(value: Envelope, sessionIds?: string[]) {
+  const serializedBytes = Buffer.byteLength(JSON.stringify(value));
+  return span(dataDirectory, "store.write", () => writeEnvelopeUninstrumented(value, sessionIds), {
+    serializedBytes,
+    sessionCount: value.sessions.length,
+  });
+}
+
 function compactThreadHistory(thread: GenerationThread): GenerationThread {
   const active = thread.attempts.filter((attempt) => !TERMINAL_ATTEMPT_STATUSES.has(attempt.status));
   const terminal = thread.attempts.filter((attempt) => TERMINAL_ATTEMPT_STATUSES.has(attempt.status)).slice(-100);
@@ -643,6 +979,7 @@ function compactThreadHistory(thread: GenerationThread): GenerationThread {
 }
 
 async function withSessionStoreLock<T>(action: () => Promise<T>): Promise<T> {
+  if (configuredCoreMode() === "canonical") return action();
   await mkdir(dataDirectory, { recursive: true, mode: 0o700 });
   let handle: Awaited<ReturnType<typeof open>> | undefined;
   for (let attempt = 0; attempt < 200; attempt += 1) {
@@ -674,11 +1011,34 @@ function requiredString(args: Record<string, unknown>, name: string) {
 }
 
 function assertAgentHost(session: BridgeSession) {
-  const connectedHost = session.agent.connection.agentHost;
+  assertAgentHostConnection(session.agent.connection.agentHost);
+}
+
+function assertAgentHostConnection(connectedHost: string | undefined) {
   const currentHost = detectedAgentHost();
   if (connectedHost && connectedHost !== "unknown" && connectedHost !== currentHost) {
     throw new Error(`This session belongs to the ${connectedHost} agent host, but the current MCP server is ${currentHost}.`);
   }
+}
+
+async function readCanonicalSession(args: Record<string, unknown>) {
+  const sessionId = requiredString(args, "sessionId");
+  const requested = {
+    sessionId,
+    view: typeof args.view === "string" ? args.view : "resume",
+    ...(typeof args.sinceRevision === "number" ? { sinceRevision: args.sinceRevision } : {}),
+    ...(typeof args.afterEvent === "number" ? { afterEvent: args.afterEvent } : {}),
+    ...(Array.isArray(args.threadIds) ? { threadIds: args.threadIds } : {}),
+    ...(Array.isArray(args.decisionIds) ? { decisionIds: args.decisionIds } : {}),
+    ...(Array.isArray(args.assetIds) ? { assetIds: args.assetIds } : {}),
+  };
+  const ownership = await coreRequest(dataDirectory, "session.read", {
+    sessionId,
+    view: "resume",
+  }) as { projection?: { connection?: { agentHost?: string } } };
+  assertAgentHostConnection(ownership.projection?.connection?.agentHost);
+  if (requested.view === "resume" && args.sinceRevision == null && args.afterEvent == null) return ownership;
+  return coreRequest(dataDirectory, "session.read", requested);
 }
 
 function assertClaimedSessionOwner(session: BridgeSession) {
@@ -691,6 +1051,35 @@ function assertClaimedSessionOwner(session: BridgeSession) {
 type MutationContext = {
   onRollback: (action: () => Promise<void>) => void;
 };
+
+function bridgeSessionErrors(session: BridgeSession) {
+  const errors = validateAgentState(session.agent);
+  const assetIds = new Set(session.assets.map((asset) => asset.id));
+  for (const artifact of session.agent.artifacts) {
+    if (!assetIds.has(artifact.assetId)) errors.push(`Artifact ${artifact.assetId} points to a missing session asset.`);
+    if (artifact.parentAssetIds.some((id) => !assetIds.has(id))) errors.push(`Artifact ${artifact.assetId} has a missing parent session asset.`);
+  }
+  for (const decision of session.agent.decisions) {
+    if (decision.relatedAssetIds.some((id) => !assetIds.has(id))) errors.push(`Decision ${decision.id} points to a missing session asset.`);
+    if (decision.options.some((option) => option.assetId && !assetIds.has(option.assetId))) errors.push(`Decision ${decision.id} has an option for a missing session asset.`);
+  }
+  const allThreads = [...session.threads.image, ...session.threads.video];
+  const threadIds = allThreads.map((thread) => thread.id);
+  const attemptIds = allThreads.flatMap((thread) => thread.attempts.map((attempt) => attempt.id));
+  if (new Set(threadIds).size !== threadIds.length) errors.push("Generation thread IDs must be unique.");
+  if (new Set(attemptIds).size !== attemptIds.length) errors.push("Generation attempt IDs must be unique.");
+  for (const thread of allThreads) {
+    if (thread.draft.references.some((reference) => !assetIds.has(reference.assetId))) errors.push(`Generation thread ${thread.id} points to a missing input asset.`);
+    if (thread.attempts.some((attempt) => attempt.inputAssetIds.some((id) => !assetIds.has(id)) || attempt.assetIds.some((id) => !assetIds.has(id)))) {
+      errors.push(`Generation thread ${thread.id} has attempt provenance for a missing asset.`);
+    }
+    if (thread.attempts.some((attempt) => attempt.snapshot?.assetBindings.some((binding) => !assetIds.has(binding.assetId)))) errors.push(`Generation thread ${thread.id} has a snapshot for a missing asset.`);
+    if (thread.attempts.some((attempt) => attempt.request && /data:(?:image|video)\/|;base64,/i.test(JSON.stringify(attempt.request)))) errors.push(`Generation thread ${thread.id} contains embedded media in request metadata.`);
+    if (thread.attempts.filter((attempt) => !TERMINAL_ATTEMPT_STATUSES.has(attempt.status)).length > 1) errors.push(`Generation thread ${thread.id} has more than one active attempt.`);
+  }
+  if (session.agent.assembly.clips.some((clip) => !assetIds.has(clip.assetId))) errors.push("Assembly points to a missing session asset.");
+  return errors;
+}
 
 async function mutateSession(
   sessionId: string,
@@ -705,6 +1094,7 @@ async function mutateSession(
     const index = envelope.sessions.findIndex((item) => item.id === sessionId);
     if (index < 0) throw new Error(`Session ${sessionId} does not exist.`);
     const session = envelope.sessions[index];
+    const base = structuredClone(session);
     if (options.requireOwnership !== false) assertClaimedSessionOwner(session);
     const currentRevision = session.agent.revision;
     if (options.expectedRevision != null && options.expectedRevision !== currentRevision) {
@@ -713,44 +1103,69 @@ async function mutateSession(
     const rollbacks: Array<() => Promise<void>> = [];
     try {
       await update(session, { onRollback: (action) => rollbacks.push(action) });
-      const errors = validateAgentState(session.agent);
-      const assetIds = new Set(session.assets.map((asset) => asset.id));
-      for (const artifact of session.agent.artifacts) {
-        if (!assetIds.has(artifact.assetId)) errors.push(`Artifact ${artifact.assetId} points to a missing session asset.`);
-        if (artifact.parentAssetIds.some((id) => !assetIds.has(id))) errors.push(`Artifact ${artifact.assetId} has a missing parent session asset.`);
-      }
-      for (const decision of session.agent.decisions) {
-        if (decision.relatedAssetIds.some((id) => !assetIds.has(id))) errors.push(`Decision ${decision.id} points to a missing session asset.`);
-        if (decision.options.some((option) => option.assetId && !assetIds.has(option.assetId))) errors.push(`Decision ${decision.id} has an option for a missing session asset.`);
-      }
-      const allThreads = [...session.threads.image, ...session.threads.video];
-      const threadIds = allThreads.map((thread) => thread.id);
-      const attemptIds = allThreads.flatMap((thread) => thread.attempts.map((attempt) => attempt.id));
-      if (new Set(threadIds).size !== threadIds.length) errors.push("Generation thread IDs must be unique.");
-      if (new Set(attemptIds).size !== attemptIds.length) errors.push("Generation attempt IDs must be unique.");
-      for (const thread of allThreads) {
-        if (thread.draft.references.some((reference) => !assetIds.has(reference.assetId))) errors.push(`Generation thread ${thread.id} points to a missing input asset.`);
-        if (thread.attempts.some((attempt) => attempt.inputAssetIds.some((id) => !assetIds.has(id)) || attempt.assetIds.some((id) => !assetIds.has(id)))) {
-          errors.push(`Generation thread ${thread.id} has attempt provenance for a missing asset.`);
-        }
-        if (thread.attempts.some((attempt) => attempt.snapshot?.assetBindings.some((binding) => !assetIds.has(binding.assetId)))) errors.push(`Generation thread ${thread.id} has a snapshot for a missing asset.`);
-        if (thread.attempts.some((attempt) => attempt.request && /data:(?:image|video)\/|;base64,/i.test(JSON.stringify(attempt.request)))) errors.push(`Generation thread ${thread.id} contains embedded media in request metadata.`);
-        if (thread.attempts.filter((attempt) => !TERMINAL_ATTEMPT_STATUSES.has(attempt.status)).length > 1) errors.push(`Generation thread ${thread.id} has more than one active attempt.`);
-      }
-      if (session.agent.assembly.clips.some((clip) => !assetIds.has(clip.assetId))) errors.push("Assembly points to a missing session asset.");
+      const errors = bridgeSessionErrors(session);
       if (errors.length) throw new Error(`Agent state is invalid: ${errors.join(" ")}`);
+      if (configuredCoreMode() === "canonical") {
+        const patches = projectionPatches(base, session);
+        if (!patches.length) return base;
+        const commandId = currentTrace()?.commandId ?? crypto.randomUUID();
+        await coreRequest(dataDirectory, "session.commit", {
+          sessionId,
+          baseRevision: currentRevision,
+          commandId,
+          requestKey: `v1-adapter:${commandId}`,
+          requestHash: requestHash({ sessionId, baseRevision: currentRevision, patches }),
+          ops: [{ type: "apply_projection_patch", actor: "agent", patches }],
+        });
+        const recovered = await coreRequest(dataDirectory, "session.read", {
+          sessionId,
+          view: "recovery",
+        }) as { projection: BridgeSession };
+        return normalizeBridgeSession(recovered.projection);
+      }
       session.agent.revision += 1;
       session.agent.updatedAt = new Date().toISOString();
       session.updatedAt = session.agent.updatedAt;
       envelope.sessions[index] = session;
       envelope.revision += 1;
-      await writeEnvelope(envelope);
+      await writeEnvelope(envelope, [sessionId]);
+      await shadowCoreCommit(session);
       return session;
     } catch (error) {
       for (const rollback of rollbacks.reverse()) await rollback().catch(() => undefined);
       throw error;
     }
   });
+}
+
+type ProjectionPatch = { op: "set" | "remove"; path: string; value?: unknown };
+
+function projectionPatches(base: unknown, next: unknown) {
+  const patches: ProjectionPatch[] = [];
+  const coreOwned = new Set([
+    "/id", "/createdAt", "/updatedAt", "/coreRevision", "/coreUpdatedAtMs",
+    "/agent/revision", "/agent/updatedAt", "/agent/updatedAtMs", "/fastReceipts",
+  ]);
+  const segment = (value: string) => value.replaceAll("~", "~0").replaceAll("/", "~1");
+  const walk = (left: unknown, right: unknown, path: string) => {
+    if (coreOwned.has(path) || envelopeValuesEqual(left, right)) return;
+    if (Array.isArray(left) || Array.isArray(right)
+      || !left || typeof left !== "object"
+      || !right || typeof right !== "object") {
+      if (right === undefined) patches.push({ op: "remove", path });
+      else patches.push({ op: "set", path, value: right });
+      return;
+    }
+    for (const key of [...new Set([...Object.keys(left), ...Object.keys(right)])].sort()) {
+      walk(
+        (left as Record<string, unknown>)[key],
+        (right as Record<string, unknown>)[key],
+        `${path}/${segment(key)}`,
+      );
+    }
+  };
+  walk(base, next, "");
+  return patches;
 }
 
 function assertExecutionAllowed(session: BridgeSession, action: string, threadIds: string[] = []) {
@@ -775,7 +1190,7 @@ async function openRouter(path: string, method: "GET" | "POST" = "GET", body?: u
   const credential = JSON.parse(await readFile(credentialsPath, "utf8")) as { openrouter_api_key?: string };
   if (!credential.openrouter_api_key) throw new Error("The Fruit Truck credentials file has no API key.");
   for (let retry = 0; ; retry += 1) {
-    const response = await fetch(`${openRouterBase}${path}`, {
+    const response = await span(dataDirectory, "provider.http", () => fetch(`${openRouterBase}${path}`, {
       method,
       signal: AbortSignal.timeout(180_000),
       headers: {
@@ -785,7 +1200,7 @@ async function openRouter(path: string, method: "GET" | "POST" = "GET", body?: u
         "X-Title": "Fruit Truck Agent Kit",
       },
       body: body === undefined ? undefined : JSON.stringify(body),
-    });
+    }), { retry });
     if (response.ok) return response.json() as Promise<Record<string, unknown>>;
     const message = (await response.text()).slice(0, 2_000);
     if (![429, 503].includes(response.status) || retry >= 3) {
@@ -818,6 +1233,465 @@ function appendActivity(session: BridgeSession, input: Omit<AgentSessionState["a
   });
   if (session.agent.activity.length > MAX_ACTIVITY_ITEMS) {
     session.agent.activity.splice(0, session.agent.activity.length - MAX_ACTIVITY_ITEMS);
+  }
+}
+
+function requiredOpString(op: Record<string, unknown>, name: string) {
+  const value = op[name];
+  if (typeof value !== "string" || !value.trim()) throw new Error(`${op.type}.${name} is required.`);
+  return value.trim();
+}
+
+function refreshCurrentSteps(session: BridgeSession) {
+  session.agent.currentStepIds = session.agent.plan
+    .filter((item) => item.status === "in_progress" || item.status === "waiting")
+    .map((item) => item.id);
+  session.agent.currentStepId = session.agent.currentStepIds[0];
+}
+
+function markBoundStep(session: BridgeSession, stepId: string | undefined, status: PlanStep["status"], detail?: string) {
+  if (!stepId) return;
+  const step = session.agent.plan.find((item) => item.id === stepId);
+  if (!step) throw new Error(`Plan step ${stepId} does not exist.`);
+  const transitionError = validatePlanStepTransition(session.agent, stepId, status);
+  if (transitionError) throw new Error(transitionError);
+  step.status = status;
+  if (status === "failed") session.agent.execution.lastError = detail ?? `${step.title} failed.`;
+  refreshCurrentSteps(session);
+}
+
+function tryMarkBoundStep(session: BridgeSession, stepId: string | undefined, status: PlanStep["status"], detail?: string) {
+  try {
+    markBoundStep(session, stepId, status, detail);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function applyFastOperation(session: BridgeSession, op: Record<string, unknown>, changed: Set<string>) {
+  const type = requiredOpString(op, "type");
+  if (type === "update_brief") {
+    if (!op.patch || typeof op.patch !== "object" || Array.isArray(op.patch)) throw new Error("update_brief.patch must be an object.");
+    session.agent.brief = { ...session.agent.brief, ...(op.patch as Partial<AgentSessionState["brief"]>) };
+    appendActivity(session, { kind: "plan", title: "Updated creative brief", detail: "Brief fields changed by the agent from explicit user direction." });
+    changed.add("brief");
+    return;
+  }
+  if (type === "upsert_requirements") {
+    if (!Array.isArray(op.requirements)) throw new Error("upsert_requirements.requirements must be an array.");
+    for (const incoming of op.requirements as AgentSessionState["requirements"]) {
+      if (!incoming || typeof incoming.id !== "string") throw new Error("Every requirement must have an ID.");
+      const index = session.agent.requirements.findIndex((item) => item.id === incoming.id);
+      if (index >= 0) session.agent.requirements[index] = incoming;
+      else session.agent.requirements.push(incoming);
+      changed.add(`requirement:${incoming.id}`);
+    }
+    return;
+  }
+  if (type === "replace_plan") {
+    if (!Array.isArray(op.steps) || !op.steps.length || op.steps.length > 80) throw new Error("replace_plan.steps must contain 1 to 80 steps.");
+    session.agent.plan = structuredClone(op.steps) as PlanStep[];
+    refreshCurrentSteps(session);
+    appendActivity(session, { kind: "plan", title: "Revised production graph", detail: `${session.agent.plan.length} steps` });
+    changed.add("plan");
+    return;
+  }
+  if (type === "mark_step") {
+    const stepId = requiredOpString(op, "stepId");
+    const status = requiredOpString(op, "status") as PlanStep["status"];
+    if (!["pending", "in_progress", "waiting", "completed", "failed", "skipped"].includes(status)) throw new Error(`Unsupported plan step status: ${status}`);
+    markBoundStep(session, stepId, status, typeof op.detail === "string" ? op.detail : undefined);
+    const step = session.agent.plan.find((item) => item.id === stepId)!;
+    appendActivity(session, { kind: status === "failed" ? "error" : "plan", title: `${step.title}: ${status.replaceAll("_", " ")}`, detail: typeof op.detail === "string" ? op.detail : undefined });
+    changed.add(`plan:${stepId}`);
+    return;
+  }
+  if (type === "create_thread") {
+    const requestKey = requiredOpString(op, "requestKey");
+    const existing = [...session.threads.image, ...session.threads.video].find((thread) => thread.requestKey === requestKey);
+    if (existing) {
+      changed.add(`thread:${existing.id}`);
+      return;
+    }
+    const mode = op.mode === "video" ? "video" : "image";
+    const thread = newBridgeThread(mode, session.threads[mode].length + 1);
+    thread.requestKey = requestKey;
+    thread.name = requiredOpString(op, "name");
+    thread.outputRole = typeof op.outputRole === "string" && op.outputRole.trim() ? op.outputRole.trim() : thread.outputRole;
+    if (typeof op.planStepId === "string") (thread as GenerationThread & { planStepId?: string }).planStepId = op.planStepId;
+    session.threads[mode].push(thread);
+    session.activeThreadIds[mode] = thread.id;
+    appendActivity(session, { kind: "plan", title: `Created generation thread: ${thread.name}` });
+    changed.add(`thread:${thread.id}`);
+    return;
+  }
+  if (type === "update_thread") {
+    const threadId = requiredOpString(op, "threadId");
+    const thread = findGenerationThread(session, threadId);
+    if (!thread) throw new Error(`Generation thread ${threadId} does not exist.`);
+    if (runningThreadAttempt(thread)) throw new Error("An active generation thread cannot be edited.");
+    if (typeof op.expectedThreadRevision === "number" && op.expectedThreadRevision !== thread.revision) {
+      throw new Error(`GENERATION_THREAD_CONFLICT: expected revision ${op.expectedThreadRevision}, but the thread is at revision ${thread.revision}.`);
+    }
+    if (!op.patch || typeof op.patch !== "object" || Array.isArray(op.patch)) throw new Error("update_thread.patch must be an object.");
+    const patch = op.patch as Record<string, unknown>;
+    if (typeof patch.name === "string" && patch.name.trim()) thread.name = patch.name.trim();
+    if (typeof patch.prompt === "string") thread.draft.prompt = patch.prompt;
+    if (typeof patch.outputRole === "string" && patch.outputRole.trim()) thread.outputRole = patch.outputRole.trim();
+    if (patch.useModeDefaultModel === true) thread.modelOverrideId = undefined;
+    else if (typeof patch.modelOverrideId === "string") thread.modelOverrideId = patch.modelOverrideId || undefined;
+    if (typeof patch.enhancePrompt === "boolean") thread.draft.enhancePrompt = patch.enhancePrompt;
+    if (patch.options && typeof patch.options === "object" && !Array.isArray(patch.options)) thread.optionOverrides = structuredClone(patch.options) as GenerationThread["optionOverrides"];
+    if (patch.provider && typeof patch.provider === "object" && !Array.isArray(patch.provider)) thread.providerJsonOverride = JSON.stringify(patch.provider);
+    if (Array.isArray(patch.assetBindings)) {
+      const assetIds = new Set(session.assets.map((asset) => asset.id));
+      const bindings = patch.assetBindings as Array<{ assetId?: unknown; role?: unknown }>;
+      if (bindings.some((binding) => typeof binding.assetId !== "string" || !assetIds.has(binding.assetId))) throw new Error("update_thread references a missing asset.");
+      thread.draft.references = bindings.map((binding, index) => ({
+        assetId: String(binding.assetId),
+        slot: index + 1,
+        role: binding.role === "first_frame" || binding.role === "last_frame" ? binding.role : "reference",
+      }));
+    }
+    thread.revision += 1;
+    thread.updatedAt = new Date().toISOString();
+    appendActivity(session, { kind: "plan", title: `Updated generation thread: ${thread.name}` });
+    changed.add(`thread:${thread.id}`);
+    return;
+  }
+  if (type === "archive_thread" || type === "restore_thread") {
+    const threadId = requiredOpString(op, "threadId");
+    const thread = findGenerationThread(session, threadId);
+    if (!thread) throw new Error(`Generation thread ${threadId} does not exist.`);
+    if (runningThreadAttempt(thread)) throw new Error("An active generation thread cannot be archived or restored.");
+    thread.archivedAt = type === "archive_thread" ? new Date().toISOString() : undefined;
+    thread.updatedAt = new Date().toISOString();
+    changed.add(`thread:${thread.id}`);
+    appendActivity(session, { kind: "plan", title: `${type === "archive_thread" ? "Archived" : "Restored"} generation thread: ${thread.name}` });
+    return;
+  }
+  if (type === "queue_decision") {
+    const requestKey = requiredOpString(op, "requestKey");
+    const existing = session.agent.decisions.find((item) => item.requestKey === requestKey);
+    if (existing) {
+      changed.add(`decision:${existing.id}`);
+      return;
+    }
+    if (op.presentation === "assembly_review") throw new Error("Assembly review checkpoints are created only by propose_assembly.");
+    const channel = op.channel === "fruit_truck_ui" ? "fruit_truck_ui" : "agent_chat";
+    const requestedStepId = typeof op.planStepId === "string" ? op.planStepId : undefined;
+    const relatedStepId = requestedStepId && session.agent.plan.some((step) => step.id === requestedStepId)
+      ? requestedStepId
+      : undefined;
+    const decision: AgentDecision = {
+      id: `decision-${crypto.randomUUID()}`,
+      requestKey,
+      semanticKey: typeof op.semanticKey === "string" ? op.semanticKey as AgentDecisionSemanticKey : undefined,
+      title: requiredOpString(op, "title"),
+      prompt: requiredOpString(op, "prompt"),
+      kind: op.kind === "approval" || op.kind === "upload" || op.kind === "feedback" ? op.kind : "choice",
+      channel,
+      presentation: typeof op.presentation === "string" ? op.presentation as AgentDecision["presentation"] : "form",
+      selectionMode: typeof op.selectionMode === "string" ? op.selectionMode as AgentDecision["selectionMode"] : "single",
+      minSelections: typeof op.minSelections === "number" ? op.minSelections : undefined,
+      maxSelections: typeof op.maxSelections === "number" ? op.maxSelections : undefined,
+      allowNote: op.allowNote === true,
+      status: "pending",
+      blocking: op.blocking === true,
+      relatedStepId,
+      relatedAssetIds: Array.isArray(op.relatedAssetIds) ? op.relatedAssetIds.filter((item): item is string => typeof item === "string") : [],
+      relatedThreadIds: Array.isArray(op.relatedThreadIds) ? op.relatedThreadIds.filter((item): item is string => typeof item === "string") : [],
+      options: Array.isArray(op.options) ? op.options as AgentDecision["options"] : [],
+      createdAt: new Date().toISOString(),
+    };
+    session.agent.decisions.push(decision);
+    if (decision.blocking && !decision.relatedThreadIds?.length && session.agent.controlMode === "agent" && session.agent.runStatus === "working") session.agent.runStatus = "waiting";
+    if (decision.channel === "fruit_truck_ui") session.agent.uiAttention = { requestedAt: decision.createdAt, decisionId: decision.id };
+    if (decision.relatedStepId && decision.blocking) tryMarkBoundStep(session, decision.relatedStepId, "waiting");
+    appendActivity(session, { kind: "decision", title: `Requested: ${decision.title}`, detail: decision.prompt });
+    changed.add(`decision:${decision.id}`);
+    return;
+  }
+  if (type === "resolve_decision") {
+    const decisionId = requiredOpString(op, "decisionId");
+    const target = session.agent.decisions.find((item) => item.id === decisionId);
+    if (!target) throw new Error(`Decision ${decisionId} does not exist.`);
+    if ((target.channel ?? "agent_chat") !== "agent_chat") throw new Error("This decision must be completed in Fruit Truck.");
+    if (target.semanticKey === "custom_skill_approval" || target.semanticKey === "custom_skill_activation") {
+      throw new Error("Custom Skill filesystem changes require the legacy dedicated resolution tool.");
+    }
+    const optionId = typeof op.optionId === "string" ? op.optionId : undefined;
+    const previousRevision = session.agent.revision;
+    const previousUpdatedAt = session.agent.updatedAt;
+    session.agent = {
+      ...resolveAgentDecisionFromChat(
+        session.agent,
+        decisionId,
+        requiredOpString(op, "userResponse"),
+        optionId,
+        typeof op.note === "string" ? op.note : undefined,
+        Array.isArray(op.relatedAssetIds) ? op.relatedAssetIds.filter((item): item is string => typeof item === "string") : [],
+      ),
+      revision: previousRevision,
+      updatedAt: previousUpdatedAt,
+    };
+    const modelMode = target.semanticKey === "model_selection_image" ? "image" : target.semanticKey === "model_selection_video" ? "video" : undefined;
+    if (modelMode && optionId) {
+      if (target.relatedThreadIds?.length) {
+        for (const threadId of target.relatedThreadIds) {
+          const thread = findGenerationThread(session, threadId);
+          if (!thread || thread.mode !== modelMode) throw new Error(`Model decision thread ${threadId} is missing or has the wrong mode.`);
+          thread.modelOverrideId = optionId;
+        }
+      } else {
+        session.generationDefaults.modelIds[modelMode] = optionId;
+      }
+    }
+    changed.add(`decision:${decisionId}`);
+    if (target.relatedStepId) changed.add(`plan:${target.relatedStepId}`);
+    return;
+  }
+  if (type === "evaluate_artifact") {
+    if (op.approval !== undefined || op.confirmedByUser !== undefined) throw new Error("Artifact approval requires a separate explicit user checkpoint.");
+    const assetId = requiredOpString(op, "assetId");
+    const artifact = session.agent.artifacts.find((item) => item.assetId === assetId);
+    if (!artifact) throw new Error(`Artifact ${assetId} does not exist.`);
+    artifact.evaluation = {
+      technical: requiredOpString(op, "technical"),
+      aesthetic: requiredOpString(op, "aesthetic"),
+      recommendation: requiredOpString(op, "recommendation"),
+    };
+    appendActivity(session, { kind: "evaluation", title: `Evaluated ${session.assets.find((item) => item.id === assetId)?.name ?? assetId}`, detail: artifact.evaluation.recommendation, assetIds: [assetId] });
+    changed.add(`artifact:${assetId}`);
+    return;
+  }
+  if (type === "propose_assembly") {
+    const requestKey = requiredOpString(op, "requestKey");
+    const existing = session.agent.decisions.find((item) => item.requestKey === requestKey);
+    if (existing) {
+      changed.add(`decision:${existing.id}`);
+      return;
+    }
+    const clips = Array.isArray(op.clips) ? op.clips as AgentSessionState["assembly"]["clips"] : [];
+    if (!clips.length || clips.length > 24) throw new Error("propose_assembly.clips must contain 1 to 24 clips.");
+    const assetIds = new Set(session.assets.map((asset) => asset.id));
+    for (const clip of clips) {
+      if (!assetIds.has(clip.assetId)) throw new Error(`Assembly asset ${clip.assetId} does not exist.`);
+      if (clip.startSeconds < 0 || clip.endSeconds <= clip.startSeconds) throw new Error(`Assembly clip ${clip.assetId} has an invalid range.`);
+      const artifact = session.agent.artifacts.find((item) => item.assetId === clip.assetId);
+      const asset = session.assets.find((item) => item.id === clip.assetId);
+      if (asset?.kind !== "video" || artifact?.approval !== "approved") throw new Error("Every proposed assembly clip must be an approved video artifact.");
+    }
+    session.agent.assembly = {
+      ...session.agent.assembly,
+      clips: clips.toSorted((left, right) => left.order - right.order).map((clip) => ({ ...clip, id: clip.id || `assembly-${crypto.randomUUID()}` })),
+      status: "ready",
+      error: undefined,
+    };
+    const decision: AgentDecision = {
+      id: `decision-${crypto.randomUUID()}`,
+      requestKey,
+      title: "Review final video assembly",
+      prompt: "Review clip order and usable ranges in Fruit Truck, then render the final video.",
+      kind: "approval",
+      channel: "fruit_truck_ui",
+      presentation: "assembly_review",
+      selectionMode: "single",
+      minSelections: 1,
+      maxSelections: 1,
+      status: "pending",
+      blocking: true,
+      relatedAssetIds: clips.map((clip) => clip.assetId),
+      options: [
+        { id: "rendered", label: "Render final video", recommended: true },
+        { id: "revise", label: "Request a new assembly plan" },
+      ],
+      createdAt: new Date().toISOString(),
+    };
+    session.agent.decisions.push(decision);
+    session.agent.runStatus = "waiting";
+    session.agent.uiAttention = { requestedAt: decision.createdAt, decisionId: decision.id };
+    appendActivity(session, { kind: "assembly", title: "Proposed final video assembly", detail: `${clips.length} clip(s)` });
+    changed.add("assembly");
+    changed.add(`decision:${decision.id}`);
+    return;
+  }
+  if (type === "fail_attempt") {
+    const threadId = requiredOpString(op, "threadId");
+    const attemptId = requiredOpString(op, "attemptId");
+    const error = requiredOpString(op, "error");
+    const { thread } = updateThreadAttempt(session, threadId, attemptId, {
+      status: "failed",
+      error,
+      completedAt: new Date().toISOString(),
+    });
+    const stepId = (thread as GenerationThread & { planStepId?: string }).planStepId;
+    const stepChanged = stepId ? tryMarkBoundStep(session, stepId, "failed", error) : false;
+    appendActivity(session, { kind: "error", title: `${thread.name} failed`, detail: error });
+    changed.add(`attempt:${attemptId}`);
+    if (stepId && stepChanged) changed.add(`plan:${stepId}`);
+    return;
+  }
+  if (type === "bind_step") {
+    const entityType = requiredOpString(op, "entityType");
+    const entityId = requiredOpString(op, "entityId");
+    const planStepId = requiredOpString(op, "planStepId");
+    if (!session.agent.plan.some((item) => item.id === planStepId)) throw new Error(`Plan step ${planStepId} does not exist.`);
+    if (entityType === "decision") {
+      const decision = session.agent.decisions.find((item) => item.id === entityId);
+      if (!decision) throw new Error(`Decision ${entityId} does not exist.`);
+      decision.relatedStepId = planStepId;
+    } else if (entityType === "thread") {
+      const thread = findGenerationThread(session, entityId);
+      if (!thread) throw new Error(`Generation thread ${entityId} does not exist.`);
+      (thread as GenerationThread & { planStepId?: string }).planStepId = planStepId;
+    } else {
+      throw new Error("bind_step.entityType must be decision or thread.");
+    }
+    changed.add(`${entityType}:${entityId}`);
+    return;
+  }
+  throw new Error(`Unsupported session_commit operation: ${type}`);
+}
+
+function requestHash(value: unknown) {
+  return createHash("sha256").update(JSON.stringify(stableEnvelopeValue(value))).digest("hex");
+}
+
+async function commitFastOperations(args: Record<string, unknown>): Promise<CommandReceipt> {
+  const sessionId = requiredString(args, "sessionId");
+  const requestKey = requiredString(args, "requestKey");
+  const baseRevision = typeof args.baseRevision === "number" ? args.baseRevision : -1;
+  const ops = Array.isArray(args.ops) ? args.ops : [];
+  if (!ops.length || ops.length > 64 || ops.some((op) => !op || typeof op !== "object" || Array.isArray(op))) {
+    throw new Error("ops must contain 1 to 64 typed objects.");
+  }
+  const hash = requestHash({ sessionId, ops });
+  if (configuredCoreMode() === "canonical") {
+    const session = (await readEnvelope()).sessions.find((item) => item.id === sessionId);
+    if (!session) throw new Error(`Session ${sessionId} does not exist.`);
+    assertClaimedSessionOwner(session);
+    const commandId = currentTrace()?.commandId ?? crypto.randomUUID();
+    let revision = baseRevision;
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      try {
+        return await coreRequest(dataDirectory, "session.commit", {
+          sessionId,
+          baseRevision: revision,
+          commandId,
+          requestKey,
+          requestHash: hash,
+          ops,
+        }) as CommandReceipt;
+      } catch (error) {
+        if (!String(error).includes("SESSION_CONFLICT") || attempt === 3) throw error;
+        const latest = await coreRequest(dataDirectory, "session.read", {
+          sessionId,
+          view: "summary",
+        }) as { revision?: number };
+        if (typeof latest.revision !== "number") throw error;
+        revision = latest.revision;
+      }
+    }
+    throw new Error("SESSION_CONFLICT: Core remained busy after bounded retries.");
+  }
+  return withSessionStoreLock(async () => {
+    const envelope = await readEnvelope();
+    const index = envelope.sessions.findIndex((item) => item.id === sessionId);
+    if (index < 0) throw new Error(`Session ${sessionId} does not exist.`);
+    const session = envelope.sessions[index];
+    assertClaimedSessionOwner(session);
+    const existing = session.fastReceipts?.find((item) => item.requestKey === requestKey);
+    if (existing) {
+      if (existing.requestHash !== hash) throw new Error("IDEMPOTENCY_KEY_REUSED: requestKey was already used with different operations.");
+      return { ...existing.receipt, replayed: true };
+    }
+    if (baseRevision !== session.agent.revision) {
+      throw new Error(`AGENT_SESSION_CONFLICT: expected revision ${baseRevision}, but the shared session is at revision ${session.agent.revision}. Reload before saving.`);
+    }
+    const working = structuredClone(session);
+    const changed = new Set<string>();
+    for (const op of ops as Array<Record<string, unknown>>) applyFastOperation(working, op, changed);
+    const errors = bridgeSessionErrors(working);
+    if (errors.length) throw new Error(`Agent state is invalid: ${errors.join(" ")}`);
+    working.agent.revision += 1;
+    working.agent.updatedAt = new Date().toISOString();
+    working.updatedAt = working.agent.updatedAt;
+    envelope.revision += 1;
+    const receipt: CommandReceipt = {
+      ok: true,
+      sessionId,
+      revision: working.agent.revision,
+      commandId: currentTrace()?.commandId ?? crypto.randomUUID(),
+      changed: [...changed].slice(0, 64).map((item) => item.slice(0, 160)),
+      eventCursor: envelope.revision,
+      next: nextAction(working),
+      replayed: false,
+    };
+    working.fastReceipts = [...(working.fastReceipts ?? []).filter((item) => item.requestKey !== requestKey).slice(-99), {
+      requestKey,
+      requestHash: hash,
+      receipt,
+    }];
+    envelope.sessions[index] = working;
+    try {
+      await writeEnvelope(envelope, [sessionId]);
+    } catch (error) {
+      if (!String(error).includes("SESSION_CONFLICT")) throw error;
+      const latest = (await readEnvelope()).sessions.find((item) => item.id === sessionId);
+      const replay = latest?.fastReceipts?.find((item) => item.requestKey === requestKey);
+      if (!replay) throw error;
+      if (replay.requestHash !== hash) throw new Error("IDEMPOTENCY_KEY_REUSED: requestKey was already used with different operations.");
+      return { ...replay.receipt, replayed: true };
+    }
+    await shadowCoreCommit(working);
+    return receipt;
+  });
+}
+
+async function waitForEnvelopeChange(
+  afterRevision: number,
+  timeoutMs: number,
+  filters: { sessionId?: string; eventTypes?: string[] } = {},
+) {
+  if (configuredCoreMode() === "canonical") {
+    await coreRequest(dataDirectory, "event.wait", {
+      afterEvent: afterRevision,
+      timeoutMs: Math.min(25_000, Math.max(100, timeoutMs)),
+      ...(filters.sessionId ? { sessionId: filters.sessionId } : {}),
+      ...(filters.eventTypes?.length ? { eventTypes: filters.eventTypes } : {}),
+    }, Math.min(26_000, Math.max(1_000, timeoutMs + 1_000)));
+    return filters.sessionId
+      ? readCoreSessionEnvelope(filters.sessionId)
+      : readCoreEnvelope();
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const iterator = watch(dataDirectory, { signal: controller.signal })[Symbol.asyncIterator]();
+  const watchNext = () => iterator.next().then(
+    (value) => ({ value }),
+    (error: unknown) => ({ error }),
+  );
+  let nextEvent = watchNext();
+  try {
+    let envelope = await readEnvelope();
+    if (envelope.revision > afterRevision) return envelope;
+    while (true) {
+      const outcome = await nextEvent;
+      if ("error" in outcome) {
+        if ((outcome.error as Error).name === "AbortError") return envelope;
+        throw outcome.error;
+      }
+      nextEvent = watchNext();
+      envelope = await readEnvelope();
+      if (envelope.revision > afterRevision) return envelope;
+    }
+  } finally {
+    clearTimeout(timeout);
+    controller.abort();
+    await nextEvent;
+    await iterator.return?.();
   }
 }
 
@@ -1086,6 +1960,7 @@ function bridgeAsset(session: BridgeSession, input: Record<string, unknown>) {
     localPath: isAbsolute(source) ? source : undefined,
     externalUrl: /^https?:\/\//i.test(source) ? source : undefined,
     duration: typeof input.duration === "number" ? input.duration : undefined,
+    jobId: typeof input.jobId === "string" ? input.jobId : undefined,
     sourceUrl: typeof input.sourceUrl === "string" ? input.sourceUrl : undefined,
     sourcePageUrl: typeof input.sourcePageUrl === "string" ? input.sourcePageUrl : undefined,
     license: typeof input.license === "string" ? input.license : undefined,
@@ -1721,8 +2596,10 @@ async function pollThreadVideoAttempts(sessionId: string, attemptIds: string[]) 
             name: `agent-video-${jobId}.mp4`, kind: "video", mimeType: "video/mp4", origin: "generated", source: preservedSource,
             role: snapshot?.outputRole ?? currentThread.outputRole,
             parentAssetIds: currentAttempt.inputAssetIds,
-            prompt: currentAttempt.enhancedPrompt ?? snapshot?.enhancedPrompt ?? snapshot?.prompt,
+            prompt: currentAttempt.enhancedPrompt?.trim() || snapshot?.enhancedPrompt?.trim() || snapshot?.prompt,
             modelId: snapshot?.modelId ?? currentAttempt.modelId,
+            duration: typeof snapshot?.options.duration === "number" ? snapshot.options.duration : undefined,
+            jobId,
             generationBackend: "openrouter", threadId, attemptId: attempt.id,
           });
           updateThreadAttempt(current, threadId, attempt.id, { ...polling, status: "completed", assetIds: [asset.id], progress: 100, completedAt: now });
@@ -1771,7 +2648,64 @@ async function pollThreadVideoAttempts(sessionId: string, attemptIds: string[]) 
   }));
 }
 
-async function handleTool(name: string, args: Record<string, unknown>): Promise<ToolResult> {
+function createBridgeSession(
+  args: Record<string, unknown>,
+  fastOpenRequestKey?: string,
+  deterministicId?: string,
+  fastOpenRequestHash?: string,
+): BridgeSession {
+  const intent = requiredString(args, "intent");
+  const createdAt = new Date().toISOString();
+  const agent = exposeAgentSession(createAgentState(intent), intent);
+  for (const skill of Array.isArray(args.workflowSkills) ? args.workflowSkills : []) {
+    if (typeof skill === "string" && skill.trim()) agent.appliedSkills.push({ name: skill.trim(), version: "user-selected", source: "workflow" });
+  }
+  const imageThread = newBridgeThread("image");
+  const videoThread = newBridgeThread("video");
+  return {
+    id: deterministicId ?? `session-${crypto.randomUUID()}`,
+    name: typeof args.name === "string" && args.name.trim() ? args.name.trim() : intent.slice(0, 54),
+    createdAt,
+    updatedAt: createdAt,
+    mode: /video|reel|shorts|film|clip|영상|릴스|쇼츠|동영상/i.test(intent) ? "video" : "image",
+    generationDefaults: {
+      modelIds: { image: "", video: "" },
+      options: { image: {}, video: {} },
+      providerJson: { image: "", video: "" },
+    },
+    threads: { image: [imageThread], video: [videoThread] },
+    activeThreadIds: { image: imageThread.id, video: videoThread.id },
+    assets: [],
+    agent,
+    fastOpenRequestKey,
+    fastOpenRequestHash,
+  };
+}
+
+function claimBridgeSession(session: BridgeSession, agentName: string) {
+  if (session.agent.connection.status === "claimed") {
+    throw new Error(`Session is already claimed by ${session.agent.connection.claimedBy ?? "another agent"}.`);
+  }
+  if (session.agent.connection.status !== "waiting") {
+    throw new Error("Session must be published in connection-waiting state before it can be claimed.");
+  }
+  const claimedAt = new Date().toISOString();
+  session.agent.connection = {
+    status: "claimed",
+    claimedAt,
+    claimedBy: agentName,
+    agentHost: detectedAgentHost(),
+  };
+  session.agent.imageGeneration = detectedAgentHost() === "codex"
+    ? { status: "unselected" }
+    : { status: "selected", backend: "openrouter", selectedBy: "policy", selectedAt: claimedAt };
+  session.agent.controlMode = "agent";
+  session.agent.runStatus = "working";
+  session.agent.pausedReason = undefined;
+  appendActivity(session, { kind: "handover", title: `Session claimed by ${session.agent.connection.claimedBy}` });
+}
+
+async function handleToolUninstrumented(name: string, args: Record<string, unknown>): Promise<ToolResult> {
   if (new Set([
     "record_user_model_selection",
     "set_control_mode",
@@ -1785,38 +2719,152 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
   ]).has(name)) {
     throw new Error(`${name} is not agent-accessible.`);
   }
-  if (name === "create_session") {
-    const intent = requiredString(args, "intent");
-    const createdAt = new Date().toISOString();
-    const agent = exposeAgentSession(createAgentState(intent), intent);
-    for (const skill of Array.isArray(args.workflowSkills) ? args.workflowSkills : []) {
-      if (typeof skill === "string" && skill.trim()) agent.appliedSkills.push({ name: skill.trim(), version: "user-selected", source: "workflow" });
+  if (name === "session_open") {
+    const requestKey = requiredString(args, "requestKey");
+    const requestedSessionId = typeof args.sessionId === "string" && args.sessionId.trim() ? args.sessionId.trim() : undefined;
+    const openHash = requestHash({
+      requestKey,
+      intent: args.intent,
+      name: args.name,
+      workflowSkills: args.workflowSkills,
+    });
+    const carriesCreationArguments = args.intent !== undefined || args.name !== undefined || args.workflowSkills !== undefined;
+    let envelope = await readEnvelope();
+    let session = requestedSessionId
+      ? envelope.sessions.find((item) => item.id === requestedSessionId)
+      : envelope.sessions.find((item) => item.fastOpenRequestKey === requestKey);
+    let replayed = session?.fastOpenRequestKey === requestKey;
+    let changed: string[] = [];
+    if (session?.fastOpenRequestKey && session.fastOpenRequestKey !== requestKey) {
+      throw new Error("IDEMPOTENCY_KEY_REUSED: sessionId belongs to a different session_open requestKey.");
     }
-    const id = `session-${crypto.randomUUID()}`;
-    const imageThread = newBridgeThread("image");
-    const videoThread = newBridgeThread("video");
-    const session: BridgeSession = {
-      id,
-      name: typeof args.name === "string" && args.name.trim() ? args.name.trim() : intent.slice(0, 54),
-      createdAt,
-      updatedAt: createdAt,
-      mode: /video|reel|shorts|film|clip|영상|릴스|쇼츠|동영상/i.test(intent) ? "video" : "image",
-      generationDefaults: {
-        modelIds: { image: "", video: "" },
-        options: { image: {}, video: {} },
-        providerJson: { image: "", video: "" },
+    if (carriesCreationArguments && session?.fastOpenRequestHash && session.fastOpenRequestHash !== openHash) {
+      throw new Error("IDEMPOTENCY_KEY_REUSED: requestKey was already used with different session_open arguments.");
+    }
+    if (requestedSessionId && !session) throw new Error(`Session ${requestedSessionId} does not exist.`);
+    if (!session) {
+      const deterministicId = `session-${createHash("sha256").update(requestKey).digest("hex").slice(0, 32)}`;
+      session = createBridgeSession(args, requestKey, deterministicId, openHash);
+      if (typeof args.agentName === "string" && args.agentName.trim()) claimBridgeSession(session, args.agentName.trim());
+      session.agent.revision = 1;
+      envelope.sessions.push(session);
+      envelope.revision += 1;
+      changed = ["session"];
+      try {
+        await writeEnvelope(envelope, [session.id]);
+        envelope = await readEnvelope();
+        session = envelope.sessions.find((item) => item.id === deterministicId) ?? session;
+      } catch (error) {
+        if (!String(error).includes("SESSION_CONFLICT")) throw error;
+        envelope = await readEnvelope();
+        const concurrent = envelope.sessions.find((item) => item.id === deterministicId);
+        if (!concurrent || concurrent.fastOpenRequestKey !== requestKey) throw error;
+        if (concurrent.fastOpenRequestHash && concurrent.fastOpenRequestHash !== openHash) {
+          throw new Error("IDEMPOTENCY_KEY_REUSED: requestKey was already used with different session_open arguments.");
+        }
+        session = concurrent;
+        changed = [];
+        replayed = true;
+      }
+      await shadowCoreCommit(session);
+    } else if (typeof args.agentName === "string" && args.agentName.trim() && session.agent.connection.status === "waiting") {
+      session = await mutateSession(session.id, (current) => claimBridgeSession(current, args.agentName as string), { requireOwnership: false });
+      envelope = await readEnvelope();
+      changed = ["connection"];
+      replayed = false;
+    } else {
+      assertAgentHost(session);
+    }
+    const opened = configuredCoreMode() === "canonical"
+      ? await readCanonicalSession({ sessionId: session.id, view: "resume" }) as Record<string, unknown>
+      : sessionReadResult(session, { view: "resume" }, envelope.revision);
+    return {
+      receipt: {
+        ok: true,
+        sessionId: session.id,
+        revision: session.agent.revision,
+        commandId: currentTrace()?.commandId ?? crypto.randomUUID(),
+        changed,
+        eventCursor: envelope.revision,
+        next: nextAction(session),
+        replayed,
       },
-      threads: { image: [imageThread], video: [videoThread] },
-      activeThreadIds: { image: imageThread.id, video: videoThread.id },
-      assets: [],
-      agent,
+      ...opened,
     };
+  }
+  if (name === "session_read") {
+    if (configuredCoreMode() === "canonical") return readCanonicalSession(args) as Promise<ToolResult>;
+    const envelope = await readEnvelope();
+    const sessionId = requiredString(args, "sessionId");
+    const session = envelope.sessions.find((item) => item.id === sessionId);
+    if (!session) throw new Error(`Session ${sessionId} does not exist.`);
+    assertAgentHost(session);
+    return sessionReadResult(session, args, envelope.revision);
+  }
+  if (name === "session_commit") return commitFastOperations(args);
+  if (name === "task_wait") {
+    const sessionId = requiredString(args, "sessionId");
+    const timeoutMs = typeof args.timeoutMs === "number" ? Math.min(25_000, Math.max(100, args.timeoutMs)) : 20_000;
+    const decisionIds = Array.isArray(args.decisionIds) ? args.decisionIds.filter((item): item is string => typeof item === "string") : [];
+    const attemptIds = Array.isArray(args.attemptIds) ? args.attemptIds.filter((item): item is string => typeof item === "string") : [];
+    if (!decisionIds.length && !attemptIds.length) throw new Error("task_wait requires at least one decisionId or attemptId.");
+    let envelope = configuredCoreMode() === "canonical"
+      ? await readCoreSessionEnvelope(sessionId)
+      : await readEnvelope();
+    let session = envelope.sessions.find((item) => item.id === sessionId);
+    if (!session) throw new Error(`Session ${sessionId} does not exist.`);
+    assertAgentHost(session);
+    const selectedDecisions = () => session!.agent.decisions.filter((item) => decisionIds.includes(item.id));
+    const selectedAttempts = () => [...session!.threads.image, ...session!.threads.video].flatMap((thread) =>
+      thread.attempts.filter((attempt) => attemptIds.includes(attempt.id)).map((attempt) => ({ threadId: thread.id, ...compactAttempt(attempt)! })),
+    );
+    if (selectedDecisions().length !== decisionIds.length || selectedAttempts().length !== attemptIds.length) {
+      throw new Error("One or more requested decisions or attempts do not exist.");
+    }
+    const terminal = () => selectedDecisions().every((item) => item.status === "resolved")
+      && selectedAttempts().every((item) => TERMINAL_ATTEMPT_STATUSES.has(item.status));
+    let afterEvent = typeof args.afterEvent === "number" ? args.afterEvent : envelope.revision;
+    const deadline = Date.now() + timeoutMs;
+    const waitStarted = process.hrtime.bigint();
+    try {
+      while (!terminal() && Date.now() < deadline) {
+        const remaining = Math.max(100, deadline - Date.now());
+        envelope = await waitForEnvelopeChange(afterEvent, remaining, {
+          sessionId,
+          eventTypes: ["session.changed", "session.desktop_changed", "attempt.changed", "attempt.terminal"],
+        });
+        afterEvent = envelope.revision;
+        session = envelope.sessions.find((item) => item.id === sessionId);
+        if (!session) throw new Error(`Session ${sessionId} does not exist.`);
+      }
+    } finally {
+      recordSpan(dataDirectory, decisionIds.length ? "mcp.human_gate" : "mcp.task_wait", Number((process.hrtime.bigint() - waitStarted) / 1_000n), {
+        decisionCount: decisionIds.length,
+        attemptCount: attemptIds.length,
+      });
+    }
+    if (!session) {
+      session = envelope.sessions.find((item) => item.id === sessionId);
+      if (!session) throw new Error(`Session ${sessionId} does not exist.`);
+    }
+    return {
+      status: terminal() ? "terminal" : "pending",
+      sessionId,
+      revision: session.agent.revision,
+      eventCursor: envelope.revision,
+      decisions: selectedDecisions().map((item) => ({ id: item.id, status: item.status, resolution: item.resolution })),
+      attempts: selectedAttempts(),
+    };
+  }
+  if (name === "create_session") {
+    const session = createBridgeSession(args);
     await withSessionStoreLock(async () => {
       const envelope = await readEnvelope();
       envelope.sessions.push(session);
       envelope.revision += 1;
-      await writeEnvelope(envelope);
+      await writeEnvelope(envelope, [session.id]);
     });
+    await shadowCoreCommit(session);
     return session;
   }
   if (name === "list_sessions") {
@@ -1833,6 +2881,28 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
     await mutateSession(sessionId, (session) => {
       session.agent.uiAttention = { requestedAt: new Date().toISOString() };
     }, { requireOwnership: false });
+    try {
+      let presence = await coreRequest(dataDirectory, "desktop.status", {}) as { connected?: boolean };
+      let launched = false;
+      if (!presence.connected) {
+        launched = await launchDesktop();
+        if (launched) {
+          presence = await coreRequest(dataDirectory, "desktop.wait_connected", { timeoutMs: 8_000 }, 9_000) as { connected?: boolean };
+        }
+      }
+      return presence.connected
+        ? { status: "ready", launched, version: "core-connected", credentialConfigured: await credentialConfigured(), sessionId }
+        : {
+          status: "user_action_required",
+          launched,
+          sessionId,
+          message: platform() === "darwin"
+            ? "Fruit Truck could not be opened automatically. Ask the user to open Fruit Truck, then call ensure_desktop again."
+            : "Automatic launch is currently available on macOS. Ask the user to open Fruit Truck, then call ensure_desktop again.",
+        };
+    } catch (error) {
+      if (configuredCoreMode() === "canonical") throw error;
+    }
     let runtime = await readDesktopRuntime();
     let launched = false;
     if (!runtime) {
@@ -1864,17 +2934,37 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
   }
   if (name === "get_session") {
     const id = requiredString(args, "sessionId");
-    const session = (await readEnvelope()).sessions.find((item) => item.id === id);
+    if (configuredCoreMode() === "canonical" && (
+      typeof args.view === "string"
+      || typeof args.sinceRevision === "number"
+      || typeof args.afterEvent === "number"
+    )) {
+      return readCanonicalSession({ ...args, sessionId: id }) as Promise<ToolResult>;
+    }
+    const envelope = await readEnvelope();
+    const session = envelope.sessions.find((item) => item.id === id);
     if (!session) throw new Error(`Session ${id} does not exist.`);
-    return session;
+    return typeof args.view === "string" || typeof args.sinceRevision === "number" || typeof args.afterEvent === "number"
+      ? sessionReadResult(session, args, envelope.revision)
+      : session;
   }
   if (name === "await_decision") {
     const sessionId = requiredString(args, "sessionId");
     const decisionId = requiredString(args, "decisionId");
     const timeoutMs = typeof args.timeoutMs === "number" ? Math.min(25_000, Math.max(100, args.timeoutMs)) : 20_000;
     const deadline = Date.now() + timeoutMs;
+    let afterRevision = -1;
     while (true) {
-      const session = (await readEnvelope()).sessions.find((item) => item.id === sessionId);
+      const envelope = afterRevision < 0
+        ? configuredCoreMode() === "canonical"
+          ? await readCoreSessionEnvelope(sessionId)
+          : await readEnvelope()
+        : await waitForEnvelopeChange(afterRevision, Math.max(100, deadline - Date.now()), {
+          sessionId,
+          eventTypes: ["session.changed", "session.desktop_changed"],
+        });
+      afterRevision = envelope.revision;
+      const session = envelope.sessions.find((item) => item.id === sessionId);
       if (!session) throw new Error(`Session ${sessionId} does not exist.`);
       assertAgentHost(session);
       const decision = session.agent.decisions.find((item) => item.id === decisionId);
@@ -1886,34 +2976,11 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
         return { status: "resolved", decisionId, resolution: decision.resolution, revision: session.agent.revision };
       }
       if (Date.now() >= deadline) return { status: "pending", decisionId, revision: session.agent.revision };
-      await new Promise((resolveWait) => setTimeout(resolveWait, 250));
     }
   }
   if (name === "claim_session") {
     const claimed = await mutateSession(requiredString(args, "sessionId"), (session) => {
-      if (session.agent.connection.status === "claimed") {
-        throw new Error(`Session is already claimed by ${session.agent.connection.claimedBy ?? "another agent"}.`);
-      }
-      if (session.agent.connection.status !== "waiting") {
-        throw new Error("Session must be published in connection-waiting state before it can be claimed.");
-      }
-      const claimedAt = new Date().toISOString();
-      session.agent.connection = {
-        status: "claimed",
-        claimedAt,
-        claimedBy: requiredString(args, "agentName"),
-        agentHost: detectedAgentHost(),
-      };
-      session.agent.imageGeneration = detectedAgentHost() === "codex"
-        ? { status: "unselected" }
-        : { status: "selected", backend: "openrouter", selectedBy: "policy", selectedAt: claimedAt };
-      session.agent.controlMode = "agent";
-      session.agent.runStatus = "working";
-      session.agent.pausedReason = undefined;
-      appendActivity(session, {
-        kind: "handover",
-        title: `Session claimed by ${session.agent.connection.claimedBy}`,
-      });
+      claimBridgeSession(session, requiredString(args, "agentName"));
     }, { requireOwnership: false });
     return {
       sessionId: claimed.id,
@@ -2022,6 +3089,9 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
     };
   }
   if (name === "queue_decision" || name === "request_model_selection") {
+    if (name === "queue_decision" && args.presentation === "assembly_review") {
+      throw new Error("Assembly review checkpoints are created by propose_assembly. Do not queue a second assembly decision.");
+    }
     const requestKey = requiredString(args, "requestKey");
     let decisionId = "";
     const updated = await mutateSession(requiredString(args, "sessionId"), (session) => {
@@ -2037,6 +3107,10 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
           ? args.semanticKey as AgentDecisionSemanticKey
           : undefined;
       const relatedThreadInput = Array.isArray(args.threadIds) ? args.threadIds : Array.isArray(args.relatedThreadIds) ? args.relatedThreadIds : [];
+      const requestedStepId = typeof args.relatedStepId === "string" ? args.relatedStepId : undefined;
+      const relatedStepId = requestedStepId && session.agent.plan.some((step) => step.id === requestedStepId)
+        ? requestedStepId
+        : undefined;
       const item: AgentDecision = {
         id: `decision-${crypto.randomUUID()}`,
         requestKey,
@@ -2058,7 +3132,7 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
         allowNote: args.allowNote === true,
         status: "pending",
         blocking: name === "request_model_selection" ? true : args.blocking === true,
-        relatedStepId: typeof args.relatedStepId === "string" ? args.relatedStepId : undefined,
+        relatedStepId,
         relatedAssetIds: Array.isArray(args.relatedAssetIds) ? args.relatedAssetIds.filter((item): item is string => typeof item === "string") : [],
         relatedThreadIds: relatedThreadInput.filter((item): item is string => typeof item === "string"),
         options: (name === "request_model_selection" ? args.candidates : args.options) as AgentDecision["options"] ?? [],
@@ -2072,6 +3146,7 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
       if (item.channel === "fruit_truck_ui") {
         session.agent.uiAttention = { requestedAt: new Date().toISOString(), decisionId: item.id };
       }
+      if (item.relatedStepId && item.blocking) tryMarkBoundStep(session, item.relatedStepId, "waiting");
       if (modelMode && !(item.relatedThreadIds?.length)) {
         session.agent.modelSelections[modelMode] = { status: "pending_user", recommendation: item.prompt };
       }
@@ -2464,6 +3539,14 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
         validatePreparedThread(session, target, modelCatalogs[target.mode], backend);
       }
       const createdAt = new Date().toISOString();
+      const boundStepIds = new Set(currentTargets.flatMap((target) => {
+        const stepId = (target as GenerationThread & { planStepId?: string }).planStepId;
+        return stepId ? [stepId] : [];
+      }));
+      for (const stepId of boundStepIds) {
+        const step = session.agent.plan.find((item) => item.id === stepId);
+        if (step && step.status !== "in_progress") tryMarkBoundStep(session, stepId, "in_progress");
+      }
       attempts = currentTargets.map((target) => {
         const backend = currentUsesCodexImage && target.mode === "image" ? "codex_builtin" as const : "openrouter" as const;
         const requestSnapshot = snapshotForThread(session, target);
@@ -2512,8 +3595,10 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
     const attemptIds = Array.isArray(args.attemptIds) ? args.attemptIds.filter((item): item is string => typeof item === "string") : [];
     const timeoutMs = typeof args.timeoutMs === "number" ? Math.min(25_000, Math.max(100, args.timeoutMs)) : 20_000;
     const deadline = Date.now() + timeoutMs;
-    const initial = (await readEnvelope()).sessions.find((item) => item.id === sessionId);
+    const initialEnvelope = await readEnvelope();
+    const initial = initialEnvelope.sessions.find((item) => item.id === sessionId);
     if (!initial) throw new Error(`Session ${sessionId} does not exist.`);
+    let eventCursor = initialEnvelope.revision;
     const recoverable = [...initial.threads.image, ...initial.threads.video].flatMap((thread) =>
       thread.attempts
         .filter((attempt) => attemptIds.includes(attempt.id))
@@ -2540,8 +3625,13 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
       void execution;
     }
     while (true) {
-      await pollThreadVideoAttempts(sessionId, attemptIds).catch(() => undefined);
-      const session = (await readEnvelope()).sessions.find((item) => item.id === sessionId);
+      if (configuredCoreMode() !== "canonical") {
+        await pollThreadVideoAttempts(sessionId, attemptIds).catch(() => undefined);
+      }
+      const envelope = configuredCoreMode() === "canonical"
+        ? await readCoreSessionEnvelope(sessionId)
+        : await readEnvelope();
+      const session = envelope.sessions.find((item) => item.id === sessionId);
       if (!session) throw new Error(`Session ${sessionId} does not exist.`);
       const attempts = [...session.threads.image, ...session.threads.video].flatMap((thread) => thread.attempts.filter((attempt) => attemptIds.includes(attempt.id)).map((attempt) => ({ threadId: thread.id, attempt })));
       if (attempts.length !== attemptIds.length) throw new Error("One or more generation attempts do not exist.");
@@ -2557,7 +3647,18 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
                   : "failed";
         return { status: terminal ? "terminal" : "pending", ...(outcome ? { outcome } : {}), attempts: attempts.map(({ threadId, attempt }) => ({ threadId, ...attempt })) };
       }
-      await new Promise((resolveWait) => setTimeout(resolveWait, 250));
+      const remaining = Math.max(100, deadline - Date.now());
+      if (configuredCoreMode() === "canonical") {
+        const batch = await coreRequest(dataDirectory, "event.wait", {
+          sessionId,
+          afterEvent: eventCursor,
+          timeoutMs: Math.min(25_000, remaining),
+          eventTypes: ["session.changed", "attempt.changed", "attempt.terminal"],
+        }, Math.min(26_000, remaining + 1_000)) as { cursor: number };
+        eventCursor = batch.cursor;
+      } else {
+        await waitForEnvelopeChange(envelope.revision, Math.min(25_000, remaining));
+      }
     }
   }
   if (name === "list_models") {
@@ -2691,7 +3792,7 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
   }
   if (name === "evaluate_asset") {
     if (args.approval !== undefined || args.confirmedByUser !== undefined) {
-      throw new Error("Artifact approval must come from an explicit agent-chat decision. Record evaluation, queue approval, then call resolve_decision after the user replies.");
+      throw new Error("Artifact approval must come from a separate explicit user checkpoint. Record evaluation, then queue and await the appropriate Fruit Truck UI or agent-chat decision.");
     }
     return mutateSession(requiredString(args, "sessionId"), (session) => {
       const id = requiredString(args, "assetId");
@@ -2850,6 +3951,20 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
   if (name === "poll_video") {
     const sessionId = requiredString(args, "sessionId");
     const jobId = requiredString(args, "jobId");
+    if (configuredCoreMode() === "canonical") {
+      const envelope = await readEnvelope();
+      const current = envelope.sessions.find((item) => item.id === sessionId);
+      if (!current) throw new Error(`Session ${sessionId} does not exist.`);
+      const registered = current.threads.video.some((thread) => thread.attempts.some((attempt) => attempt.jobId === jobId));
+      if (!registered) throw new Error(`Video job ${jobId} is not registered in this session.`);
+      await coreRequest(dataDirectory, "event.wait", {
+        sessionId,
+        afterEvent: envelope.revision,
+        timeoutMs: 500,
+        eventTypes: ["session.changed", "attempt.changed", "attempt.terminal"],
+      }, 1_500);
+      return (await readEnvelope()).sessions.find((item) => item.id === sessionId) ?? current;
+    }
     const response = await openRouter(`/videos/${encodeURIComponent(jobId)}`);
     const remoteStatus = normalizeVideoStatus(response.status);
     const currentSession = (await readEnvelope()).sessions.find((item) => item.id === sessionId);
@@ -2897,7 +4012,11 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
         const asset = bridgeAsset(session, {
           name: `agent-video-${jobId}.mp4`, kind: "video", mimeType: "video/mp4",
           origin: "generated", source: preservedSource, role: snapshot?.outputRole ?? thread.outputRole,
-          parentAssetIds: attempt.inputAssetIds, prompt: attempt.enhancedPrompt ?? snapshot?.enhancedPrompt ?? snapshot?.prompt, modelId: snapshot?.modelId ?? attempt.modelId,
+          parentAssetIds: attempt.inputAssetIds,
+          prompt: attempt.enhancedPrompt?.trim() || snapshot?.enhancedPrompt?.trim() || snapshot?.prompt,
+          modelId: snapshot?.modelId ?? attempt.modelId,
+          duration: typeof snapshot?.options.duration === "number" ? snapshot.options.duration : undefined,
+          jobId,
           generationBackend: "openrouter", threadId: thread.id, attemptId: attempt.id,
         });
         updateThreadAttempt(session, thread.id, attempt.id, { status: "completed", assetIds: [asset.id], completedAt: new Date().toISOString() });
@@ -2928,7 +4047,9 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
       }
       session.agent.assembly = {
         ...session.agent.assembly,
-        clips: clips.toSorted((left, right) => left.order - right.order),
+        clips: clips
+          .toSorted((left, right) => left.order - right.order)
+          .map((clip) => ({ ...clip, id: clip.id || `assembly-${crypto.randomUUID()}` })),
         status: "ready",
         error: undefined,
       };
@@ -3024,38 +4145,77 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
   throw new Error(`Unknown tool: ${name}`);
 }
 
+async function handleTool(name: string, args: Record<string, unknown>): Promise<ToolResult> {
+  const requestBytes = Buffer.byteLength(JSON.stringify(args));
+  return span(dataDirectory, "mcp.tool", () => handleToolUninstrumented(name, args), { requestBytes });
+}
+
+let responseWriteChain = Promise.resolve();
+
+function writeResponse(value: unknown) {
+  const frame = `${JSON.stringify(value)}\n`;
+  responseWriteChain = responseWriteChain.then(() => new Promise<void>((resolveWrite, reject) => {
+    process.stdout.write(frame, (error) => error ? reject(error) : resolveWrite());
+  })).catch((error) => console.error("Fruit Truck MCP stdout write failed:", error instanceof Error ? error.message : String(error)));
+  return Buffer.byteLength(frame);
+}
+
 function response(id: unknown, result: unknown) {
-  process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id, result })}\n`);
+  return writeResponse({ jsonrpc: "2.0", id, result });
 }
 
 function errorResponse(id: unknown, error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
-  process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32000, message } })}\n`);
+  return writeResponse({ jsonrpc: "2.0", id, error: { code: -32000, message } });
+}
+
+function stableToolError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  const explicit = (error as Error & { code?: string } | undefined)?.code
+    ?? message.match(/^([A-Z][A-Z0-9_]+):/)?.[1];
+  const code = explicit
+    ?? (/conflict/i.test(message) ? "SESSION_CONFLICT"
+      : /does not exist|missing/i.test(message) ? "NOT_FOUND"
+        : /blocked|control|pending user checkpoint/i.test(message) ? "TRANSITION_BLOCKED"
+          : /claim|agent host|belongs to/i.test(message) ? "OWNERSHIP_REQUIRED"
+            : "INVALID_COMMAND");
+  return { ok: false, error: { code, message } };
 }
 
 const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
-let requestChain = Promise.resolve();
+let initializationBarrier: Promise<void> | undefined;
 input.on("line", (line) => {
   if (!line.trim()) return;
-  requestChain = requestChain.then(async () => {
+  const started = process.hrtime.bigint();
+  void withTrace(async () => {
     let request: Record<string, unknown>;
     try { request = JSON.parse(line) as Record<string, unknown>; }
     catch { errorResponse(null, new Error("Invalid JSON-RPC message.")); return; }
     const id = request.id;
     if (request.method === "initialize") {
-      if (existsSync(sessionsPath)) {
-        await withSessionStoreLock(() => readEnvelope({ persistMigration: true }));
-      }
+      initializationBarrier ??= (async () => {
+        if (configuredCoreMode() === "canonical") {
+          const legacy = existsSync(sessionsPath) ? await readLegacyEnvelopeUninstrumented() : emptyEnvelope();
+          await initializeCoreState(legacy);
+        } else if (existsSync(sessionsPath)) {
+          await withSessionStoreLock(() => readEnvelope({ persistMigration: true }));
+        }
+        if (configuredCoreMode() === "shadow") await initializeCoreState(await readEnvelope());
+      })();
+      await initializationBarrier;
       const params = request.params as { clientInfo?: { name?: string } } | undefined;
       initializedClientName = typeof params?.clientInfo?.name === "string" ? params.clientInfo.name : "";
       response(id, {
         protocolVersion: "2025-06-18",
         capabilities: { tools: { listChanged: false } },
         serverInfo: { name: "fruit-truck", version: "2.1.0" },
-        instructions: `This server is connected as ${detectedAgentHost()}. Start with create_session, background-safe ensure_desktop, then claim_session. Keep textual ambiguity in agent chat; use Fruit Truck UI decisions for media, models, uploads, assembly, and approvals. Await UI decisions and never foreground the app or duplicate a paid request.`,
+        instructions: configuredToolProfile === "fast"
+          ? `This server is connected as ${detectedAgentHost()}. Start or resume with session_open, verify background-safe presence with ensure_desktop, batch typed state changes through session_commit, and wait with task_wait. Keep textual ambiguity in agent chat; use Fruit Truck UI decisions for media, models, uploads, assembly, and approvals. Never foreground the app or duplicate a paid request.`
+          : `This server is connected as ${detectedAgentHost()}. Start with create_session, background-safe ensure_desktop, then claim_session. Keep textual ambiguity in agent chat; use Fruit Truck UI decisions for media, models, uploads, assembly, and approvals. Await UI decisions and never foreground the app or duplicate a paid request.`,
       });
       return;
     }
+    if (initializationBarrier) await initializationBarrier;
     if (request.method === "ping") { response(id, {}); return; }
     if (request.method === "tools/list") { response(id, { tools: availableTools() }); return; }
     if (request.method === "tools/call") {
@@ -3063,13 +4223,25 @@ input.on("line", (line) => {
         const params = request.params as { name?: string; arguments?: Record<string, unknown> } | undefined;
         if (!params?.name) throw new Error("Tool name is required.");
         const result = await handleTool(params.name, params.arguments ?? {});
-        response(id, { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] });
+        const resultText = configuredToolProfile === "fast" ? JSON.stringify(result) : JSON.stringify(result, null, 2);
+        const responseBytes = response(id, { content: [{ type: "text", text: resultText }] });
+        recordSpan(dataDirectory, "mcp.result_serialize", 0, {
+          resultBytes: Buffer.byteLength(resultText),
+          responseBytes,
+        });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        response(id, { content: [{ type: "text", text: message }], isError: true });
+        response(id, {
+          content: [{ type: "text", text: configuredToolProfile === "fast" ? JSON.stringify(stableToolError(error)) : message }],
+          isError: true,
+        });
       }
       return;
     }
     if (id !== undefined) errorResponse(id, new Error(`Unsupported method: ${String(request.method)}`));
-  }).catch((error) => errorResponse(null, error));
+  }).catch((error) => errorResponse(null, error)).finally(() => {
+    recordSpan(dataDirectory, "mcp.request_total", Number((process.hrtime.bigint() - started) / 1_000n), {
+      requestBytes: Buffer.byteLength(line),
+    });
+  });
 });

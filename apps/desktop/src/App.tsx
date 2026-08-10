@@ -31,10 +31,16 @@ import {
   type VideoAssemblyClip,
 } from "@/agent";
 import {
+  commitAgentOperations,
+  commitAgentOperationsWithConflictRetry,
+  diffAgentBridgeSession,
   materializeAgentSession,
+  preserveLocalAssetMetadata,
   readAgentBridge,
+  readAgentBridgeSession,
+  recordAgentTelemetry,
   serializeAgentSessionForBridge,
-  waitForAgentBridge,
+  waitForAgentBridgeEvents,
   writeSerializedAgentBridgeSession,
   type AgentBridgeSession,
 } from "@/agentBridge";
@@ -273,7 +279,11 @@ export default function App() {
   const migratingAssetIds = useRef(new Set<string>());
   const bridgeRevisions = useRef(new Map<string, number>());
   const bridgeSnapshots = useRef(new Map<string, AgentBridgeSession>());
-  const bridgeMigrations = useRef(new Set<string>());
+  const bridgeSyncing = useRef(new Set<string>());
+  const bridgeDirtyVersions = useRef(new Map<string, number>());
+  const bridgeRetryAttempts = useRef(new Map<string, number>());
+  const bridgeRetryAt = useRef(new Map<string, number>());
+  const [bridgeSyncTick, setBridgeSyncTick] = useState(0);
   const quitConfirmationPending = useRef(false);
   const confirmationRef = useRef<Confirmation | null>(null);
 
@@ -413,6 +423,12 @@ export default function App() {
         if (item.id !== id) return item;
         const createdAt = new Date().toISOString();
         const next = update(item);
+        if (next.agentBridge) {
+          bridgeDirtyVersions.current.set(
+            item.id,
+            (bridgeDirtyVersions.current.get(item.id) ?? 0) + 1,
+          );
+        }
         const agent = next.agentBridge && next.agent.revision <= item.agent.revision
           ? { ...next.agent, revision: item.agent.revision + 1, updatedAt: createdAt }
           : next.agent;
@@ -558,68 +574,107 @@ export default function App() {
     if (!isTauriRuntime()) return;
     const timer = window.setTimeout(() => {
       for (const item of studio.sessions.filter((candidate) => candidate.agentBridge)) {
+        const dirtyVersion = bridgeDirtyVersions.current.get(item.id);
+        if (dirtyVersion == null || bridgeSyncing.current.has(item.id)) continue;
+        if ((bridgeRetryAt.current.get(item.id) ?? 0) > Date.now()) continue;
         const expectedRevision = bridgeRevisions.current.get(item.id);
-        if (expectedRevision === item.agent.revision && !bridgeMigrations.current.has(item.id)) continue;
-        void serializeAgentSessionForBridge(item).then(async (serialized) => {
-          const savedEnvelope = await writeSerializedAgentBridgeSession(serialized, expectedRevision);
-          const saved = savedEnvelope.sessions.find((candidate) => candidate.id === item.id);
-          if (!saved) throw new Error("The saved agent session was not returned by the bridge.");
+        const base = bridgeSnapshots.current.get(item.id);
+        bridgeSyncing.current.add(item.id);
+        let serialized: AgentBridgeSession | undefined;
+        void serializeAgentSessionForBridge(item).then(async (value) => {
+          serialized = value;
+          let saved: AgentBridgeSession;
+          if (expectedRevision == null) {
+            const envelope = await writeSerializedAgentBridgeSession(serialized, 0);
+            saved = envelope.sessions.find((candidate) => candidate.id === item.id)
+              ?? await readAgentBridgeSession(item.id);
+          } else {
+            if (!base) throw new Error(`Core base snapshot for ${item.id} is unavailable.`);
+            const patches = diffAgentBridgeSession(base, serialized);
+            if (!patches.length) {
+              if (bridgeDirtyVersions.current.get(item.id) === dirtyVersion) {
+                bridgeDirtyVersions.current.delete(item.id);
+              }
+              setStudio((current) => ({
+                ...current,
+                sessions: current.sessions.map((candidate) => candidate.id === item.id
+                  ? { ...candidate, agent: { ...candidate.agent, revision: expectedRevision } }
+                  : candidate),
+              }));
+              return;
+            }
+            const committed = await commitAgentOperations(
+              item.id,
+              expectedRevision,
+              `desktop-projection:${item.id}:${expectedRevision}:${serialized.agent.revision}`,
+              [{ type: "apply_projection_patch", patches }],
+            );
+            saved = committed.session;
+          }
           bridgeRevisions.current.set(item.id, saved.agent.revision);
           bridgeSnapshots.current.set(item.id, saved);
-          bridgeMigrations.current.delete(item.id);
+          bridgeRetryAttempts.current.delete(item.id);
+          bridgeRetryAt.current.delete(item.id);
+          const unchangedSinceStart = bridgeDirtyVersions.current.get(item.id) === dirtyVersion;
+          if (unchangedSinceStart) bridgeDirtyVersions.current.delete(item.id);
+          if (!unchangedSinceStart) return;
+          const incoming = materializeAgentSession(saved);
           setStudio((current) => ({
             ...current,
-            sessions: current.sessions.map((candidate) =>
-              candidate.id === item.id && candidate.agent.revision === serialized.agent.revision
-                ? { ...candidate, agent: { ...candidate.agent, revision: saved.agent.revision } }
-                : candidate
-            ),
+            sessions: current.sessions.map((candidate) => candidate.id === item.id ? {
+              ...candidate,
+              ...incoming,
+              assets: preserveLocalAssetMetadata(incoming.assets, candidate.assets),
+            } : candidate),
           }));
         }).catch(async (error) => {
-          if (errorMessage(error).includes("AGENT_SESSION_CONFLICT")) {
+          if (errorMessage(error).includes("AGENT_SESSION_CONFLICT") && serialized) {
             try {
-              const envelope = await readAgentBridge();
-              const remote = envelope.sessions.find((candidate) => candidate.id === item.id);
-              const base = bridgeSnapshots.current.get(item.id);
-              if (!remote || !base) throw error;
-              const local = await serializeAgentSessionForBridge(item);
-              const merged = mergeBridgeSession(base, local, remote);
-              const savedEnvelope = await writeSerializedAgentBridgeSession(merged, remote.agent.revision);
-              const saved = savedEnvelope.sessions.find((candidate) => candidate.id === item.id);
-              if (!saved) throw new Error("The merged agent session was not returned by the bridge.");
-              bridgeRevisions.current.set(item.id, saved.agent.revision);
-              bridgeSnapshots.current.set(item.id, saved);
-              bridgeMigrations.current.delete(item.id);
-              const incoming = materializeAgentSession(saved);
+              const remote = await readAgentBridgeSession(item.id);
+              const merged = mergeBridgeSession(base ?? remote, serialized, remote);
+              bridgeRevisions.current.set(item.id, remote.agent.revision);
+              bridgeSnapshots.current.set(item.id, remote);
+              bridgeDirtyVersions.current.set(item.id, (bridgeDirtyVersions.current.get(item.id) ?? 0) + 1);
+              bridgeRetryAttempts.current.delete(item.id);
+              bridgeRetryAt.current.delete(item.id);
+              const incoming = materializeAgentSession(merged);
               setStudio((current) => ({
                 ...current,
                 sessions: current.sessions.map((candidate) => candidate.id === item.id ? {
                   ...candidate,
                   ...incoming,
-                  assets: incoming.assets.map((asset) => {
-                    const localAsset = candidate.assets.find((existing) => existing.id === asset.id);
-                    return localAsset ? { ...asset, blobKey: localAsset.blobKey, fingerprint: localAsset.fingerprint } : asset;
-                  }),
+                  assets: preserveLocalAssetMetadata(incoming.assets, candidate.assets),
                 } : candidate),
               }));
-              toast.info("Merged simultaneous desktop and MCP session changes.");
-            } catch (mergeError) {
-              toast.error(`Shared session changed again. Reload before retrying: ${errorMessage(mergeError)}`);
+              toast.info("The shared session changed first; local edits were rebased onto the latest Core state.");
+              return;
+            } catch (reloadError) {
+              error = reloadError;
             }
-          } else {
-            toast.error(errorMessage(error));
+          }
+          const attempts = (bridgeRetryAttempts.current.get(item.id) ?? 0) + 1;
+          bridgeRetryAttempts.current.set(item.id, attempts);
+          if (attempts === 1) toast.error(`Could not sync the shared session: ${errorMessage(error)}`);
+          const delay = Math.min(30_000, 500 * 2 ** Math.min(6, attempts - 1));
+          bridgeRetryAt.current.set(item.id, Date.now() + delay);
+          window.setTimeout(() => setBridgeSyncTick((current) => current + 1), delay);
+        }).finally(() => {
+          bridgeSyncing.current.delete(item.id);
+          if (bridgeDirtyVersions.current.has(item.id) && !bridgeRetryAttempts.current.has(item.id)) {
+            setBridgeSyncTick((current) => current + 1);
           }
         });
       }
     }, 220);
     return () => window.clearTimeout(timer);
-  }, [studio]);
+  }, [bridgeSyncTick, studio]);
 
   useEffect(() => {
     if (!isTauriRuntime()) return;
     let active = true;
     const applyEnvelope = (envelope: Awaited<ReturnType<typeof readAgentBridge>>) => {
       if (!active || !envelope.sessions.length) return;
+      const projectionStarted = performance.now();
       const discovered = envelope.sessions.filter((external) =>
         !studioRef.current.sessions.some((item) => item.id === external.id)
       );
@@ -630,27 +685,23 @@ export default function App() {
         let changed = false;
         const sessions = [...current.sessions];
         for (const external of envelope.sessions) {
-          const migrationRequired = envelope.migrationSessionIds?.includes(external.id) ?? false;
-          if (migrationRequired) bridgeMigrations.current.add(external.id);
+          const index = sessions.findIndex((item) => item.id === external.id);
+          const locallyDirty = bridgeDirtyVersions.current.has(external.id)
+            || bridgeSyncing.current.has(external.id);
+          if (locallyDirty) continue;
+          const confirmedRevision = bridgeRevisions.current.get(external.id) ?? -1;
           bridgeRevisions.current.set(external.id, external.agent.revision);
           bridgeSnapshots.current.set(external.id, external);
-          const index = sessions.findIndex((item) => item.id === external.id);
           if (index < 0) {
             sessions.push(materializeAgentSession(external));
             changed = true;
-          } else if (external.agent.revision > sessions[index].agent.revision) {
+          } else if (external.agent.revision > confirmedRevision) {
             const incoming = materializeAgentSession(external);
             sessions[index] = {
               ...sessions[index],
               ...incoming,
-              assets: [
-                ...sessions[index].assets,
-                ...incoming.assets.filter((asset) => !sessions[index].assets.some((existing) => existing.id === asset.id)),
-              ],
+              assets: preserveLocalAssetMetadata(incoming.assets, sessions[index].assets),
             };
-            changed = true;
-          } else if (migrationRequired) {
-            sessions[index] = { ...sessions[index] };
             changed = true;
           }
         }
@@ -658,13 +709,38 @@ export default function App() {
           ? { ...current, sessions }
           : current;
       });
+      window.requestAnimationFrame(() => recordAgentTelemetry(
+        "desktop.projection_paint",
+        (performance.now() - projectionStarted) * 1_000,
+        { sessionCount: envelope.sessions.length },
+      ));
     };
     const syncLoop = async () => {
       try {
         let envelope = await readAgentBridge();
+        let recoveredUnpublished = false;
+        for (const local of studioRef.current.sessions.filter((item) => item.agentBridge)) {
+          if (envelope.sessions.some((external) => external.id === local.id)) continue;
+          if (!bridgeDirtyVersions.current.has(local.id)) {
+            bridgeDirtyVersions.current.set(local.id, 1);
+            recoveredUnpublished = true;
+          }
+        }
+        if (recoveredUnpublished) setBridgeSyncTick((current) => current + 1);
+        let eventCursor = envelope.revision;
         while (active) {
           applyEnvelope(envelope);
-          envelope = await waitForAgentBridge(envelope.revision, 20_000);
+          const batch = await waitForAgentBridgeEvents(eventCursor, 20_000);
+          eventCursor = batch.cursor;
+          if (batch.resetRequired) {
+            envelope = await readAgentBridge();
+            eventCursor = envelope.revision;
+            continue;
+          }
+          const sessionIds = [...new Set(batch.events.map((event) => event.sessionId))];
+          const sessions = [];
+          for (const sessionId of sessionIds) sessions.push(await readAgentBridgeSession(sessionId));
+          envelope = { schemaVersion: 4, revision: eventCursor, sessions };
         }
       } catch (error) {
         if (active) console.warn("Agent bridge sync failed", error);
@@ -786,7 +862,7 @@ export default function App() {
   }, [credential?.configured, imageEndpoints, mode, selectedId, t]);
 
   const activeVideoJobIds = studio.sessions.flatMap((item) =>
-    activeVideoJobsFromAttempts(item)
+    isTauriRuntime() && item.agentBridge ? [] : activeVideoJobsFromAttempts(item)
       .filter((job) => job.status === "pending" || job.status === "in_progress")
       .map((job) => `${item.id}:${job.jobId}`),
   ).sort().join("|");
@@ -797,7 +873,7 @@ export default function App() {
       if (polling.current) return;
       const nowMs = Date.now();
       const activeJobs = studioRef.current.sessions.flatMap((item) =>
-        activeVideoJobsFromAttempts(item)
+        isTauriRuntime() && item.agentBridge ? [] : activeVideoJobsFromAttempts(item)
           .filter((job) => job.status === "pending" || job.status === "in_progress")
           .filter((job) => hasVideoPollingTimedOut(job.submittedAt, nowMs) || isVideoPollDue(job.nextPollAt, nowMs))
           .map((job) => ({ sessionId: item.id, job })),
@@ -843,6 +919,7 @@ export default function App() {
               `video-${job.jobId}.mp4`,
               "generated",
               job.jobId,
+              typeof job.request.duration === "number" ? job.request.duration : undefined,
             );
             patchSession(sessionId, (current) => {
               const existing = current.assets.find((item) => item.jobId === job.jobId);
@@ -2443,30 +2520,71 @@ export default function App() {
     const currentSession = studioRef.current.sessions.find((item) => item.id === studioRef.current.activeSessionId);
     const decision = currentSession?.agent.decisions.find((item) => item.id === pendingUiDecision?.id);
     if (!currentSession || !decision) throw new Error("This checkpoint is no longer pending.");
-    const resolved = resolveAgentDecisionFromDesktop(
-      currentSession.agent,
-      decision.id,
-      selectedOptionIds,
-      selectedAssetIdsForDecision,
-      note,
+    if (!isTauriRuntime()) {
+      const resolved = resolveAgentDecisionFromDesktop(
+        currentSession.agent,
+        decision.id,
+        selectedOptionIds,
+        selectedAssetIdsForDecision,
+        note,
+      );
+      const selectedModel = selectedOptionIds[0];
+      patchSession(currentSession.id, (current) => {
+        const selectedMode = decision.semanticKey === "model_selection_image" ? "image" : decision.semanticKey === "model_selection_video" ? "video" : undefined;
+        const related = decision.relatedThreadIds ?? [];
+        return {
+          ...current,
+          generationDefaults: selectedMode && selectedModel && !related.length ? {
+            ...current.generationDefaults,
+            modelIds: { ...current.generationDefaults.modelIds, [selectedMode]: selectedModel },
+          } : current.generationDefaults,
+          threads: selectedMode && selectedModel && related.length ? {
+            ...current.threads,
+            [selectedMode]: current.threads[selectedMode].map((item) => related.includes(item.id) ? { ...item, modelOverrideId: selectedModel } : item),
+          } : current.threads,
+          agent: resolved,
+        };
+      });
+      return;
+    }
+    const confirmedRevision = bridgeRevisions.current.get(currentSession.id);
+    if (confirmedRevision == null) throw new Error("This session is still being published to Core. Try again in a moment.");
+    const base = bridgeSnapshots.current.get(currentSession.id);
+    const localBeforeDecision = bridgeDirtyVersions.current.has(currentSession.id)
+      ? await serializeAgentSessionForBridge(currentSession)
+      : undefined;
+    const committed = await commitAgentOperationsWithConflictRetry(
+      currentSession.id,
+      confirmedRevision,
+      `desktop-decision:${decision.id}`,
+      [{
+        type: "resolve_ui_decision",
+        decisionId: decision.id,
+        selectedOptionIds,
+        selectedAssetIds: selectedAssetIdsForDecision,
+        note,
+      }],
     );
-    const selectedModel = selectedOptionIds[0];
-    patchSession(currentSession.id, (current) => {
-      const selectedMode = decision.semanticKey === "model_selection_image" ? "image" : decision.semanticKey === "model_selection_video" ? "video" : undefined;
-      const related = decision.relatedThreadIds ?? [];
-      return {
-        ...current,
-        generationDefaults: selectedMode && selectedModel && !related.length ? {
-          ...current.generationDefaults,
-          modelIds: { ...current.generationDefaults.modelIds, [selectedMode]: selectedModel },
-        } : current.generationDefaults,
-        threads: selectedMode && selectedModel && related.length ? {
-          ...current.threads,
-          [selectedMode]: current.threads[selectedMode].map((item) => related.includes(item.id) ? { ...item, modelOverrideId: selectedModel } : item),
-        } : current.threads,
-        agent: resolved,
-      };
-    });
+    bridgeRevisions.current.set(currentSession.id, committed.receipt.revision);
+    bridgeSnapshots.current.set(currentSession.id, committed.session);
+    const resolvedSession = localBeforeDecision && base
+      ? mergeBridgeSession(base, localBeforeDecision, committed.session)
+      : committed.session;
+    if (localBeforeDecision) {
+      bridgeDirtyVersions.current.set(
+        currentSession.id,
+        (bridgeDirtyVersions.current.get(currentSession.id) ?? 0) + 1,
+      );
+    }
+    const incoming = materializeAgentSession(resolvedSession);
+    setStudio((current) => ({
+      ...current,
+      sessions: current.sessions.map((candidate) => candidate.id === currentSession.id ? {
+        ...candidate,
+        ...incoming,
+        assets: preserveLocalAssetMetadata(incoming.assets, candidate.assets),
+      } : candidate),
+    }));
   };
 
   const assembleVideo = async (clips: VideoAssemblyClip[]) => {
