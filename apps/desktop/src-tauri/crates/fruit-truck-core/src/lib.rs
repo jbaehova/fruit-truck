@@ -1,6 +1,5 @@
 use std::collections::{BTreeSet, HashSet};
 use std::fs;
-use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -67,27 +66,8 @@ pub struct CoreStore {
     database: PathBuf,
     signal: Arc<EventSignal>,
     export_lock: Arc<Mutex<()>>,
-    // Opening and closing WAL connections concurrently can deadlock SQLite's Unix VFS mutex.
-    connection_lock: Arc<Mutex<()>>,
-}
-
-struct StoreConnection<'a> {
-    connection: Connection,
-    _guard: MutexGuard<'a, ()>,
-}
-
-impl Deref for StoreConnection<'_> {
-    type Target = Connection;
-
-    fn deref(&self) -> &Self::Target {
-        &self.connection
-    }
-}
-
-impl DerefMut for StoreConnection<'_> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.connection
-    }
+    // A process-wide connection avoids concurrent WAL open/close deadlocks in SQLite's Unix VFS.
+    connection: Arc<Mutex<Connection>>,
 }
 
 #[derive(Debug, Default)]
@@ -109,12 +89,17 @@ impl CoreStore {
         let home = home.as_ref().to_path_buf();
         secure_directory(&home)?;
         let database = home.join("core.sqlite3");
+        let connection = Connection::open(&database)?;
+        connection.busy_timeout(Duration::from_secs(5))?;
+        connection.execute_batch(
+            "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;",
+        )?;
         let store = Self {
             home,
             database,
             signal: Arc::new(EventSignal::default()),
             export_lock: Arc::new(Mutex::new(())),
-            connection_lock: Arc::new(Mutex::new(())),
+            connection: Arc::new(Mutex::new(connection)),
         };
         let connection = store.connection()?;
         store.migrate(&connection)?;
@@ -136,20 +121,10 @@ impl CoreStore {
         &self.database
     }
 
-    fn connection(&self) -> Result<StoreConnection<'_>, CoreError> {
-        let guard = self
-            .connection_lock
+    fn connection(&self) -> Result<MutexGuard<'_, Connection>, CoreError> {
+        self.connection
             .lock()
-            .map_err(|_| CoreError::new("CORE_POISONED", "Core database access is unavailable."))?;
-        let connection = Connection::open(&self.database)?;
-        connection.busy_timeout(Duration::from_secs(5))?;
-        connection.execute_batch(
-            "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;",
-        )?;
-        Ok(StoreConnection {
-            connection,
-            _guard: guard,
-        })
+            .map_err(|_| CoreError::new("CORE_POISONED", "Core database access is unavailable."))
     }
 
     fn migrate(&self, connection: &Connection) -> Result<(), CoreError> {
