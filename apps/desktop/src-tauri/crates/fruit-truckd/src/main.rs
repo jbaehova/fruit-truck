@@ -4,7 +4,8 @@ compile_error!("fruit-truckd currently requires Unix domain sockets.");
 #[cfg(unix)]
 mod daemon {
     use std::fs::{self, OpenOptions};
-    use std::io::{BufRead, BufReader, Read, Write};
+    use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+    use std::os::fd::AsRawFd;
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::{Path, PathBuf};
@@ -113,44 +114,59 @@ mod daemon {
         secure_directory(&run)?;
         let socket = run.join("core.sock");
         let lock = run.join("core.lock");
-        if socket.exists() && UnixStream::connect(&socket).is_ok() {
-            return Err("Fruit Truck Core is already running.".into());
-        }
-        let _ = fs::remove_file(&socket);
-        if lock.exists() {
-            let live_owner = fs::read_to_string(&lock)
-                .ok()
-                .and_then(|value| value.trim().parse::<u32>().ok())
-                .is_some_and(|pid| {
-                    Command::new("kill")
-                        .args(["-0", &pid.to_string()])
-                        .stdin(Stdio::null())
-                        .stdout(Stdio::null())
-                        .stderr(Stdio::null())
-                        .status()
-                        .is_ok_and(|status| status.success())
-                });
-            if live_owner {
-                return Err("Fruit Truck Core is already starting.".into());
-            }
-            fs::remove_file(&lock)
-                .map_err(|error| format!("Could not recover stale Core lock: {error}"))?;
-        }
-        let lock_file = OpenOptions::new()
+        let mut lock_file = OpenOptions::new()
+            .read(true)
             .write(true)
-            .create_new(true)
+            .create(true)
+            .truncate(false)
             .open(&lock)
             .map_err(|error| {
                 format!("Could not acquire Fruit Truck Core singleton lock: {error}")
             })?;
+        // SAFETY: lock_file owns this valid descriptor for at least as long as the advisory lock.
+        let lock_result =
+            unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if lock_result != 0 {
+            return Err("Fruit Truck Core is already running or starting.".into());
+        }
+        let mut previous_owner = String::new();
+        lock_file
+            .read_to_string(&mut previous_owner)
+            .map_err(|error| error.to_string())?;
+        let previous_owner_is_live = previous_owner
+            .trim()
+            .parse::<u32>()
+            .ok()
+            .filter(|pid| *pid != std::process::id())
+            .is_some_and(|pid| {
+                Command::new("kill")
+                    .args(["-0", &pid.to_string()])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .is_ok_and(|status| status.success())
+            });
+        if previous_owner_is_live {
+            return Err("Fruit Truck Core is already running or starting.".into());
+        }
         lock_file
             .set_permissions(fs::Permissions::from_mode(0o600))
             .map_err(|error| error.to_string())?;
+        lock_file.set_len(0).map_err(|error| error.to_string())?;
+        lock_file
+            .seek(SeekFrom::Start(0))
+            .map_err(|error| error.to_string())?;
+        write!(lock_file, "{}", std::process::id()).map_err(|error| error.to_string())?;
+        lock_file.sync_data().map_err(|error| error.to_string())?;
+        let _runtime_files = RuntimeFiles {
+            socket: socket.clone(),
+            lock,
+        };
+        let _ = fs::remove_file(&socket);
         let listener = UnixListener::bind(&socket).map_err(|error| error.to_string())?;
         fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))
             .map_err(|error| error.to_string())?;
-        fs::write(&lock, std::process::id().to_string()).map_err(|error| error.to_string())?;
-        let _runtime_files = RuntimeFiles { socket, lock };
         let store = Arc::new(CoreStore::open(&home).map_err(|error| error.to_string())?);
         let presence = Arc::new(DesktopPresence::default());
         store.integrity_check().map_err(|error| error.to_string())?;

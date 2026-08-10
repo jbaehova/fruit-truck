@@ -386,8 +386,9 @@ test("canonical fast MCP rebases concurrent typed commands for one session", asy
       ops: [{ type: "resolve_decision", decisionId, userResponse: "Also approved", optionId: "approve" }],
     }),
   ]);
-  assert.equal(resolutions.filter((item) => !item.isError).length, 1);
-  assert.equal(resolutions.filter((item) => item.isError).length, 1);
+  const resolutionDiagnostics = JSON.stringify(resolutions);
+  assert.equal(resolutions.filter((item) => !item.isError).length, 1, resolutionDiagnostics);
+  assert.equal(resolutions.filter((item) => item.isError).length, 1, resolutionDiagnostics);
   assert.match(String(resolutions.find((item) => item.isError)?.value), /already resolved/i);
 });
 
