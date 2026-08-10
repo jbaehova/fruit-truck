@@ -12,12 +12,12 @@ LICENSE_DIR="${OUTPUT_DIR}/licenses/ffmpeg"
 mkdir -p -- "${OUTPUT_DIR}" "${LICENSE_DIR}"
 
 for executable in ffmpeg ffprobe; do
-  [[ -x "${ARM64_DIR}/${executable}" ]] || {
-    printf 'Missing arm64 executable: %s\n' "${ARM64_DIR}/${executable}" >&2
+  [[ -f "${ARM64_DIR}/${executable}" ]] || {
+    printf 'Missing arm64 binary: %s\n' "${ARM64_DIR}/${executable}" >&2
     exit 1
   }
-  [[ -x "${X86_64_DIR}/${executable}" ]] || {
-    printf 'Missing x86_64 executable: %s\n' "${X86_64_DIR}/${executable}" >&2
+  [[ -f "${X86_64_DIR}/${executable}" ]] || {
+    printf 'Missing x86_64 binary: %s\n' "${X86_64_DIR}/${executable}" >&2
     exit 1
   }
   cp -f -- \
