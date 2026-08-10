@@ -48,3 +48,15 @@ test("thread cycling and inspector shortcuts stay in the WebView instead of nati
   } as KeyboardEvent);
   assert.equal(next?.id, "nextThread");
 });
+
+test("new thread remains mapped to the macOS command shortcut", () => {
+  const command = commandForKeyboardEvent({
+    key: "t",
+    code: "KeyT",
+    metaKey: true,
+    ctrlKey: false,
+    altKey: false,
+    shiftKey: false,
+  } as KeyboardEvent);
+  assert.equal(command?.id, "newThread");
+});

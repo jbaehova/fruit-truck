@@ -5,7 +5,6 @@ set -Eeuo pipefail
 RELEASE_TAG="${1:?A v-prefixed release tag is required.}"
 REPOSITORY="${2:-${GITHUB_REPOSITORY:-jbaehova/fruit-truck}}"
 SOURCE_ROOT="${3:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd)}"
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=ffmpeg-version.env
 source "${SOURCE_ROOT}/apps/desktop/scripts/ffmpeg-version.env"
 

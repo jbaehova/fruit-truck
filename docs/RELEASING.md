@@ -11,9 +11,10 @@ user's Mac.
 1. Open **Settings → Pages** in the GitHub repository.
 2. Under **Build and deployment**, select **GitHub Actions** as the source.
 3. Ensure GitHub Actions has permission to create releases under **Settings → Actions → General → Workflow permissions**.
-4. Store the Tauri updater private key and password as `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` repository secrets. Never commit the private key.
-5. Export the Developer ID Application identity as a password-protected PKCS#12 file and store its base64 contents and password as `APPLE_CERTIFICATE` and `APPLE_CERTIFICATE_PASSWORD` repository secrets.
-6. Store the developer account email, app-specific password, and Team ID as `APPLE_ID`, `APPLE_PASSWORD`, and `APPLE_TEAM_ID` repository secrets.
+4. Enable **Immutable releases** under **Settings → General** so published assets and their tags cannot be replaced. Draft releases remain resumable.
+5. Store the Tauri updater private key and password as `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` repository secrets. Never commit the private key.
+6. Export the Developer ID Application identity as a password-protected PKCS#12 file and store its base64 contents and password as `APPLE_CERTIFICATE` and `APPLE_CERTIFICATE_PASSWORD` repository secrets.
+7. Store the developer account email, app-specific password, and Team ID as `APPLE_ID`, `APPLE_PASSWORD`, and `APPLE_TEAM_ID` repository secrets.
 
 ## Publish a release
 

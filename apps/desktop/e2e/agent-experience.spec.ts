@@ -333,7 +333,7 @@ test("video polling survives a not-yet-due heartbeat and collects the completed 
 });
 
 test("keyboard shortcuts cover workspace navigation and keep modal close scoped", async ({ page }) => {
-  await page.evaluate((key) => {
+  await page.addInitScript((key) => {
     const state = JSON.parse(localStorage.getItem(key) ?? "{}") as StudioState;
     const session = state.sessions.find((item) => item.id === state.activeSessionId)!;
     session.agent.controlMode = "human";
@@ -342,6 +342,7 @@ test("keyboard shortcuts cover workspace navigation and keep modal close scoped"
   await page.reload();
 
   const threadRail = page.getByLabel("Generation threads");
+  await expect(page.getByRole("button", { name: "New thread" })).toBeEnabled();
   const initialThreads = await threadRail.locator(".thread-tab").count();
 
   await page.keyboard.press("Meta+/");
@@ -357,7 +358,7 @@ test("keyboard shortcuts cover workspace navigation and keep modal close scoped"
   await expect(threadRail.locator(".thread-tab strong")).toHaveText(onlyThreadName ?? "");
   await expect(page.getByText("Archived (1)")).toHaveCount(0);
 
-  await page.keyboard.press("Meta+T");
+  await page.getByRole("button", { name: "New thread" }).click();
   await expect(threadRail.locator(".thread-tab")).toHaveCount(initialThreads + 1);
   await page.keyboard.press("Meta+D");
   await expect(threadRail.locator(".thread-tab")).toHaveCount(initialThreads + 2);
