@@ -2,8 +2,6 @@ import { expect, test, type Page } from "@playwright/test";
 import type { StudioState } from "../src/studio";
 
 const STORAGE_KEY = "fruit-truck.studio.v1";
-const COMMAND_MODIFIER = process.platform === "darwin" ? "Meta" : "Control";
-const commandShortcut = (keys: string) => `${COMMAND_MODIFIER}+${keys}`;
 
 async function mockImageGeneration(page: Page, imageGate?: Promise<void>, resultCount = 1, inputReferenceLimit = 0) {
   await page.route("https://openrouter.ai/api/v1/**", async (route) => {
@@ -346,26 +344,26 @@ test("keyboard shortcuts cover workspace navigation and keep modal close scoped"
   const threadRail = page.getByLabel("Generation threads");
   const initialThreads = await threadRail.locator(".thread-tab").count();
 
-  await page.keyboard.press(commandShortcut("/"));
+  await page.keyboard.press("Meta+/");
   await expect(page.getByRole("heading", { name: "Keyboard Shortcuts" })).toBeVisible();
   await expect(page.getByText("New Session")).toBeVisible();
-  await page.keyboard.press(commandShortcut("W"));
+  await page.keyboard.press("Meta+W");
   await expect(page.getByRole("heading", { name: "Keyboard Shortcuts" })).toHaveCount(0);
   await expect(threadRail.locator(".thread-tab")).toHaveCount(initialThreads);
 
   const onlyThreadName = await threadRail.locator(".thread-tab strong").textContent();
-  await page.keyboard.press(commandShortcut("W"));
+  await page.keyboard.press("Meta+W");
   await expect(threadRail.locator(".thread-tab")).toHaveCount(1);
   await expect(threadRail.locator(".thread-tab strong")).toHaveText(onlyThreadName ?? "");
   await expect(page.getByText("Archived (1)")).toHaveCount(0);
 
-  await page.keyboard.press(commandShortcut("T"));
+  await page.keyboard.press("Meta+T");
   await expect(threadRail.locator(".thread-tab")).toHaveCount(initialThreads + 1);
-  await page.keyboard.press(commandShortcut("D"));
+  await page.keyboard.press("Meta+D");
   await expect(threadRail.locator(".thread-tab")).toHaveCount(initialThreads + 2);
-  await page.keyboard.press(commandShortcut("W"));
+  await page.keyboard.press("Meta+W");
   await expect(threadRail.locator(".thread-tab")).toHaveCount(initialThreads + 1);
-  await page.keyboard.press(commandShortcut("Shift+T"));
+  await page.keyboard.press("Meta+Shift+T");
   await expect(threadRail.locator(".thread-tab")).toHaveCount(initialThreads + 2);
   const activeThreadBeforeCycle = await threadRail.locator(".thread-tab.active").evaluate((element) =>
     Array.from(element.parentElement?.children ?? []).indexOf(element),
@@ -375,27 +373,27 @@ test("keyboard shortcuts cover workspace navigation and keep modal close scoped"
     Array.from(element.parentElement?.children ?? []).indexOf(element),
   )).not.toBe(activeThreadBeforeCycle);
 
-  await page.keyboard.press(commandShortcut("2"));
+  await page.keyboard.press("Meta+2");
   await expect(page.getByRole("button", { name: "Video", exact: true })).toHaveAttribute("data-pressed", "");
-  await page.keyboard.press(commandShortcut("1"));
+  await page.keyboard.press("Meta+1");
   await expect(page.getByRole("button", { name: "Image", exact: true })).toHaveAttribute("data-pressed", "");
 
-  await page.keyboard.press(commandShortcut("F"));
+  await page.keyboard.press("Meta+F");
   await expect(page.getByLabel("Search sessions…")).toBeFocused();
   await page.keyboard.press("Shift+Escape");
   await expect(page.locator(".prompt-field textarea")).toBeFocused();
 
-  await page.keyboard.press(commandShortcut("Alt+I"));
+  await page.keyboard.press("Meta+Alt+I");
   await expect(page.getByLabel("Agent and assets panel")).toHaveCount(0);
   await expect(page.locator(".workspace")).toHaveClass(/right-panel-closed/);
-  await page.keyboard.press(commandShortcut("Alt+2"));
+  await page.keyboard.press("Meta+Alt+2");
   await expect(page.getByLabel("Agent and assets panel")).toBeVisible();
   await expect(page.getByRole("button", { name: "Assets", exact: true })).toHaveAttribute("data-pressed", "");
 
-  await page.keyboard.press(commandShortcut(","));
+  await page.keyboard.press("Meta+,");
   await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
   const threadCountBeforeClosingSettings = await threadRail.locator(".thread-tab").count();
-  await page.keyboard.press(commandShortcut("W"));
+  await page.keyboard.press("Meta+W");
   await expect(page.getByRole("heading", { name: "Settings" })).toHaveCount(0);
   await expect(threadRail.locator(".thread-tab")).toHaveCount(threadCountBeforeClosingSettings);
 });
@@ -411,7 +409,7 @@ test("asset and text contexts preserve their expected keyboard behavior", async 
 
   const prompt = page.locator(".prompt-field textarea");
   await prompt.fill("Select only this prompt text");
-  await prompt.press(commandShortcut("A"));
+  await prompt.press("Meta+A");
   await expect.poll(() => prompt.evaluate((element) => ({
     start: (element as HTMLTextAreaElement).selectionStart,
     end: (element as HTMLTextAreaElement).selectionEnd,
@@ -427,14 +425,14 @@ test("asset and text contexts preserve their expected keyboard behavior", async 
   await page.keyboard.press("ArrowLeft");
   await expect(page.locator(".asset-preview-dialog")).toBeVisible();
   const previewDownload = page.waitForEvent("download");
-  await page.keyboard.press(commandShortcut("Shift+E"));
+  await page.keyboard.press("Meta+Shift+E");
   expect((await previewDownload).suggestedFilename()).toMatch(/\.(png|mp4)$/);
   await expect(page.locator(".asset-preview-dialog")).toBeVisible();
-  await page.keyboard.press(commandShortcut("W"));
+  await page.keyboard.press("Meta+W");
   await expect(page.locator(".asset-preview-dialog")).toHaveCount(0);
 
   await assetVisuals.first().focus();
-  await page.keyboard.press(commandShortcut("Backspace"));
+  await page.keyboard.press("Meta+Backspace");
   await expect(page.getByRole("alertdialog")).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(page.getByRole("alertdialog")).toHaveCount(0);
@@ -1065,7 +1063,7 @@ test("completed generation opens a queued result modal without moving the editor
   if (!formBefore) throw new Error("Missing composer form before generation");
 
   await page.locator(".prompt-field textarea").focus();
-  await page.keyboard.press(commandShortcut("Enter"));
+  await page.keyboard.press("Meta+Enter");
   const resultDialog = page.locator(".generation-result-dialog");
   await expect(resultDialog).toBeVisible();
   await expect(resultDialog).toContainText("Generation complete");

@@ -23,12 +23,11 @@ test("single-character commands always use a modifier", () => {
 });
 
 test("shifted bracket aliases match the physical bracket keys", () => {
-  const mac = navigator.platform.toLowerCase().includes("mac");
   const event = {
     key: "}",
     code: "BracketRight",
-    metaKey: mac,
-    ctrlKey: !mac,
+    metaKey: true,
+    ctrlKey: false,
     altKey: false,
     shiftKey: true,
   } as KeyboardEvent;
