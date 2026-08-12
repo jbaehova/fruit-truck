@@ -205,6 +205,7 @@ jobs:
         run: |
           npm ci --prefix apps/desktop
           npm ci --prefix agent-kit
+          command -v minisign >/dev/null 2>&1 || brew install minisign
 
       - name: Download FFmpeg architecture artifacts
         uses: actions/download-artifact@v4
