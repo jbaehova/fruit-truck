@@ -2208,7 +2208,7 @@ export default function App() {
   const agentModelConfirmed = session.agent.controlMode === "human"
     || (session.agent.modelSelections[mode].status === "selected" && session.agent.modelSelections[mode].modelId === selectedId);
   const hasMask = mode === "image" && draft.imageEditMode && draft.maskStrokes.length > 0;
-  const canGenerate = Boolean(selectedModel && hasRunnableInstructions(mode, draft) && !providerError && !generationValidationError && credential?.configured && !generating && !enhancing && !activeAttempt && agentModelConfirmed && session.agent.controlMode === "human");
+  const canGenerate = Boolean(selectedModel && hasRunnableInstructions(mode, draft) && !providerError && !inputValidationError && !generationValidationError && credential?.configured && !generating && !enhancing && !activeAttempt && agentModelConfirmed && session.agent.controlMode === "human");
   const currentResult = resultQueue[0] ?? null;
   const currentResultSession = currentResult
     ? studio.sessions.find((item) => item.id === currentResult.sessionId) ?? null

@@ -159,7 +159,7 @@ export function InputTray({
           {references.length < limit ? <Button type="button" variant="outline" size="sm" className="add-reference" onClick={() => void pickFiles()}><ImagePlus /> {t("addInput")}</Button> : null}
         </div>
       )}
-      {error ? <Field.Error className="field-error reference-error" match>{error}</Field.Error> : null}
+      {error ? <Field.Error className="field-error reference-error" role="alert" match>{error}</Field.Error> : null}
     </Field.Root>
   );
 }

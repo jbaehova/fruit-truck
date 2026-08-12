@@ -996,6 +996,59 @@ test("legacy video edit threads disappear while video generation and library ass
   }, STORAGE_KEY)).toEqual({ schemaVersion: 5, editThreadPresent: false, assetPresent: true });
 });
 
+test("mixed video frame and reference inputs show a red warning and disable generation", async ({ page }) => {
+  await page.route("https://openrouter.ai/api/v1/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/v1/videos/models") {
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({ data: [{
+          id: "test/mixed-input-video",
+          name: "Test mixed-input video",
+          input_reference_types: ["image"],
+          max_input_references: 2,
+          supported_frame_images: ["first_frame"],
+        }] }),
+      });
+      return;
+    }
+    if (path === "/api/v1/models" || path === "/api/v1/images/models") {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ data: [] }) });
+      return;
+    }
+    await route.fulfill({ status: 404, body: "Not mocked" });
+  });
+  await page.evaluate((key) => {
+    const state = JSON.parse(localStorage.getItem(key) ?? "{}") as StudioState;
+    const session = state.sessions.find((item) => item.id === state.activeSessionId)!;
+    session.agent.controlMode = "human";
+    session.mode = "video";
+    const thread = session.threads.video.find((item) => item.id === session.activeThreadIds.video)!;
+    for (const attempt of thread.attempts) attempt.status = "canceled";
+    const first = session.assets.find((asset) => asset.id === "asset-final")!;
+    const second = { ...first, id: "asset-reference-two", name: "reference-two.png" };
+    session.assets.push(second);
+    thread.modelOverrideId = "test/mixed-input-video";
+    thread.draft = {
+      ...thread.draft,
+      prompt: "Start with @1 and use the product from @2.",
+      enhancePrompt: false,
+      references: [
+        { assetId: first.id, slot: 1, role: "first_frame" },
+        { assetId: second.id, slot: 2, role: "reference" },
+      ],
+    };
+    localStorage.setItem(key, JSON.stringify(state));
+  }, STORAGE_KEY);
+  await page.reload();
+
+  const warning = page.getByRole("alert").filter({ hasText: "Use one input style per request" });
+  await expect(warning).toBeVisible();
+  await expect(warning).toHaveCSS("color", "rgb(180, 35, 24)");
+  await expect(warning).toHaveCSS("background-color", "rgb(255, 241, 240)");
+  await expect(page.getByRole("button", { name: "Generate Video" })).toBeDisabled();
+});
+
 test("completed generation opens a queued result modal without moving the editor and hands assets to the library", async ({ page }) => {
   await page.route("https://openrouter.ai/api/v1/**", async (route) => {
     const request = route.request();

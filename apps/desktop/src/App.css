@@ -1397,7 +1397,14 @@ button, input, textarea { font-family: inherit; }
 .role-select { width: 126px; }
 .reference-unsupported { color: var(--text); font-size: 11px; }
 .add-reference { width: fit-content; margin-top: 3px; }
-.reference-error { margin-top: 8px; }
+.reference-error {
+  margin-top: 8px;
+  padding: 9px 11px;
+  border: 1px solid #d92d20;
+  color: #b42318 !important;
+  background: #fff1f0;
+  font-weight: 650;
+}
 
 .options-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 11px; }
 .option-field { min-width: 0; display: grid; gap: 6px; }
