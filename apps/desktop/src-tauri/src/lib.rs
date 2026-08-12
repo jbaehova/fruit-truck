@@ -1,4 +1,9 @@
+mod agent_integrations;
 mod core_client;
+
+use agent_integrations::{
+    agent_integration_status, install_agent_integration, remove_agent_integration,
+};
 
 use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
@@ -757,7 +762,8 @@ fn read_agent_sessions_file(app: &tauri::AppHandle) -> Result<Value, String> {
             Err(error) => return Err(error),
         }
     }
-    Err(last_error.unwrap_or_else(|| "The agent session bridge could not be read consistently.".into()))
+    Err(last_error
+        .unwrap_or_else(|| "The agent session bridge could not be read consistently.".into()))
 }
 
 fn read_agent_sessions_file_once(app: &tauri::AppHandle) -> Result<Value, String> {
@@ -2145,6 +2151,9 @@ pub fn run() {
             read_custom_skill,
             import_custom_skill_text,
             rollback_custom_skill,
+            agent_integration_status,
+            install_agent_integration,
+            remove_agent_integration,
             quit_app
         ])
         .build(tauri::generate_context!())

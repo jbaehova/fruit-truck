@@ -2,7 +2,7 @@
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Fruit Truck",
   "mainBinaryName": "Fruit Truck",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "identifier": "ui.fruittruck.desktop",
   "build": {
     "frontendDist": "../dist",
@@ -41,6 +41,9 @@
     "targets": ["dmg"],
     "createUpdaterArtifacts": true,
     "externalBin": ["target/bundled-tools/fruit-truckd"],
+    "resources": {
+      "target/bundled-agent-runtime/": "agent-runtime/"
+    },
     "icon": ["icons/icon.icns"],
     "macOS": {
       "bundleName": "Fruit Truck",

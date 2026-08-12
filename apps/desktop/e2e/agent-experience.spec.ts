@@ -269,6 +269,7 @@ test.beforeEach(async ({ page }) => {
     if (!localStorage.getItem(key)) localStorage.setItem(key, JSON.stringify(value));
     localStorage.setItem("fruit-truck.language", "en");
     localStorage.setItem("fruit-truck.dev-key", "test-key-for-e2e");
+    localStorage.setItem("fruit-truck.agent-onboarding.complete.v1", "true");
   }, [STORAGE_KEY, studioFixture()] as const);
   await page.goto("/");
   await expect.poll(() => page.evaluate((key) => JSON.parse(localStorage.getItem(key) ?? "{}").schemaVersion, STORAGE_KEY)).toBe(5);
@@ -627,7 +628,7 @@ test("approved video opens dedicated Assembly and provenance stays folded in Ass
   await expect(provenance).toContainText("Format is valid.");
 });
 
-test("Settings keeps Agent Skill import and history read-only for session activation", async ({ page }) => {
+test("Settings keeps workflow import and history read-only for session activation", async ({ page }) => {
   await reloadWithStudioMutation(page, (state) => {
     const legacyState = state as unknown as { sessions: Array<{ activeVideoJobs: unknown[] }> };
     for (const session of legacyState.sessions) session.activeVideoJobs = [];
@@ -648,6 +649,7 @@ test("Settings keeps Agent Skill import and history read-only for session activa
             versions: [2, 1],
           }];
         }
+        if (command === "list_agent_integrations") return [];
         throw new Error(`Unexpected native command: ${command}`);
       },
     };
@@ -655,7 +657,7 @@ test("Settings keeps Agent Skill import and history read-only for session activa
   await page.getByRole("button", { name: "Settings" }).focus();
   await page.keyboard.press("Enter");
   await expect(page.getByRole("heading", { name: "App settings" })).toBeVisible();
-  await expect(page.getByText("Agent Skills", { exact: true })).toBeVisible();
+  await expect(page.getByText("Workflow library", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Import" })).toBeVisible();
   await expect(page.getByText("Installed Skill")).toBeVisible();
   await expect(page.getByText("Active", { exact: true })).toBeVisible();

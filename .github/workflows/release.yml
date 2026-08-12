@@ -218,6 +218,9 @@ jobs:
       - name: Build Universal Fruit Truck Core helper
         run: bash apps/desktop/scripts/build-core-sidecar-universal.sh
 
+      - name: Prepare self-contained Universal Agent Kit runtime
+        run: bash apps/desktop/scripts/prepare-agent-runtime.sh --universal
+
       - name: Run desktop checks
         working-directory: apps/desktop
         run: |

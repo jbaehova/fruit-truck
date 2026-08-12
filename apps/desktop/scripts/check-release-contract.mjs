@@ -23,6 +23,7 @@ const cargoToml = readText("apps/desktop/src-tauri/Cargo.toml");
 const ffmpegEnvironment = readText("apps/desktop/scripts/ffmpeg-version.env");
 const landingSource = readText("apps/landing/src/main.ts");
 const landingHtml = readText("apps/landing/index.html");
+const releaseWorkflow = readText(".github/workflows/release.yml");
 
 const cargoVersion = cargoToml.match(/^version\s*=\s*"([^"]+)"/m)?.[1];
 assert.ok(cargoVersion, "Could not read the desktop Cargo package version.");
@@ -60,6 +61,28 @@ assert.equal(
   releaseConfig.bundle?.resources?.["target/bundled-tools/licenses/"],
   "licenses/",
   "Release bundle is not packaging the FFmpeg license directory.",
+);
+assert.equal(
+  releaseConfig.bundle?.resources?.["target/bundled-agent-runtime/"],
+  "agent-runtime/",
+  "Release bundle is not packaging the self-contained Agent Kit runtime.",
+);
+const agentKitPackage = readJson("agent-kit/package.json");
+const agentIntegrationSource = readText("apps/desktop/src-tauri/src/agent_integrations.rs");
+assert.ok(
+  agentIntegrationSource.includes(`const AGENT_KIT_VERSION: &str = "${agentKitPackage.version}";`),
+  "The desktop agent integration version differs from the bundled Agent Kit.",
+);
+const agentRuntimeEnvironment = readText("apps/desktop/scripts/agent-runtime-version.env");
+assert.match(
+  agentRuntimeEnvironment,
+  /^NODE_VERSION=24\.\d+\.\d+$/m,
+  "The bundled Agent Kit runtime must pin Node.js 24.",
+);
+assert.match(
+  releaseWorkflow,
+  /prepare-agent-runtime\.sh --universal/,
+  "The release workflow does not prepare the Universal Agent Kit runtime.",
 );
 
 const ffmpegValues = Object.fromEntries(

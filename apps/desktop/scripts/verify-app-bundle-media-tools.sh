@@ -48,6 +48,38 @@ for notice in \
   }
 done
 
+agent_server="${RESOURCES_DIR}/agent-runtime/agent-kit/dist/scripts/mcp-server.js"
+for bundled_agent_file in \
+  "${agent_server}" \
+  "${RESOURCES_DIR}/agent-runtime/agent-kit/skills/fruit-truck-agent/SKILL.md" \
+  "${RESOURCES_DIR}/agent-runtime/agent-kit/skills/story-driven-short-form/SKILL.md" \
+  "${RESOURCES_DIR}/agent-runtime/LICENSE.node.txt"; do
+  [[ -f "${bundled_agent_file}" ]] || {
+    printf 'Bundled agent runtime file is missing: %s\n' "${bundled_agent_file}" >&2
+    exit 1
+  }
+done
+for node_arch in arm64 x64; do
+  agent_node_candidate="${RESOURCES_DIR}/agent-runtime/node-${node_arch}"
+  [[ -x "${agent_node_candidate}" ]] || {
+    printf 'Bundled Node.js runtime is not executable: %s\n' "${agent_node_candidate}" >&2
+    exit 1
+  }
+  candidate_archs="$(lipo -archs "${agent_node_candidate}")"
+  expected_arch="${node_arch/x64/x86_64}"
+  [[ "${candidate_archs}" == "${expected_arch}" ]] || {
+    printf 'Bundled Node.js runtime has the wrong architecture: %s\n' "${candidate_archs}" >&2
+    exit 1
+  }
+  codesign --verify --strict "${agent_node_candidate}"
+done
+if [[ "$(uname -m)" == "arm64" ]]; then
+  agent_node="${RESOURCES_DIR}/agent-runtime/node-arm64"
+else
+  agent_node="${RESOURCES_DIR}/agent-runtime/node-x64"
+fi
+PATH="/usr/bin:/bin:/usr/sbin:/sbin" "${agent_node}" --version | grep -Eq '^v24\.'
+
 verification_home="$(mktemp -d "${TMPDIR:-/tmp}/fruit-truck-verify.XXXXXX")"
 core_pid=""
 cleanup() {
@@ -75,6 +107,15 @@ done
   exit 1
 }
 
+initialize_response="$(printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"bundle-verifier","version":"1.0"}}}' \
+  | FRUIT_TRUCK_HOME="${verification_home}" FRUIT_TRUCK_CORE_BIN="${MACOS_DIR}/fruit-truckd" \
+    "${agent_node}" "${agent_server}" --agent-host codex --tool-profile fast --core-mode canonical)"
+grep -q '"id":1,"result"' <<<"${initialize_response}" || {
+  printf 'Bundled Agent Kit did not initialize successfully: %s\n' "${initialize_response}" >&2
+  exit 1
+}
+
 python3 - "${socket_path}" <<'PY'
 import json
 import socket
@@ -93,4 +134,4 @@ PY
 
 codesign --verify --deep --strict "${APP_BUNDLE}"
 
-printf 'Fruit Truck.app contains signed, self-contained Universal media tools and a compatible Core.\n'
+printf 'Fruit Truck.app contains signed, self-contained Universal media tools, Agent Kit runtime, and a compatible Core.\n'

@@ -31,6 +31,22 @@ export type AgentBridgeEnvelope = {
   migrationSessionIds?: string[];
 };
 
+export type AgentIntegrationTarget = "codex" | "claude" | "hermes";
+
+export type AgentIntegrationStatus = {
+  target: AgentIntegrationTarget;
+  displayName: string;
+  cliAvailable: boolean;
+  connected: boolean;
+  needsUpdate: boolean;
+  version?: string;
+};
+
+export type AgentIntegrationResult = {
+  status: AgentIntegrationStatus;
+  restartRequired: boolean;
+};
+
 function stableBridgeValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(stableBridgeValue);
   if (value && typeof value === "object") {
@@ -576,4 +592,25 @@ export async function importCustomSkill(name: string, markdown: string): Promise
 
 export async function rollbackCustomSkill(name: string, version: number): Promise<SavedCustomSkill> {
   return invoke<SavedCustomSkill>("rollback_custom_skill", { name, version });
+}
+
+const unavailableAgentIntegrations: AgentIntegrationStatus[] = [
+  { target: "codex", displayName: "Codex", cliAvailable: false, connected: false, needsUpdate: false },
+  { target: "claude", displayName: "Claude Code", cliAvailable: false, connected: false, needsUpdate: false },
+  { target: "hermes", displayName: "Hermes", cliAvailable: false, connected: false, needsUpdate: false },
+];
+
+export async function listAgentIntegrations(): Promise<AgentIntegrationStatus[]> {
+  if (!isTauriRuntime()) return unavailableAgentIntegrations;
+  return invoke<AgentIntegrationStatus[]>("agent_integration_status");
+}
+
+export async function installAgentIntegration(target: AgentIntegrationTarget): Promise<AgentIntegrationResult> {
+  if (!isTauriRuntime()) throw new Error("Agent connections are available in the Fruit Truck desktop app.");
+  return invoke<AgentIntegrationResult>("install_agent_integration", { target });
+}
+
+export async function removeAgentIntegration(target: AgentIntegrationTarget): Promise<AgentIntegrationResult> {
+  if (!isTauriRuntime()) throw new Error("Agent connections are available in the Fruit Truck desktop app.");
+  return invoke<AgentIntegrationResult>("remove_agent_integration", { target });
 }

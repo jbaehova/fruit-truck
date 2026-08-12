@@ -23,8 +23,8 @@ const destinations = {
 };
 const configurationCommands = {
   codex: ["codex", ["mcp", "add", "fruit-truck", "--", "fruit-truck-mcp", "--agent-host", "codex", "--tool-profile", toolProfileArgument, "--core-mode", "canonical"]],
-  claude: ["claude", ["mcp", "add", "fruit-truck", "--scope", "user", "--", "fruit-truck-mcp", "--agent-host", "claude", "--tool-profile", toolProfileArgument, "--core-mode", "canonical"]],
-  hermes: ["hermes", ["mcp", "add", "fruit-truck", "--command", "fruit-truck-mcp", "--args", "--agent-host", "hermes", "--tool-profile", toolProfileArgument, "--core-mode", "canonical"]],
+  claude: ["claude", ["mcp", "add", "--transport", "stdio", "--scope", "user", "fruit-truck", "--", "fruit-truck-mcp", "--agent-host", "claude", "--tool-profile", toolProfileArgument, "--core-mode", "canonical"]],
+  hermes: ["hermes", ["mcp", "add", "--connect-timeout", "10", "fruit-truck", "--command", "fruit-truck-mcp", "--args", "--agent-host", "hermes", "--tool-profile", toolProfileArgument, "--core-mode", "canonical"]],
 };
 
 function usage() {

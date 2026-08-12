@@ -116,18 +116,11 @@ On a fresh install, the first-run guide connects your OpenRouter API key before 
 
 ### Connect a local agent
 
-Fruit Truck includes a standalone stdio MCP server and Agent Skills in this repository. Until `@fruit-truck/agent-kit` is published to npm, install the checked-out package directly:
+The macOS app bundles everything Fruit Truck needs to work with Codex, Claude Code, and Hermes. After installing the DMG, open Fruit Truck once. The first-run guide detects the agents already installed on the Mac and offers a **Connect** button for each one. The same controls are always available under **Settings → Agent connections**.
 
-```bash
-cd agent-kit
-npm run build
-npm install --global .
-fruit-truck-agent-kit install codex --configure
-# or: fruit-truck-agent-kit install claude --configure
-# or: fruit-truck-agent-kit install hermes --configure
-```
+No separate Node.js, npm package, MCP command, Skill copy, or plugin installation is required for app users. Fruit Truck installs and updates its local connector and workflows when **Connect** is pressed. Restart the connected agent after the app confirms the change, then ask it to create something with Fruit Truck.
 
-The installer copies [`fruit-truck-agent`](./agent-kit/skills/fruit-truck-agent/SKILL.md) and [`story-driven-short-form`](./agent-kit/skills/story-driven-short-form/SKILL.md) to the target's personal Skill directory and can register `fruit-truck-mcp`. See the [Agent Kit guide](./agent-kit/README.md) for installation, manual configuration, and update commands. The package compatibility manifest currently supports desktop `>=0.6.0 <0.7.0`.
+The repository's [Agent Kit guide](./agent-kit/README.md) remains available for source-tree development and manual integration testing. The package compatibility manifest currently supports desktop `>=0.6.0 <0.7.0`.
 
 Start from the local agent with a rough intent such as “Make a 15-second reel about discovering a perfume in an old shop on a rainy night.” The agent creates the session and checks Fruit Truck presence before claiming it. On macOS, an installed app may start in the background but never requests foreground focus. Textual story ambiguity stays in agent chat; media, model, upload, assembly, and approval checkpoints wait durably in Fruit Truck until you open them.
 

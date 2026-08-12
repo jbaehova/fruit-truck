@@ -1,7 +1,7 @@
 {
   "name": "fruit-truck",
   "private": true,
-  "version": "0.6.1",
+  "version": "0.6.2",
   "type": "module",
   "engines": {
     "node": ">=24"
@@ -15,10 +15,10 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "check": "tsc -b && oxlint && node scripts/check-release-contract.mjs",
-    "tauri:dev": "bash scripts/prepare-core-sidecar.sh && tauri dev",
+    "tauri:dev": "bash scripts/prepare-core-sidecar.sh && bash scripts/prepare-agent-runtime.sh && tauri dev",
     "mcp": "node scripts/mcp-server.ts",
-    "build:e2e:desktop": "bash scripts/prepare-core-sidecar.sh && tauri build --debug --bundles app --config src-tauri/tauri.e2e.conf.json",
-    "bundle:mac": "bash scripts/prepare-core-sidecar.sh && tauri build --bundles dmg",
+    "build:e2e:desktop": "bash scripts/prepare-core-sidecar.sh && bash scripts/prepare-agent-runtime.sh && tauri build --debug --bundles app --config src-tauri/tauri.e2e.conf.json",
+    "bundle:mac": "bash scripts/prepare-core-sidecar.sh && bash scripts/prepare-agent-runtime.sh && tauri build --bundles dmg",
     "bundle:mac:universal": "bash scripts/build-macos-universal.sh"
   },
   "dependencies": {

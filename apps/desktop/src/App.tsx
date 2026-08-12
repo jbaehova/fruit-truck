@@ -201,6 +201,7 @@ const SESSION_SIDEBAR_OPEN_KEY = "fruit-truck.session-sidebar.open";
 const SESSION_SIDEBAR_WIDTH_KEY = "fruit-truck.session-sidebar.width";
 const RIGHT_PANEL_OPEN_KEY = "fruit-truck.right-panel.open";
 const ONBOARDING_COMPLETE_KEY = "fruit-truck.onboarding.complete.v1";
+const AGENT_ONBOARDING_COMPLETE_KEY = "fruit-truck.agent-onboarding.complete.v1";
 const DEFAULT_SESSION_SIDEBAR_WIDTH = 256;
 
 function hasRunnableInstructions(mode: GenerationMode, draft: GenerationDraftState) {
@@ -225,6 +226,7 @@ export default function App() {
   const [imageEndpoints, setImageEndpoints] = useState<Record<string, ImageModelEndpoint[]>>({});
   const [credential, setCredential] = useState<CredentialStatus | null>(null);
   const [onboardingOpen, setOnboardingOpen] = useState<boolean | null>(null);
+  const [onboardingInitialStep, setOnboardingInitialStep] = useState<"welcome" | "agents">("welcome");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [shortcutHelpOpen, setShortcutHelpOpen] = useState(false);
   const [executingThreadIds, setExecutingThreadIds] = useState<Set<string>>(new Set());
@@ -774,9 +776,14 @@ export default function App() {
   useEffect(() => {
     void getCredentialStatus().then((status) => {
       setCredential(status);
-      const completed = localStorage.getItem(ONBOARDING_COMPLETE_KEY) === "true";
-      if (status.configured && !completed) localStorage.setItem(ONBOARDING_COMPLETE_KEY, "true");
-      setOnboardingOpen(!status.configured && !completed);
+      const agentCompleted = localStorage.getItem(AGENT_ONBOARDING_COMPLETE_KEY) === "true";
+      if (status.configured && !agentCompleted) {
+        setOnboardingInitialStep("agents");
+        setOnboardingOpen(true);
+      } else {
+        setOnboardingInitialStep("welcome");
+        setOnboardingOpen(!status.configured);
+      }
     }).catch((error) => {
       setOnboardingOpen(false);
       toast.error(errorMessage(error));
@@ -2958,6 +2965,7 @@ export default function App() {
                 patchActive((current) => ({ ...current, mode: targetMode, activeThreadIds: { ...current.activeThreadIds, [targetMode]: threadId } }));
               }}
               onToggleControl={toggleControlMode}
+              onOpenAgentConnections={() => setSettingsOpen(true)}
               onPauseResume={() => patchActive((current) => {
                 const next = current.agent.runStatus === "paused" ? current : cancelQueuedAttempts(current);
                 return { ...next, agent: {
@@ -3028,14 +3036,18 @@ export default function App() {
     {onboardingOpen !== false ? (
       <Onboarding
         ready={onboardingOpen === true}
+        initialStep={onboardingInitialStep}
         onSave={async (apiKey) => {
           const status = await saveApiKey(apiKey);
           if (!status.configured) throw new Error(t("onboardingKeySaveFailed"));
           setCredential(status);
-          localStorage.setItem(ONBOARDING_COMPLETE_KEY, "true");
           toast.success(t("keySaved"));
         }}
-        onComplete={() => setOnboardingOpen(false)}
+        onComplete={() => {
+          localStorage.setItem(ONBOARDING_COMPLETE_KEY, "true");
+          localStorage.setItem(AGENT_ONBOARDING_COMPLETE_KEY, "true");
+          setOnboardingOpen(false);
+        }}
       />
     ) : null}
     </Tooltip.Provider>

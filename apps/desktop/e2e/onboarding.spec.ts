@@ -5,6 +5,7 @@ test.beforeEach(async ({ page }) => {
     if (sessionStorage.getItem("fruit-truck.onboarding.e2e-initialized")) return;
     localStorage.removeItem("fruit-truck.dev-key");
     localStorage.removeItem("fruit-truck.onboarding.complete.v1");
+    localStorage.removeItem("fruit-truck.agent-onboarding.complete.v1");
     localStorage.setItem("fruit-truck.language", "en");
     sessionStorage.setItem("fruit-truck.onboarding.e2e-initialized", "true");
   });
@@ -31,10 +32,13 @@ test("first-time setup connects OpenRouter once and then opens the workspace", a
   await expect(page.getByText("Key ready to save")).toBeVisible();
   await page.getByRole("button", { name: "Save key and start" }).click();
 
+  await expect(page.getByRole("heading", { name: "Connect the agents on this Mac." })).toBeVisible();
+  await page.getByRole("button", { name: "Continue" }).click();
   await expect(page.getByRole("heading", { name: "You're ready to create." })).toBeVisible();
   await expect(page.locator(".onboarding-dialog")).toHaveCount(0, { timeout: 3_000 });
   await expect(shell).not.toHaveAttribute("inert", "");
   await expect.poll(() => page.evaluate(() => localStorage.getItem("fruit-truck.onboarding.complete.v1"))).toBe("true");
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("fruit-truck.agent-onboarding.complete.v1"))).toBe("true");
 
   await page.reload();
   await expect(page.locator(".onboarding-dialog")).toHaveCount(0);
@@ -55,6 +59,8 @@ test("first-time setup provides the same connection flow in Korean", async ({ pa
   await expect(page.getByText("키를 저장할 준비가 됐습니다")).toBeVisible();
   await page.getByRole("button", { name: "키 저장하고 시작하기" }).click();
 
+  await expect(page.getByRole("heading", { name: "이 Mac의 에이전트를 연결하세요." })).toBeVisible();
+  await page.getByRole("button", { name: "계속" }).click();
   await expect(page.getByRole("heading", { name: "이제 만들 준비가 됐습니다." })).toBeVisible();
   await expect(page.locator(".onboarding-dialog")).toHaveCount(0, { timeout: 3_000 });
   await expect(page.getByRole("button", { name: "설정" })).toBeVisible();

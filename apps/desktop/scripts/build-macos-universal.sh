@@ -13,6 +13,7 @@ bash "${script_dir}/build-ffmpeg-macos.sh" --arch arm64 --output-dir "${build_ro
 bash "${script_dir}/build-ffmpeg-macos.sh" --arch x86_64 --output-dir "${build_root}/x86_64"
 bash "${script_dir}/assemble-universal-ffmpeg.sh" "${build_root}/arm64" "${build_root}/x86_64"
 bash "${script_dir}/build-core-sidecar-universal.sh"
+bash "${script_dir}/prepare-agent-runtime.sh" --universal
 
 cd "${desktop_dir}"
 npm run tauri -- build \

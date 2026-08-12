@@ -109,18 +109,11 @@ npm run tauri:dev
 
 ### 로컬 에이전트 연결
 
-Fruit Truck에는 독립 실행형 stdio MCP 서버와 에이전트 스킬이 포함되어 있습니다. `@fruit-truck/agent-kit`이 npm에 게시되기 전까지 체크아웃한 패키지를 직접 설치하세요.
+macOS 앱에는 Codex, Claude Code, Hermes 연결에 필요한 구성 요소가 모두 포함됩니다. DMG를 설치한 다음 Fruit Truck을 한 번 실행하면 첫 실행 안내가 Mac에 설치된 에이전트를 감지하고 각각에 **연결** 버튼을 표시합니다. 같은 기능은 언제든 **설정 → 에이전트 연결**에서 사용할 수 있습니다.
 
-```bash
-cd agent-kit
-npm run build
-npm install --global .
-fruit-truck-agent-kit install codex --configure
-# 또는: fruit-truck-agent-kit install claude --configure
-# 또는: fruit-truck-agent-kit install hermes --configure
-```
+앱 사용자는 Node.js나 npm 패키지를 따로 설치하거나 MCP 명령을 실행하거나 스킬·플러그인을 직접 복사할 필요가 없습니다. **연결**을 누르면 Fruit Truck이 로컬 연결 도구와 워크플로를 설치하고 이후 업데이트도 처리합니다. 완료 안내가 나오면 연결한 에이전트를 재시작한 뒤 Fruit Truck으로 작업을 요청하면 됩니다.
 
-설치 프로그램은 [`fruit-truck-agent`](../../agent-kit/skills/fruit-truck-agent/SKILL.md)와 [`story-driven-short-form`](../../agent-kit/skills/story-driven-short-form/SKILL.md)을 대상의 개인 스킬 디렉터리에 복사하고 `fruit-truck-mcp`를 등록할 수 있습니다. 설치, 수동 설정, 업데이트 명령은 [Agent Kit 가이드](../../agent-kit/README.md)를 참고하세요. 현재 패키지 호환성 매니페스트는 데스크톱 `>=0.6.0 <0.7.0`을 지원합니다.
+저장소의 [Agent Kit 가이드](../../agent-kit/README.md)는 소스 트리 개발과 수동 통합 테스트용으로 계속 제공됩니다. 현재 패키지 호환성 매니페스트는 데스크톱 `>=0.6.0 <0.7.0`을 지원합니다.
 
 로컬 에이전트에서 “비 오는 밤 오래된 가게에서 향수를 발견하는 15초 릴을 만들어 줘” 같은 대략적인 의도로 시작하세요. 에이전트는 세션을 만들고 Fruit Truck 존재를 확인한 뒤 인계합니다. macOS에서 설치된 앱은 백그라운드로 실행될 수 있지만 전면 포커스를 요구하지 않습니다. 이야기의 텍스트 모호성은 에이전트 채팅에서 해결하고, 미디어·모델·업로드·조립·승인 체크포인트는 사용자가 열 때까지 Fruit Truck에서 안전하게 대기합니다.
 

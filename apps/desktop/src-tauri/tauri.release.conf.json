@@ -7,7 +7,8 @@
       "target/bundled-tools/fruit-truckd"
     ],
     "resources": {
-      "target/bundled-tools/licenses/": "licenses/"
+      "target/bundled-tools/licenses/": "licenses/",
+      "target/bundled-agent-runtime/": "agent-runtime/"
     }
   }
 }

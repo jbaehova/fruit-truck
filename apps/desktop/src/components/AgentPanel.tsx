@@ -1,4 +1,4 @@
-import { CircleAlert, CirclePause, CircleStop, Clock3, ExternalLink, Link2, MessageCircle, RotateCcw, Sparkles, UserRound } from "lucide-react";
+import { CircleAlert, CirclePause, CircleStop, Clock3, ExternalLink, Link2, MessageCircle, PlugZap, RotateCcw, Sparkles, UserRound } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@base-ui/react/progress";
 import { useI18n } from "@/i18n";
@@ -28,6 +28,7 @@ type Props = {
   onPauseResume: () => void;
   onStop: () => void;
   onOpenDecision: () => void;
+  onOpenAgentConnections: () => void;
 };
 
 export function AgentPanel({
@@ -40,6 +41,7 @@ export function AgentPanel({
   onPauseResume,
   onStop,
   onOpenDecision,
+  onOpenAgentConnections,
 }: Props) {
   const { t } = useI18n();
   const pending = state.decisions.filter((item) => item.status === "pending");
@@ -173,6 +175,11 @@ export function AgentPanel({
         <Button size="xs" variant="ghost" onClick={onToggleControl}>
           <UserRound /> {state.controlMode === "agent" ? t("takeControl") : t("handToAgent")}
         </Button>
+        {state.connection.status === "disconnected" ? (
+          <Button size="xs" variant="outline" onClick={onOpenAgentConnections}>
+            <PlugZap /> {t("manageAgentConnections")}
+          </Button>
+        ) : null}
         {state.controlMode === "agent" && state.connection.status === "claimed" ? (
           <>
             <Button size="icon-xs" variant="ghost" aria-label={state.runStatus === "paused" ? t("resume") : t("pause")} onClick={onPauseResume}>

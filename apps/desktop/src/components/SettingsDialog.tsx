@@ -1,8 +1,8 @@
 import { Dialog } from "@base-ui/react/dialog";
 import { Field } from "@base-ui/react/field";
 import { Form } from "@base-ui/react/form";
-import { useEffect, useRef, useState } from "react";
-import { Check, ExternalLink, History, Pencil, ShieldCheck, SlidersHorizontal, Upload, WandSparkles, X } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Check, CircleAlert, ExternalLink, History, LoaderCircle, Pencil, PlugZap, RefreshCw, ShieldCheck, SlidersHorizontal, Unplug, Upload, WandSparkles, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -11,9 +11,14 @@ import type { CredentialStatus } from "@/openrouter";
 import { PROMPT_MODELS, type PromptModel } from "@/studio";
 import {
   importCustomSkill,
+  installAgentIntegration,
+  listAgentIntegrations,
   listCustomSkills,
   readCustomSkill,
+  removeAgentIntegration,
   rollbackCustomSkill,
+  type AgentIntegrationStatus,
+  type AgentIntegrationTarget,
   type CustomSkillSummary,
 } from "@/agentBridge";
 
@@ -46,6 +51,10 @@ export function SettingsDialog({
   const [skillError, setSkillError] = useState<string | null>(null);
   const [skills, setSkills] = useState<CustomSkillSummary[]>([]);
   const [skillsBusy, setSkillsBusy] = useState(false);
+  const [connections, setConnections] = useState<AgentIntegrationStatus[]>([]);
+  const [connectionBusy, setConnectionBusy] = useState<AgentIntegrationTarget | "all" | null>(null);
+  const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [restartTargets, setRestartTargets] = useState<string[]>([]);
   const importRef = useRef<HTMLInputElement>(null);
 
   const refreshSkills = async () => {
@@ -59,15 +68,26 @@ export function SettingsDialog({
     }
   };
 
+  const refreshConnections = useCallback(async () => {
+    try {
+      setConnections(await listAgentIntegrations());
+    } catch {
+      setConnectionError(t("agentConnectionFailed"));
+    }
+  }, [t]);
+
   useEffect(() => {
     if (open) {
       setKey("");
       setEditingKey(false);
       setKeyError(null);
       setSkillError(null);
+      setConnectionError(null);
+      setRestartTargets([]);
       void refreshSkills();
+      void refreshConnections();
     }
-  }, [open]);
+  }, [open, refreshConnections]);
 
   const saveKey = async () => {
     try {
@@ -80,6 +100,59 @@ export function SettingsDialog({
       setKeyError(String(cause));
     } finally {
       setBusy(false);
+    }
+  };
+
+  const connectAgent = async (target: AgentIntegrationTarget) => {
+    const result = await installAgentIntegration(target);
+    setConnections((current) => current.map((item) => item.target === target ? result.status : item));
+    if (result.restartRequired) {
+      setRestartTargets((current) => [...new Set([...current, result.status.displayName])]);
+    }
+  };
+
+  const connectOne = async (target: AgentIntegrationTarget) => {
+    try {
+      setConnectionBusy(target);
+      setConnectionError(null);
+      await connectAgent(target);
+    } catch {
+      setConnectionError(t("agentConnectionFailed"));
+      await refreshConnections();
+    } finally {
+      setConnectionBusy(null);
+    }
+  };
+
+  const connectAll = async () => {
+    try {
+      setConnectionBusy("all");
+      setConnectionError(null);
+      for (const connection of connections.filter((item) => item.cliAvailable && (!item.connected || item.needsUpdate))) {
+        await connectAgent(connection.target);
+      }
+    } catch {
+      setConnectionError(t("agentConnectionFailed"));
+      await refreshConnections();
+    } finally {
+      setConnectionBusy(null);
+    }
+  };
+
+  const disconnectAgent = async (target: AgentIntegrationTarget) => {
+    try {
+      setConnectionBusy(target);
+      setConnectionError(null);
+      const result = await removeAgentIntegration(target);
+      setConnections((current) => current.map((item) => item.target === target ? result.status : item));
+      if (result.restartRequired) {
+        setRestartTargets((current) => [...new Set([...current, result.status.displayName])]);
+      }
+    } catch {
+      setConnectionError(t("agentConnectionFailed"));
+      await refreshConnections();
+    } finally {
+      setConnectionBusy(null);
     }
   };
 
@@ -185,6 +258,74 @@ export function SettingsDialog({
                 >
                   {t("manageKeys")} <ExternalLink />
                 </Button>
+              </section>
+              <section className="settings-agent-connections" aria-labelledby="settings-agent-connections-title">
+                <header>
+                  <span><PlugZap /></span>
+                  <div>
+                    <strong id="settings-agent-connections-title">{t("agentConnections")}</strong>
+                    <small>{t("agentConnectionsHint")}</small>
+                  </div>
+                  {connections.some((item) => item.cliAvailable && (!item.connected || item.needsUpdate)) ? (
+                    <Button type="button" size="xs" disabled={connectionBusy !== null} onClick={() => void connectAll()}>
+                      {connectionBusy === "all" ? <LoaderCircle className="spin" /> : <PlugZap />}
+                      {t("connectAvailableAgents")}
+                    </Button>
+                  ) : null}
+                </header>
+                <div className="agent-connection-list">
+                  {connections.length ? connections.map((connection) => {
+                    const busyTarget = connectionBusy === connection.target || connectionBusy === "all";
+                    const statusLabel = connection.needsUpdate
+                        ? t("agentUpdateReady")
+                        : connection.connected
+                          ? t("agentConnected")
+                          : !connection.cliAvailable ? t("agentNotInstalled") : t("agentReadyToConnect");
+                    const detailLabel = connection.connected
+                      ? t("agentConnectedHint")
+                      : !connection.cliAvailable ? t("agentMissingHint") : t("agentReadyHint");
+                    return (
+                      <article className={connection.connected ? "connected" : ""} key={connection.target}>
+                        <span className="agent-connection-mark" aria-hidden="true">{connection.target === "claude" ? "CL" : connection.target === "codex" ? "CX" : "HM"}</span>
+                        <div>
+                          <strong>{connection.displayName}</strong>
+                          <small>{detailLabel}</small>
+                        </div>
+                        <span className={`agent-connection-status ${connection.connected ? "connected" : connection.cliAvailable ? "available" : "missing"}`}>
+                          {connection.connected ? <Check /> : !connection.cliAvailable ? <CircleAlert /> : null}
+                          {statusLabel}
+                        </span>
+                        {connection.cliAvailable ? (
+                          <Button
+                            type="button"
+                            size="xs"
+                            variant={connection.connected && !connection.needsUpdate ? "outline" : "default"}
+                            disabled={connectionBusy !== null}
+                            onClick={() => void connectOne(connection.target)}
+                          >
+                            {busyTarget ? <LoaderCircle className="spin" /> : connection.connected ? <RefreshCw /> : <PlugZap />}
+                            {connection.needsUpdate ? t("updateConnection") : connection.connected ? t("repairConnection") : t("connectAgent")}
+                          </Button>
+                        ) : null}
+                        {connection.connected ? (
+                          <Button
+                            type="button"
+                            size="icon-xs"
+                            variant="ghost"
+                            disabled={connectionBusy !== null}
+                            aria-label={t("disconnectAgent", { name: connection.displayName })}
+                            onClick={() => void disconnectAgent(connection.target)}
+                          ><Unplug /></Button>
+                        ) : null}
+                      </article>
+                    );
+                  }) : <p className="agent-connections-loading">{t("loading")}</p>}
+                </div>
+                {restartTargets.length ? (
+                  <p className="agent-connection-restart"><Check /> {t("restartAgentsToFinish", { names: restartTargets.join(", ") })}</p>
+                ) : null}
+                {connectionError ? <p className="settings-connection-error" role="alert">{connectionError}</p> : null}
+                <p className="settings-note">{t("agentConnectionPrivacy")}</p>
               </section>
               <Field.Root className="settings-key-field">
                 <Field.Label className="settings-field-label" nativeLabel={false} render={<div />}>{t("language")}</Field.Label>
