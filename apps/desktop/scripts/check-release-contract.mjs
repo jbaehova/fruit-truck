@@ -24,6 +24,7 @@ const ffmpegEnvironment = readText("apps/desktop/scripts/ffmpeg-version.env");
 const landingSource = readText("apps/landing/src/main.ts");
 const landingHtml = readText("apps/landing/index.html");
 const releaseWorkflow = readText(".github/workflows/release.yml");
+const checkWorkflow = readText(".github/workflows/check.yml");
 
 const cargoVersion = cargoToml.match(/^version\s*=\s*"([^"]+)"/m)?.[1];
 assert.ok(cargoVersion, "Could not read the desktop Cargo package version.");
@@ -83,6 +84,29 @@ assert.match(
   releaseWorkflow,
   /prepare-agent-runtime\.sh --universal/,
   "The release workflow does not prepare the Universal Agent Kit runtime.",
+);
+const nativeBuildWorkflow = checkWorkflow.split(/^  native-build:\s*$/m)[1];
+assert.ok(nativeBuildWorkflow, "The desktop check workflow is missing the native-build job.");
+assert.match(
+  nativeBuildWorkflow,
+  /agent-kit\/package-lock\.json/,
+  "The native desktop check does not cache the Agent Kit lockfile.",
+);
+assert.match(
+  nativeBuildWorkflow,
+  /npm ci --prefix agent-kit/,
+  "The native desktop check does not install Agent Kit dependencies.",
+);
+const nativeCorePreparationIndex = nativeBuildWorkflow.indexOf("prepare-core-sidecar.sh");
+const nativeAgentPreparationIndex = nativeBuildWorkflow.indexOf("prepare-agent-runtime.sh");
+assert.ok(nativeCorePreparationIndex !== -1, "The native desktop check does not prepare Fruit Truck Core.");
+assert.ok(
+  nativeAgentPreparationIndex > nativeCorePreparationIndex,
+  "The native desktop check must prepare Agent Kit after Fruit Truck Core and before Rust tests.",
+);
+assert.ok(
+  nativeAgentPreparationIndex < nativeBuildWorkflow.indexOf("cargo test"),
+  "The native desktop check must prepare Agent Kit before Rust tests.",
 );
 
 const ffmpegValues = Object.fromEntries(
