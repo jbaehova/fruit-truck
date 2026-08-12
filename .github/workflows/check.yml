@@ -37,10 +37,8 @@ jobs:
       - name: Install desktop dependencies
         run: npm ci
 
-      - name: Install Chromium and FFmpeg
-        run: |
-          npx playwright install chromium
-          brew list ffmpeg >/dev/null 2>&1 || brew install ffmpeg
+      - name: Install Chromium
+        run: npx playwright install chromium
 
       - name: Run TypeScript, lint, and unit checks
         run: |

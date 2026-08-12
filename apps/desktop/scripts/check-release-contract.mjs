@@ -99,6 +99,10 @@ for (const unsupportedReleaseValue of ["macos-15-intel", "x86_64-apple-darwin", 
 }
 const nativeBuildWorkflow = checkWorkflow.split(/^  native-build:\s*$/m)[1];
 assert.ok(nativeBuildWorkflow, "The desktop check workflow is missing the native-build job.");
+assert.ok(
+  !checkWorkflow.includes("brew install ffmpeg"),
+  "Browser CI must not install FFmpeg; release packaging builds its pinned copy from source.",
+);
 assert.match(
   nativeBuildWorkflow,
   /agent-kit\/package-lock\.json/,
