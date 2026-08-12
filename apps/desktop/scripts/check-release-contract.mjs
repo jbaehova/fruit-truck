@@ -109,13 +109,25 @@ assert.match(
   /npm ci --prefix agent-kit/,
   "The native desktop check does not install Agent Kit dependencies.",
 );
+const nativeCorePreparationIndex = nativeBuildWorkflow.indexOf("prepare-core-sidecar.sh");
+const nativeAgentPreparationIndex = nativeBuildWorkflow.indexOf("prepare-agent-runtime.sh");
+const nativeCargoTestIndex = nativeBuildWorkflow.indexOf("cargo test");
 assert.ok(
-  packageJson.scripts?.["build:e2e:desktop"]?.includes("prepare-core-sidecar.sh"),
-  "The native desktop bundle does not prepare Fruit Truck Core.",
+  nativeCorePreparationIndex !== -1,
+  "The native desktop check does not prepare Fruit Truck Core.",
 );
 assert.ok(
-  packageJson.scripts?.["build:e2e:desktop"]?.includes("prepare-agent-runtime.sh"),
-  "The native desktop bundle does not prepare Agent Kit.",
+  nativeAgentPreparationIndex > nativeCorePreparationIndex,
+  "The native desktop check must prepare Agent Kit after Fruit Truck Core.",
+);
+assert.ok(
+  nativeCargoTestIndex > nativeAgentPreparationIndex,
+  "The native desktop check must prepare bundled resources before compiling Rust tests.",
+);
+assert.match(
+  nativeBuildWorkflow,
+  /npx tauri build --debug --bundles app/,
+  "The native desktop check does not build the prepared app bundle.",
 );
 assert.equal(
   packageJson.scripts?.["bundle:mac"],

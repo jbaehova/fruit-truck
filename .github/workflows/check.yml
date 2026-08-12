@@ -87,8 +87,10 @@ jobs:
 
       - name: Run Rust tests
         run: |
+          bash scripts/prepare-core-sidecar.sh
+          bash scripts/prepare-agent-runtime.sh
           cargo test --manifest-path src-tauri/Cargo.toml --workspace
           cargo clippy --manifest-path src-tauri/Cargo.toml --workspace --all-targets -- -D warnings
 
       - name: Build native desktop test bundle
-        run: npm run build:e2e:desktop
+        run: npx tauri build --debug --bundles app --config src-tauri/tauri.e2e.conf.json
