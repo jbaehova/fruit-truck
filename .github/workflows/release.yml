@@ -187,7 +187,9 @@ jobs:
         with:
           node-version: 24
           cache: npm
-          cache-dependency-path: apps/desktop/package-lock.json
+          cache-dependency-path: |
+            apps/desktop/package-lock.json
+            agent-kit/package-lock.json
 
       - name: Install Rust targets
         uses: dtolnay/rust-toolchain@stable
@@ -199,9 +201,10 @@ jobs:
         with:
           workspaces: "apps/desktop/src-tauri -> target"
 
-      - name: Install desktop dependencies
-        working-directory: apps/desktop
-        run: npm ci
+      - name: Install desktop and Agent Kit dependencies
+        run: |
+          npm ci --prefix apps/desktop
+          npm ci --prefix agent-kit
 
       - name: Download FFmpeg architecture artifacts
         uses: actions/download-artifact@v4
