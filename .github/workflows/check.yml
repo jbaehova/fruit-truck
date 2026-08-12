@@ -84,6 +84,8 @@ jobs:
         run: |
           bash scripts/prepare-core-sidecar.sh
           cargo test --manifest-path src-tauri/Cargo.toml --workspace
+          cargo test --manifest-path src-tauri/Cargo.toml -p fruit-truck-core --release \
+            tests::one_hundred_session_command_p95_stays_below_twenty_milliseconds -- --ignored --exact
           cargo clippy --manifest-path src-tauri/Cargo.toml --workspace --all-targets -- -D warnings
 
       - name: Build native desktop test bundle

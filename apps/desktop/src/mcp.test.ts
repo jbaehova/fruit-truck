@@ -386,8 +386,9 @@ test("canonical fast MCP rebases concurrent typed commands for one session", asy
       ops: [{ type: "resolve_decision", decisionId, userResponse: "Also approved", optionId: "approve" }],
     }),
   ]);
-  assert.equal(resolutions.filter((item) => !item.isError).length, 1);
-  assert.equal(resolutions.filter((item) => item.isError).length, 1);
+  const resolutionDiagnostics = JSON.stringify(resolutions);
+  assert.equal(resolutions.filter((item) => !item.isError).length, 1, resolutionDiagnostics);
+  assert.equal(resolutions.filter((item) => item.isError).length, 1, resolutionDiagnostics);
   assert.match(String(resolutions.find((item) => item.isError)?.value), /already resolved/i);
 });
 
@@ -1397,6 +1398,8 @@ test("OpenRouter thread batches persist media-free attempts and resume independe
   let imageActive = 0;
   let maxImageActive = 0;
   let imageCalls = 0;
+  let releaseInitialImageBatch!: () => void;
+  const initialImageBatch = new Promise<void>((resolve) => { releaseInitialImageBatch = resolve; });
   const imagePrompts: string[] = [];
   const imagePayloads: Record<string, unknown>[] = [];
   let enhancementCalls = 0;
@@ -1442,10 +1445,19 @@ test("OpenRouter thread batches persist media-free attempts and resume independe
     }
     if (request.method === "POST" && request.url === "/images") {
       imageCalls += 1;
+      const imageCall = imageCalls;
       imagePrompts.push(String(body.prompt ?? ""));
       imagePayloads.push(body);
       imageActive += 1;
       maxImageActive = Math.max(maxImageActive, imageActive);
+      if (imageCall <= 2) {
+        // Keep the first response open until its batch sibling arrives, regardless of runner speed.
+        if (imageCall === 2) releaseInitialImageBatch();
+        await Promise.race([
+          initialImageBatch,
+          new Promise<void>((resolve) => setTimeout(resolve, 1_000)),
+        ]);
+      }
       await new Promise((resolve) => setTimeout(resolve, 40));
       imageActive -= 1;
       if (String(body.prompt).includes("RETRY_429")) {
@@ -1456,7 +1468,7 @@ test("OpenRouter thread batches persist media-free attempts and resume independe
         }
       }
       if (String(body.prompt).includes("FAIL_ONE")) return sendJson(400, { error: "intentional image failure" });
-      return sendJson(200, { data: [{ b64_json: Buffer.from(`image-${imageCalls}`).toString("base64"), media_type: "image/png" }], usage: { cost: 0.05 } });
+      return sendJson(200, { data: [{ b64_json: Buffer.from(`image-${imageCall}`).toString("base64"), media_type: "image/png" }], usage: { cost: 0.05 } });
     }
     if (request.method === "POST" && request.url === "/videos") {
       const id = `job-${nextJob++}`;

@@ -269,6 +269,7 @@ export default function App() {
   const runGenerationRef = useRef<() => void>(() => {});
   const dismissGenerationResultRef = useRef<() => void>(() => {});
   const polling = useRef(false);
+  const videoPollNotBefore = useRef(new Map<string, number>());
   const catalogHydrationRevision = useRef(0);
   const attemptStatuses = useRef<Map<string, GenerationAttempt["status"]> | null>(null);
   const resultHandoffTimer = useRef<number | undefined>(undefined);
@@ -868,14 +869,22 @@ export default function App() {
   ).sort().join("|");
 
   useEffect(() => {
-    if (!credential?.configured || !activeVideoJobIds) return;
+    if (!credential?.configured) return;
+    const activeJobKeys = new Set(activeVideoJobIds.split("|"));
+    for (const key of videoPollNotBefore.current.keys()) {
+      if (!activeJobKeys.has(key)) videoPollNotBefore.current.delete(key);
+    }
+    if (!activeVideoJobIds) return;
     const pollActiveJobs = async () => {
       if (polling.current) return;
       const nowMs = Date.now();
       const activeJobs = studioRef.current.sessions.flatMap((item) =>
         isTauriRuntime() && item.agentBridge ? [] : activeVideoJobsFromAttempts(item)
           .filter((job) => job.status === "pending" || job.status === "in_progress")
-          .filter((job) => hasVideoPollingTimedOut(job.submittedAt, nowMs) || isVideoPollDue(job.nextPollAt, nowMs))
+          .filter((job) => hasVideoPollingTimedOut(job.submittedAt, nowMs) || (
+            (videoPollNotBefore.current.get(`${item.id}:${job.jobId}`) ?? 0) <= nowMs
+            && isVideoPollDue(job.nextPollAt, nowMs)
+          ))
           .map((job) => ({ sessionId: item.id, job })),
       );
       if (!activeJobs.length) return;
@@ -887,7 +896,9 @@ export default function App() {
           const result = await pollVideo(job.jobId, (actualCostUsd) => {
             recordGenerationCost(sessionId, "video", job.threadId, job.attemptId, actualCostUsd);
           });
+          const pollKey = `${sessionId}:${job.jobId}`;
           if (result.status === "completed") {
+            videoPollNotBefore.current.set(pollKey, Number.POSITIVE_INFINITY);
             const polledAt = new Date().toISOString();
             const latestSession = studioRef.current.sessions.find((item) => item.id === sessionId);
             const existing = latestSession?.assets.find((item) => item.jobId === job.jobId);
@@ -966,6 +977,7 @@ export default function App() {
               };
             });
           } else if (result.status === "failed" || result.status === "cancelled" || result.status === "expired") {
+            videoPollNotBefore.current.set(pollKey, Number.POSITIVE_INFINITY);
             const polledAt = new Date().toISOString();
             const canceled = result.status === "cancelled";
             const message = result.error ?? (canceled
@@ -991,6 +1003,7 @@ export default function App() {
               },
             }));
           } else if (hasVideoPollingTimedOut(job.submittedAt)) {
+            videoPollNotBefore.current.set(pollKey, Number.POSITIVE_INFINITY);
             const completedAt = new Date().toISOString();
             const message = t("videoPollingTimedOut");
             patchSession(sessionId, (current) => ({
@@ -1014,13 +1027,15 @@ export default function App() {
             }));
           } else {
             const polledAt = new Date().toISOString();
+            const nextPollAtMs = Date.now() + VIDEO_POLL_INTERVAL_MS;
+            videoPollNotBefore.current.set(pollKey, nextPollAtMs);
             patchSession(sessionId, (current) => ({
               ...current,
               threads: job.threadId && job.attemptId ? {
                 ...current.threads,
                 video: current.threads.video.map((item) => item.id === job.threadId ? {
                   ...item,
-                  attempts: item.attempts.map((attempt) => attempt.id === job.attemptId ? { ...attempt, status: "in_progress", progress: result.progress, error: result.error, pollAttempts: (attempt.pollAttempts ?? 0) + 1, lastPolledAt: polledAt, nextPollAt: new Date(Date.now() + VIDEO_POLL_INTERVAL_MS).toISOString(), updatedAt: polledAt } : attempt),
+                  attempts: item.attempts.map((attempt) => attempt.id === job.attemptId ? { ...attempt, status: "in_progress", progress: result.progress, error: result.error, pollAttempts: (attempt.pollAttempts ?? 0) + 1, lastPolledAt: polledAt, nextPollAt: new Date(nextPollAtMs).toISOString(), updatedAt: polledAt } : attempt),
                 } : item),
               } : current.threads,
             }));
@@ -1029,6 +1044,10 @@ export default function App() {
           const polledAt = new Date().toISOString();
           const timedOut = hasVideoPollingTimedOut(job.submittedAt, Date.parse(polledAt));
           const message = timedOut ? t("videoPollingTimedOut") : errorMessage(error);
+          const pollKey = `${sessionId}:${job.jobId}`;
+          const retryAtMs = timedOut ? undefined : Date.now() + videoPollRetryDelayMs(job.pollAttempts ?? 0);
+          if (retryAtMs == null) videoPollNotBefore.current.set(pollKey, Number.POSITIVE_INFINITY);
+          else videoPollNotBefore.current.set(pollKey, retryAtMs);
           patchSession(sessionId, (current) => ({
             ...current,
             threads: job.threadId && job.attemptId ? {
@@ -1041,7 +1060,7 @@ export default function App() {
                   error: message,
                   pollAttempts: (attempt.pollAttempts ?? 0) + 1,
                   lastPolledAt: polledAt,
-                  nextPollAt: timedOut ? undefined : new Date(Date.now() + videoPollRetryDelayMs(attempt.pollAttempts ?? 0)).toISOString(),
+                  nextPollAt: retryAtMs == null ? undefined : new Date(retryAtMs).toISOString(),
                   completedAt: timedOut ? polledAt : attempt.completedAt,
                   updatedAt: polledAt,
                 } : attempt),
