@@ -18,8 +18,8 @@ for executable_name in ffmpeg ffprobe fruit-truckd; do
     exit 1
   }
   archs="$(lipo -archs "${executable}")"
-  [[ "${archs}" == *arm64* && "${archs}" == *x86_64* ]] || {
-    printf '%s is not Universal: %s\n' "${executable}" "${archs}" >&2
+  [[ "${archs}" == "arm64" ]] || {
+    printf '%s is not Apple Silicon-only: %s\n' "${executable}" "${archs}" >&2
     exit 1
   }
   dependencies="$(otool -L "${executable}" | grep -E '^[[:space:]]+(@|/)')"
@@ -30,9 +30,7 @@ for executable_name in ffmpeg ffprobe fruit-truckd; do
     otool -L "${executable}" >&2
     exit 1
   fi
-  if [[ "${executable_name}" == fruit-truckd ]]; then
-    file "${executable}" | grep -q 'Mach-O universal binary'
-  else
+  if [[ "${executable_name}" != fruit-truckd ]]; then
     PATH="/usr/bin:/bin:/usr/sbin:/sbin" "${executable}" -hide_banner -version
   fi
   codesign --verify --strict "${executable}"
@@ -59,25 +57,17 @@ for bundled_agent_file in \
     exit 1
   }
 done
-for node_arch in arm64 x64; do
-  agent_node_candidate="${RESOURCES_DIR}/agent-runtime/node-${node_arch}"
-  [[ -x "${agent_node_candidate}" ]] || {
-    printf 'Bundled Node.js runtime is not executable: %s\n' "${agent_node_candidate}" >&2
-    exit 1
-  }
-  candidate_archs="$(lipo -archs "${agent_node_candidate}")"
-  expected_arch="${node_arch/x64/x86_64}"
-  [[ "${candidate_archs}" == "${expected_arch}" ]] || {
-    printf 'Bundled Node.js runtime has the wrong architecture: %s\n' "${candidate_archs}" >&2
-    exit 1
-  }
-  codesign --verify --strict "${agent_node_candidate}"
-done
-if [[ "$(uname -m)" == "arm64" ]]; then
-  agent_node="${RESOURCES_DIR}/agent-runtime/node-arm64"
-else
-  agent_node="${RESOURCES_DIR}/agent-runtime/node-x64"
-fi
+agent_node="${RESOURCES_DIR}/agent-runtime/node"
+[[ -x "${agent_node}" ]] || {
+  printf 'Bundled Node.js runtime is not executable: %s\n' "${agent_node}" >&2
+  exit 1
+}
+node_archs="$(lipo -archs "${agent_node}")"
+[[ "${node_archs}" == "arm64" ]] || {
+  printf 'Bundled Node.js runtime is not Apple Silicon-only: %s\n' "${node_archs}" >&2
+  exit 1
+}
+codesign --verify --strict "${agent_node}"
 PATH="/usr/bin:/bin:/usr/sbin:/sbin" "${agent_node}" --version | grep -Eq '^v24\.'
 
 verification_home="$(mktemp -d "${TMPDIR:-/tmp}/fruit-truck-verify.XXXXXX")"
@@ -134,4 +124,4 @@ PY
 
 codesign --verify --deep --strict "${APP_BUNDLE}"
 
-printf 'Fruit Truck.app contains signed, self-contained Universal media tools, Agent Kit runtime, and a compatible Core.\n'
+printf 'Fruit Truck.app contains signed, self-contained Apple Silicon media tools, Agent Kit runtime, and a compatible Core.\n'

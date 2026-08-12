@@ -8,14 +8,15 @@ repository_dir="$(cd -- "${desktop_dir}/../.." && pwd)"
 agent_kit_dir="${repository_dir}/agent-kit"
 output_dir="${desktop_dir}/src-tauri/target/bundled-agent-runtime"
 core_dir="${desktop_dir}/src-tauri/target/bundled-tools"
-mode="current"
-
-if [[ "${1:-}" == "--universal" ]]; then
-  mode="universal"
-elif [[ -n "${1:-}" ]]; then
-  echo "Usage: prepare-agent-runtime.sh [--universal]" >&2
+if [[ -n "${1:-}" ]]; then
+  echo "Usage: prepare-agent-runtime.sh" >&2
   exit 2
 fi
+
+[[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]] || {
+  echo "Fruit Truck desktop builds support Apple Silicon macOS only." >&2
+  exit 1
+}
 
 # shellcheck disable=SC1091
 source "${script_dir}/agent-runtime-version.env"
@@ -74,33 +75,15 @@ cp -R -- "${agent_kit_dir}/skills" "${output_dir}/agent-kit/skills"
 cp -R -- "${agent_kit_dir}/node_modules/pngjs" "${output_dir}/agent-kit/node_modules/pngjs"
 cp -- "${agent_kit_dir}/package.json" "${agent_kit_dir}/compatibility.json" "${output_dir}/agent-kit/"
 
-target_triple="$(rustc -vV | sed -n 's/^host: //p')"
-if [[ "${mode}" == "universal" ]]; then
-  runtime_node_version="${NODE_VERSION}"
-  for arch in arm64 x64; do
-    prepare_node_arch "${arch}"
-  done
-  cp -- "${node_cache_dir}/node-v${NODE_VERSION}-darwin-arm64/bin/node" "${output_dir}/node-arm64"
-  cp -- "${node_cache_dir}/node-v${NODE_VERSION}-darwin-x64/bin/node" "${output_dir}/node-x64"
-  cp -- "${node_cache_dir}/node-v${NODE_VERSION}-darwin-arm64/LICENSE" "${output_dir}/LICENSE.node.txt"
-else
-  machine_arch="$(uname -m)"
-  case "${machine_arch}" in
-    arm64) node_arch="arm64" ;;
-    x86_64) node_arch="x64" ;;
-    *) echo "Unsupported macOS architecture: ${machine_arch}" >&2; exit 1 ;;
-  esac
-  prepare_node_arch "${node_arch}"
-  cp -- "${node_cache_dir}/node-v${NODE_VERSION}-darwin-${node_arch}/bin/node" "${output_dir}/node"
-  cp -- "${node_cache_dir}/node-v${NODE_VERSION}-darwin-${node_arch}/LICENSE" "${output_dir}/LICENSE.node.txt"
-  runtime_node_version="${NODE_VERSION}"
-  core_path="${core_dir}/fruit-truckd-${target_triple}"
-  [[ -x "${core_path}" ]] || {
-    echo "Prepare the Fruit Truck Core sidecar before the agent runtime." >&2
-    exit 1
-  }
-fi
+prepare_node_arch arm64
+cp -- "${node_cache_dir}/node-v${NODE_VERSION}-darwin-arm64/bin/node" "${output_dir}/node"
+cp -- "${node_cache_dir}/node-v${NODE_VERSION}-darwin-arm64/LICENSE" "${output_dir}/LICENSE.node.txt"
+core_path="${core_dir}/fruit-truckd-aarch64-apple-darwin"
+[[ -x "${core_path}" ]] || {
+  echo "Prepare the Apple Silicon Fruit Truck Core sidecar before the agent runtime." >&2
+  exit 1
+}
 
 find "${output_dir}" -maxdepth 1 -type f -name 'node*' -exec chmod 0755 {} +
-printf 'Prepared bundled Agent Kit %s with Node.js %s (%s).\n' \
-  "$(node -p "require('${agent_kit_dir}/package.json').version")" "${runtime_node_version}" "${mode}"
+printf 'Prepared bundled Agent Kit %s with Node.js %s for Apple Silicon.\n' \
+  "$(node -p "require('${agent_kit_dir}/package.json').version")" "${NODE_VERSION}"

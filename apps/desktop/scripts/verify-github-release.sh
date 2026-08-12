@@ -20,9 +20,7 @@ done
   exit 2
 }
 
-release_json="$(gh api --paginate --slurp "repos/${REPOSITORY}/releases?per_page=100" | \
-  jq -c --arg tag "${RELEASE_TAG}" \
-    '[.[][] | select(.tag_name == $tag)][0] // empty | {tagName: .tag_name, assets: [.assets[] | {name, apiUrl: .url, digest}]}')"
+release_json="$(gh release view "${RELEASE_TAG}" --repo "${REPOSITORY}" --json tagName,assets 2>/dev/null || true)"
 [[ -n "${release_json}" ]] || {
   printf 'GitHub Release does not exist: %s\n' "${RELEASE_TAG}" >&2
   exit 1
@@ -36,7 +34,6 @@ required_assets=(
   "latest.json"
   "ffmpeg-${FFMPEG_VERSION}.tar.xz"
   "build-config-arm64.txt"
-  "build-config-x86_64.txt"
   "ffmpeg-${FFMPEG_VERSION}-assets.sha256"
   "THIRD_PARTY_NOTICES.md"
 )
@@ -65,7 +62,6 @@ for pattern in \
   'Fruit-Truck-macOS-universal.dmg.sha256' \
   "ffmpeg-${FFMPEG_VERSION}.tar.xz" \
   'build-config-arm64.txt' \
-  'build-config-x86_64.txt' \
   "ffmpeg-${FFMPEG_VERSION}-assets.sha256"; do
   asset_url="$(jq -r --arg name "${pattern}" '.assets[] | select(.name == $name) | .apiUrl' <<<"${release_json}")"
   [[ -n "${asset_url}" && "${asset_url}" != "null" ]]
@@ -80,7 +76,7 @@ jq -e --arg version "${expected_version}" '.version == $version' "${verification
 updater_api_url="$(jq -r '.assets[] | select(.name == "Fruit-Truck-macOS-universal.app.tar.gz") | .apiUrl' <<<"${release_json}")"
 updater_browser_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/Fruit-Truck-macOS-universal.app.tar.gz"
 signature="$(<"${verification_dir}/Fruit-Truck-macOS-universal.app.tar.gz.sig")"
-for platform in darwin-aarch64 darwin-x86_64 darwin-universal darwin-aarch64-app darwin-x86_64-app darwin-universal-app; do
+for platform in darwin-aarch64 darwin-aarch64-app; do
   jq -e \
     --arg platform "${platform}" \
     --arg signature "${signature}" \
@@ -92,6 +88,13 @@ for platform in darwin-aarch64 darwin-x86_64 darwin-universal darwin-aarch64-app
       exit 1
     }
 done
+jq -e '
+  (.platforms | keys | length) == 2 and
+  (.platforms | keys | all(. == "darwin-aarch64" or . == "darwin-aarch64-app"))
+' "${verification_dir}/latest.json" >/dev/null || {
+  printf 'latest.json contains a non-Apple-Silicon updater mapping.\n' >&2
+  exit 1
+}
 
 jq -r '.plugins.updater.pubkey' "${SOURCE_ROOT}/apps/desktop/src-tauri/tauri.conf.json" | \
   base64 --decode > "${verification_dir}/updater-public.key"
@@ -117,4 +120,4 @@ grep -Eq '^[0-9a-f]{64}[[:space:]]+Fruit-Truck-macOS-universal\.dmg$' \
   printf '%s  %s\n' "${FFMPEG_SHA256}" "ffmpeg-${FFMPEG_VERSION}.tar.xz" | shasum -a 256 --check
 )
 
-printf 'GitHub Release %s contains a complete signed updater, notarized DMG metadata, and FFmpeg compliance set.\n' "${RELEASE_TAG}"
+printf 'GitHub Release %s contains a complete Apple Silicon updater, notarized DMG metadata, and FFmpeg compliance set.\n' "${RELEASE_TAG}"

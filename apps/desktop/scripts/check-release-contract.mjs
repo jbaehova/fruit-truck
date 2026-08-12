@@ -82,9 +82,21 @@ assert.match(
 );
 assert.match(
   releaseWorkflow,
-  /prepare-agent-runtime\.sh --universal/,
-  "The release workflow does not prepare the Universal Agent Kit runtime.",
+  /prepare-macos-release-assets\.sh/,
+  "The release workflow does not prepare the self-contained Apple Silicon assets.",
 );
+assert.match(releaseWorkflow, /runs-on: macos-15/, "The release workflow is not pinned to the Apple Silicon runner.");
+assert.match(
+  releaseWorkflow,
+  /--target aarch64-apple-darwin/,
+  "The release workflow does not build the Apple Silicon target.",
+);
+for (const unsupportedReleaseValue of ["macos-15-intel", "x86_64-apple-darwin", "universal-apple-darwin"]) {
+  assert.ok(
+    !releaseWorkflow.includes(unsupportedReleaseValue),
+    `The release workflow still contains unsupported architecture work: ${unsupportedReleaseValue}`,
+  );
+}
 const nativeBuildWorkflow = checkWorkflow.split(/^  native-build:\s*$/m)[1];
 assert.ok(nativeBuildWorkflow, "The desktop check workflow is missing the native-build job.");
 assert.match(
@@ -97,16 +109,18 @@ assert.match(
   /npm ci --prefix agent-kit/,
   "The native desktop check does not install Agent Kit dependencies.",
 );
-const nativeCorePreparationIndex = nativeBuildWorkflow.indexOf("prepare-core-sidecar.sh");
-const nativeAgentPreparationIndex = nativeBuildWorkflow.indexOf("prepare-agent-runtime.sh");
-assert.ok(nativeCorePreparationIndex !== -1, "The native desktop check does not prepare Fruit Truck Core.");
 assert.ok(
-  nativeAgentPreparationIndex > nativeCorePreparationIndex,
-  "The native desktop check must prepare Agent Kit after Fruit Truck Core and before Rust tests.",
+  packageJson.scripts?.["build:e2e:desktop"]?.includes("prepare-core-sidecar.sh"),
+  "The native desktop bundle does not prepare Fruit Truck Core.",
 );
 assert.ok(
-  nativeAgentPreparationIndex < nativeBuildWorkflow.indexOf("cargo test"),
-  "The native desktop check must prepare Agent Kit before Rust tests.",
+  packageJson.scripts?.["build:e2e:desktop"]?.includes("prepare-agent-runtime.sh"),
+  "The native desktop bundle does not prepare Agent Kit.",
+);
+assert.equal(
+  packageJson.scripts?.["bundle:mac"],
+  "bash scripts/build-macos-apple-silicon.sh",
+  "The macOS bundle command must use the complete Apple Silicon release path.",
 );
 
 const ffmpegValues = Object.fromEntries(

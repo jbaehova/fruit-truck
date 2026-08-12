@@ -103,7 +103,7 @@ npm run tauri:dev
 
 リポジトリのルートから `./run.sh` を実行することもできます。Node.js 24 以上が必要で、古い Node が `PATH` の先頭にあっても、インストール済みの Node 24 以上を選択できます。macOS では開発プロセスを **Fruit Truck** という表示名で起動します。ブラウザー専用の開発画面は `./run.sh --web`、または `apps/desktop` で `npm run dev` を実行してください。
 
-ソースツリーのデスクトップレンダリングは、開発者の `PATH` にある `ffmpeg` と `ffprobe` を使用します。Homebrew は任意の導入手段であり、プロジェクト要件ではありません。リリース DMG には Universal 実行ファイルが同梱されます。
+ソースツリーのデスクトップレンダリングは、開発者の `PATH` にある `ffmpeg` と `ffprobe` を使用します。Homebrew は任意の導入手段であり、プロジェクト要件ではありません。リリース DMG には Apple Silicon 実行ファイルが同梱されます。
 
 新規インストールでは、初回起動ガイドがワークスペースを開く前に OpenRouter 接続を設定します。以後は **設定** でキーを変更でき、モデルカタログは自動的に読み込まれます。
 
@@ -160,7 +160,7 @@ Playwright は 1920×1080 の全画面を基準にヘッドレスで実行され
 
 ### macOS メディアパッケージング
 
-`npm run bundle:mac:universal` は検証済みソースアーカイブから FFmpeg 8.1.2 を Apple Silicon と Intel 向けにビルドし、両方のスライスを結合して macOS システムライブラリだけへリンクすることを確認し、アプリバンドルへ配置します。続いて `src-tauri/tauri.release.conf.json` を使って Universal DMG をビルドします。
+`npm run bundle:mac` は検証済みソースアーカイブから FFmpeg 8.1.2 を Apple Silicon 向けにビルドし、macOS システムライブラリだけへリンクすることを確認して、Fruit Truck Core、Node.js、Agent Kit、Skills と共にアプリバンドルへ配置します。続いて `src-tauri/tauri.release.conf.json` を使って Apple Silicon DMG をビルドします。
 
 FFmpeg ビルドでは GPL と非自由コンポーネントを無効化します。レンダリングはトリム、タイムスタンプのリセット、アスペクト比を保つスケール、パディング、30 fps 正規化、連結を単一フィルターグラフで行い、その後 `h264_videotoolbox` で一度だけエンコードします。ハードウェアエンコードが利用できなければ、`allow_sw=1` が Apple のソフトウェアフォールバックを提供します。[サードパーティ通知](../../THIRD_PARTY_NOTICES.md)と[リリースガイド](../RELEASING.md)を参照してください。
 

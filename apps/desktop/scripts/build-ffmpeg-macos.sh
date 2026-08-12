@@ -7,16 +7,15 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/ffmpeg-version.env"
 
 OUTPUT_DIR=""
-BUILD_ARCH="$(uname -m)"
 KEEP_SOURCE_ARCHIVE=""
 INPUT_SOURCE_ARCHIVE=""
 
 usage() {
   cat <<'EOF'
-Usage: build-ffmpeg-macos.sh --output-dir DIR [--arch arm64|x86_64]
+Usage: build-ffmpeg-macos.sh --output-dir DIR
        [--input-source-archive PATH] [--source-archive PATH]
 
-Build the pinned LGPL FFmpeg and FFprobe executables for one macOS architecture.
+Build the pinned LGPL FFmpeg and FFprobe executables for Apple Silicon.
 The resulting executables have no Homebrew runtime dependency.
 EOF
 }
@@ -25,10 +24,6 @@ while (( $# > 0 )); do
   case "$1" in
     --output-dir)
       OUTPUT_DIR="${2:?--output-dir requires a path}"
-      shift 2
-      ;;
-    --arch)
-      BUILD_ARCH="${2:?--arch requires arm64 or x86_64}"
       shift 2
       ;;
     --source-archive)
@@ -55,12 +50,12 @@ done
   printf 'FFmpeg macOS binaries must be built on macOS.\n' >&2
   exit 1
 }
+[[ "$(uname -m)" == "arm64" ]] || {
+  printf 'Fruit Truck releases support Apple Silicon only.\n' >&2
+  exit 1
+}
 [[ -n "${OUTPUT_DIR}" ]] || {
   printf '%s\n' '--output-dir is required.' >&2
-  exit 2
-}
-[[ "${BUILD_ARCH}" == "arm64" || "${BUILD_ARCH}" == "x86_64" ]] || {
-  printf 'Unsupported architecture: %s\n' "${BUILD_ARCH}" >&2
   exit 2
 }
 
@@ -102,19 +97,13 @@ SOURCE_DIR="${BUILD_ROOT}/ffmpeg-${FFMPEG_VERSION}"
 INSTALL_DIR="${BUILD_ROOT}/install"
 mkdir -p -- "${INSTALL_DIR}" "${OUTPUT_DIR}"
 
-if [[ "${BUILD_ARCH}" == "arm64" ]]; then
-  FFMPEG_ARCH="aarch64"
-else
-  FFMPEG_ARCH="x86_64"
-fi
-
 CONFIGURE_ARGS=(
   "--prefix=${INSTALL_DIR}"
   "--target-os=darwin"
-  "--arch=${FFMPEG_ARCH}"
+  "--arch=aarch64"
   "--cc=clang"
-  "--extra-cflags=-arch ${BUILD_ARCH} -mmacosx-version-min=11.0"
-  "--extra-ldflags=-arch ${BUILD_ARCH} -mmacosx-version-min=11.0"
+  "--extra-cflags=-arch arm64 -mmacosx-version-min=11.0"
+  "--extra-ldflags=-arch arm64 -mmacosx-version-min=11.0"
   "--disable-gpl"
   "--disable-nonfree"
   "--disable-shared"
@@ -132,19 +121,11 @@ CONFIGURE_ARGS=(
   "--enable-pthreads"
 )
 
-if [[ "${BUILD_ARCH}" != "$(uname -m)" ]]; then
-  CONFIGURE_ARGS+=("--enable-cross-compile")
-fi
-if [[ "${BUILD_ARCH}" == "x86_64" ]] && ! command -v nasm >/dev/null 2>&1; then
-  printf 'nasm is unavailable; building the Intel decoder/filter slice without x86 assembly optimizations.\n' >&2
-  CONFIGURE_ARGS+=("--disable-x86asm")
-fi
-
 (
   cd "${SOURCE_DIR}"
   ./configure "${CONFIGURE_ARGS[@]}"
-  make -j"$(sysctl -n hw.logicalcpu)"
-  make install
+  make -s -j"$(sysctl -n hw.logicalcpu)"
+  make -s install
 )
 
 cp -f -- "${INSTALL_DIR}/bin/ffmpeg" "${OUTPUT_DIR}/ffmpeg"
@@ -155,11 +136,11 @@ chmod 0755 "${OUTPUT_DIR}/ffmpeg" "${OUTPUT_DIR}/ffprobe"
   printf 'FFmpeg version: %s\n' "${FFMPEG_VERSION}"
   printf 'Source: %s\n' "${FFMPEG_SOURCE_URL}"
   printf 'Source SHA-256: %s\n' "${FFMPEG_SHA256}"
-  printf 'Build architecture: %s\n' "${BUILD_ARCH}"
+  printf 'Build architecture: arm64\n'
   printf './configure'
   printf ' %q' "${CONFIGURE_ARGS[@]}"
   printf '\n'
-} > "${OUTPUT_DIR}/build-config-${BUILD_ARCH}.txt"
+} > "${OUTPUT_DIR}/build-config-arm64.txt"
 
 cp -f -- "${SOURCE_DIR}/COPYING.LGPLv2.1" "${OUTPUT_DIR}/COPYING.LGPLv2.1"
 cp -f -- "${SOURCE_DIR}/LICENSE.md" "${OUTPUT_DIR}/FFmpeg-LICENSE.md"

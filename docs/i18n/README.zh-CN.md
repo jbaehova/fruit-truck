@@ -103,7 +103,7 @@ npm run tauri:dev
 
 也可以从仓库根目录运行 `./run.sh`。它需要 Node.js 24+；即使 `PATH` 中较旧的 Node 排在前面，也能选择已安装的 Node 24+。在 macOS 上，开发进程会以 **Fruit Truck** 的可见名称启动。若使用仅浏览器的开发视图，请运行 `./run.sh --web`，或在 `apps/desktop` 中运行 `npm run dev`。
 
-源代码目录中的桌面渲染会使用开发者 `PATH` 里的 `ffmpeg` 和 `ffprobe`。Homebrew 只是可选安装方式，并非项目要求。发布版 DMG 会捆绑自己的 Universal 可执行文件。
+源代码目录中的桌面渲染会使用开发者 `PATH` 里的 `ffmpeg` 和 `ffprobe`。Homebrew 只是可选安装方式，并非项目要求。发布版 DMG 会捆绑自己的 Apple Silicon 可执行文件。
 
 全新安装时，首次启动向导会在打开工作区前完成 OpenRouter 连接。之后可在 **设置** 中更换密钥，模型目录会自动加载。
 
@@ -160,7 +160,7 @@ Playwright 以 1920×1080 全窗口为基准无头运行，覆盖两种应用语
 
 ### macOS 媒体打包
 
-`npm run bundle:mac:universal` 从已验证的源代码归档分别为 Apple Silicon 和 Intel 构建 FFmpeg 8.1.2，合并两个架构切片，验证其仅链接 macOS 系统库，再放入应用包中。随后使用 `src-tauri/tauri.release.conf.json` 构建 Universal DMG。
+`npm run bundle:mac` 从已验证的源代码归档为 Apple Silicon 构建 FFmpeg 8.1.2，验证其仅链接 macOS 系统库，再与 Fruit Truck Core、Node.js、Agent Kit 和 Skills 一起放入应用包中。随后使用 `src-tauri/tauri.release.conf.json` 构建 Apple Silicon DMG。
 
 FFmpeg 构建会禁用 GPL 和非自由组件。渲染使用一个滤镜图完成裁剪、时间戳重置、保持宽高比缩放、填充、30 fps 标准化与拼接，之后仅执行一次 `h264_videotoolbox` 编码。如果硬件编码不可用，`allow_sw=1` 会启用 Apple 软件回退。请参阅[第三方声明](../../THIRD_PARTY_NOTICES.md)和[发布指南](../RELEASING.md)。
 

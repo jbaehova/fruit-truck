@@ -18,8 +18,7 @@
     "tauri:dev": "bash scripts/prepare-core-sidecar.sh && bash scripts/prepare-agent-runtime.sh && tauri dev",
     "mcp": "node scripts/mcp-server.ts",
     "build:e2e:desktop": "bash scripts/prepare-core-sidecar.sh && bash scripts/prepare-agent-runtime.sh && tauri build --debug --bundles app --config src-tauri/tauri.e2e.conf.json",
-    "bundle:mac": "bash scripts/prepare-core-sidecar.sh && bash scripts/prepare-agent-runtime.sh && tauri build --bundles dmg",
-    "bundle:mac:universal": "bash scripts/build-macos-universal.sh"
+    "bundle:mac": "bash scripts/build-macos-apple-silicon.sh"
   },
   "dependencies": {
     "@base-ui/react": "^1.6.0",

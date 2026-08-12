@@ -3,8 +3,8 @@
 set -Eeuo pipefail
 
 TOOLS_DIR="${1:?Path to the bundled-tools directory is required.}"
-FFMPEG="${TOOLS_DIR}/ffmpeg-universal-apple-darwin"
-FFPROBE="${TOOLS_DIR}/ffprobe-universal-apple-darwin"
+FFMPEG="${TOOLS_DIR}/ffmpeg-aarch64-apple-darwin"
+FFPROBE="${TOOLS_DIR}/ffprobe-aarch64-apple-darwin"
 
 for executable in "${FFMPEG}" "${FFPROBE}"; do
   [[ -x "${executable}" ]] || {
@@ -12,8 +12,8 @@ for executable in "${FFMPEG}" "${FFPROBE}"; do
     exit 1
   }
   ARCHS="$(lipo -archs "${executable}")"
-  [[ "${ARCHS}" == *arm64* && "${ARCHS}" == *x86_64* ]] || {
-    printf '%s is not Universal: %s\n' "${executable}" "${ARCHS}" >&2
+  [[ "${ARCHS}" == "arm64" ]] || {
+    printf '%s is not Apple Silicon-only: %s\n' "${executable}" "${ARCHS}" >&2
     exit 1
   }
   DEPENDENCIES="$(otool -L "${executable}" | grep -E '^[[:space:]]+(@|/)')"
@@ -35,4 +35,4 @@ grep -Eq 'matroska|webm' <<<"${DEMUXERS}"
 grep -Eq 'vp8|vp9|av1' <<<"${DECODERS}"
 PATH="/usr/bin:/bin:/usr/sbin:/sbin" "${FFPROBE}" -hide_banner -version
 
-printf 'Bundled Universal FFmpeg validation passed.\n'
+printf 'Bundled Apple Silicon FFmpeg validation passed.\n'

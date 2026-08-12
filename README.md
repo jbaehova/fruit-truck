@@ -110,7 +110,7 @@ name **Fruit Truck**. To use the browser-only development view, run
 
 Source-tree desktop rendering uses `ffmpeg` and `ffprobe` from the developer's
 `PATH`. Homebrew is one optional way to obtain them, not a project requirement.
-Release DMGs bundle their own Universal executables.
+Release DMGs bundle their own Apple Silicon executables.
 
 On a fresh install, the first-run guide connects your OpenRouter API key before opening the workspace. You can change the key later in **Settings**; the model catalogs load automatically.
 
@@ -160,10 +160,11 @@ Playwright runs headless at 1920×1080 and covers first-run onboarding in both a
 
 ### macOS media packaging
 
-`npm run bundle:mac:universal` builds FFmpeg 8.1.2 from its verified source
-archive for Apple Silicon and Intel, combines both slices, validates that they
-link only to macOS system libraries, and places them in the app bundle. It then
-builds the Universal DMG using `src-tauri/tauri.release.conf.json`.
+`npm run bundle:mac` builds FFmpeg 8.1.2 from its verified source archive for
+Apple Silicon, validates that it links only to macOS system libraries, and
+places it in the app bundle with Fruit Truck Core, Node.js, Agent Kit, and its
+skills. It then builds the Apple Silicon DMG using
+`src-tauri/tauri.release.conf.json`.
 
 The FFmpeg build disables GPL and non-free components. Rendering uses one
 filter graph for trim, timestamp reset, aspect-fit scale, pad, 30 fps

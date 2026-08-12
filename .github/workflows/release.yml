@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Unpublished v-prefixed tag to build or resume (for example, v0.6.2)
+        description: Unpublished v-prefixed tag to build or resume (for example, v0.6.3)
         required: true
         type: string
 
@@ -25,7 +25,7 @@ env:
 jobs:
   preflight:
     name: Validate release contract and secrets
-    runs-on: macos-latest
+    runs-on: macos-15
     steps:
       - name: Check out release tag
         uses: actions/checkout@v6
@@ -45,35 +45,30 @@ jobs:
           cache: npm
           cache-dependency-path: apps/desktop/package-lock.json
 
-      - name: Validate tag, versions, updater, FFmpeg, and landing page contract
+      - name: Validate the release contract
         run: |
           node "$GITHUB_WORKSPACE/.release-automation/apps/desktop/scripts/check-release-contract.mjs" \
             --repository-root "$GITHUB_WORKSPACE" \
             --tag "$RELEASE_TAG"
 
-      - name: Verify checkout is the exact Git tag
-        run: |
-          checked_out_commit=$(git rev-parse HEAD)
-          tag_commit=$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")
-          [[ "$checked_out_commit" == "$tag_commit" ]]
-
-      - name: Reject published or non-forward release targets
+      - name: Verify the exact unpublished release tag
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          release_json=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" | \
-            jq -c --arg tag "$RELEASE_TAG" '[.[][] | select(.tag_name == $tag)][0] // empty')
-          if [[ -n "$release_json" && "$(jq -r '.draft' <<<"$release_json")" != "true" ]]; then
-            printf 'Published releases are immutable. Create a new patch tag instead of repairing %s.\n' "$RELEASE_TAG" >&2
-            exit 1
+          [[ "$(git rev-parse HEAD)" == "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" ]]
+          if release_json=$(gh release view "$RELEASE_TAG" --json isDraft 2>/dev/null); then
+            [[ "$(jq -r '.isDraft' <<<"$release_json")" == "true" ]] || {
+              printf 'Published releases are immutable. Create a new patch tag instead of repairing %s.\n' "$RELEASE_TAG" >&2
+              exit 1
+            }
           fi
-          latest_tag=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq '.tag_name' 2>/dev/null || true)
+          latest_tag=$(gh release view --json tagName --jq '.tagName' 2>/dev/null || true)
           if [[ -n "$latest_tag" ]]; then
             node "$GITHUB_WORKSPACE/.release-automation/apps/desktop/scripts/check-release-order.mjs" \
               "$RELEASE_TAG" "$latest_tag"
           fi
 
-      - name: Verify release credentials are registered
+      - name: Verify release credentials
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -99,18 +94,14 @@ jobs:
             exit 1
           fi
 
-      - name: Install updater signing verifier
-        working-directory: apps/desktop
-        run: |
-          npm ci
-          command -v minisign >/dev/null 2>&1 || brew install minisign
-
-      - name: Verify updater private key matches the embedded public key
+      - name: Verify updater signing key
         working-directory: apps/desktop
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
+          npm ci
+          command -v minisign >/dev/null 2>&1 || brew install minisign
           fixture="$RUNNER_TEMP/fruit-truck-updater-key-check"
           printf 'Fruit Truck updater signing preflight\n' > "$fixture"
           npx tauri signer sign "$fixture"
@@ -121,55 +112,9 @@ jobs:
             -p "$RUNNER_TEMP/updater-public.key" \
             -x "$RUNNER_TEMP/updater-signature.minisig"
 
-  build-ffmpeg:
-    name: Build FFmpeg (${{ matrix.arch }})
-    needs: preflight
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: arm64
-            runner: macos-15
-          - arch: x86_64
-            runner: macos-15-intel
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - name: Check out release tag
-        uses: actions/checkout@v6
-        with:
-          ref: ${{ env.RELEASE_REF }}
-
-      - name: Install Intel assembler
-        if: matrix.arch == 'x86_64'
-        run: command -v nasm >/dev/null 2>&1 || brew install nasm
-
-      - name: Build pinned LGPL FFmpeg
-        env:
-          FFMPEG_ARCH: ${{ matrix.arch }}
-        run: |
-          source apps/desktop/scripts/ffmpeg-version.env
-          output_dir="$RUNNER_TEMP/ffmpeg-$FFMPEG_ARCH"
-          mkdir -p "$output_dir"
-          source_archive_args=()
-          if [[ "$FFMPEG_ARCH" == "arm64" ]]; then
-            source_archive_args=(--source-archive "$output_dir/ffmpeg-$FFMPEG_VERSION.tar.xz")
-          fi
-          bash apps/desktop/scripts/build-ffmpeg-macos.sh \
-            --arch "$FFMPEG_ARCH" \
-            --output-dir "$output_dir" \
-            "${source_archive_args[@]}"
-
-      - name: Upload architecture artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ffmpeg-${{ matrix.arch }}
-          path: ${{ runner.temp }}/ffmpeg-${{ matrix.arch }}
-          if-no-files-found: error
-          retention-days: 14
-
   release-macos:
-    needs: [preflight, build-ffmpeg]
-    runs-on: macos-latest
+    needs: preflight
+    runs-on: macos-15
     steps:
       - name: Check out release tag
         uses: actions/checkout@v6
@@ -191,77 +136,60 @@ jobs:
             apps/desktop/package-lock.json
             agent-kit/package-lock.json
 
-      - name: Install Rust targets
+      - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
+          targets: aarch64-apple-darwin
 
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: "apps/desktop/src-tauri -> target"
 
-      - name: Install desktop and Agent Kit dependencies
+      - name: Install build dependencies
         run: |
           npm ci --prefix apps/desktop
           npm ci --prefix agent-kit
           command -v minisign >/dev/null 2>&1 || brew install minisign
 
-      - name: Download FFmpeg architecture artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: ffmpeg-*
-          path: ${{ runner.temp }}/ffmpeg-artifacts
-
-      - name: Assemble and verify Universal FFmpeg
+      - name: Prepare self-contained Apple Silicon assets
         run: |
-          bash apps/desktop/scripts/assemble-universal-ffmpeg.sh \
-            "$RUNNER_TEMP/ffmpeg-artifacts/ffmpeg-arm64" \
-            "$RUNNER_TEMP/ffmpeg-artifacts/ffmpeg-x86_64"
+          source apps/desktop/scripts/ffmpeg-version.env
+          bash apps/desktop/scripts/prepare-macos-release-assets.sh \
+            --source-archive "$RUNNER_TEMP/ffmpeg-$FFMPEG_VERSION.tar.xz"
 
-      - name: Build Universal Fruit Truck Core helper
-        run: bash apps/desktop/scripts/build-core-sidecar-universal.sh
-
-      - name: Prepare self-contained Universal Agent Kit runtime
-        run: bash apps/desktop/scripts/prepare-agent-runtime.sh --universal
-
-      - name: Run desktop checks
-        working-directory: apps/desktop
+      - name: Run release checks
         run: |
-          npm run test:unit
-          npm run check
-          cargo test --manifest-path src-tauri/Cargo.toml --workspace
-          cargo test --manifest-path src-tauri/Cargo.toml -p fruit-truck-core --release \
-            tests::one_hundred_session_command_p95_stays_below_twenty_milliseconds -- --ignored --exact
+          npm run check --prefix apps/desktop
+          npm run check --prefix agent-kit
 
-      - name: Find or create the GitHub release
+      - name: Find or create the draft release
         id: release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          release_json=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" | \
-            jq -c --arg tag "$RELEASE_TAG" '[.[][] | select(.tag_name == $tag)][0] // empty')
-          if [[ -z "$release_json" ]]; then
+          if ! gh release view "$RELEASE_TAG" --json databaseId,isDraft > "$RUNNER_TEMP/release.json" 2>/dev/null; then
             gh release create "$RELEASE_TAG" \
               --verify-tag \
               --draft \
               --generate-notes \
               --title "Fruit Truck $RELEASE_TAG" \
-              --notes $'Download `Fruit-Truck-macOS-universal.dmg` for Apple Silicon or Intel Macs.\n\nSigned in-app updates are supported for users on 0.2.0 or newer. Users upgrading from 0.1.x must install this DMG once; later releases can be installed from inside the app.\n\nThis build is signed with a Developer ID certificate and notarized by Apple.'
-            release_json=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" | \
-              jq -c --arg tag "$RELEASE_TAG" '[.[][] | select(.tag_name == $tag)][0] // empty')
+              --notes $'Download `Fruit-Truck-macOS-universal.dmg` on an Apple Silicon Mac. Intel Macs are not supported.\n\nThe app includes Fruit Truck Core, FFmpeg, Node.js, Agent Kit, and its skills; users do not need Homebrew or separate packages.\n\nSigned in-app updates are supported for users on 0.2.0 or newer. This build is signed with a Developer ID certificate and notarized by Apple.'
+            for _ in {1..5}; do
+              gh release view "$RELEASE_TAG" --json databaseId,isDraft > "$RUNNER_TEMP/release.json" 2>/dev/null && break
+              sleep 2
+            done
           fi
-          release_id=$(jq -r '.id' <<<"$release_json")
-          release_draft=$(jq -r '.draft' <<<"$release_json")
-          [[ "$release_id" =~ ^[0-9]+$ ]]
-          [[ "$release_draft" == "true" ]] || {
-            printf 'Refusing to modify published release %s. Create a new patch tag.\n' "$RELEASE_TAG" >&2
+          release_id=$(jq -r '.databaseId' "$RUNNER_TEMP/release.json")
+          release_draft=$(jq -r '.isDraft' "$RUNNER_TEMP/release.json")
+          [[ "$release_id" =~ ^[0-9]+$ && "$release_draft" == "true" ]] || {
+            printf 'Release %s is missing or is already published.\n' "$RELEASE_TAG" >&2
             exit 1
           }
           printf 'id=%s\n' "$release_id" >> "$GITHUB_OUTPUT"
 
-      - name: Build and upload Universal app, DMG, and signed updater
-        id: tauri
+      # Keep the legacy public asset name so the permanent landing-page URL keeps working.
+      - name: Build and upload Apple Silicon app, DMG, and updater
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -277,26 +205,26 @@ jobs:
           releaseId: ${{ steps.release.outputs.id }}
           tagName: ${{ env.RELEASE_TAG }}
           releaseBody: |
-            Download `Fruit-Truck-macOS-universal.dmg` for Apple Silicon or Intel Macs.
+            Download `Fruit-Truck-macOS-universal.dmg` on an Apple Silicon Mac. Intel Macs are not supported.
 
-            Signed in-app updates are supported for users on 0.2.0 or newer. Users upgrading from 0.1.x must install this DMG once; later releases can be installed from inside the app.
+            Fruit Truck includes Core, FFmpeg, Node.js, Agent Kit, and its skills. No package manager or separate runtime is required.
 
-            This build is signed with a Developer ID certificate and notarized by Apple.
+            Signed in-app updates are supported for users on 0.2.0 or newer. This build is signed with a Developer ID certificate and notarized by Apple.
           releaseDraft: true
           prerelease: false
           retryAttempts: 2
           uploadUpdaterJson: true
           uploadUpdaterSignatures: true
-          args: --target universal-apple-darwin --bundles app,dmg --config src-tauri/tauri.release.conf.json
+          args: --target aarch64-apple-darwin --bundles app,dmg --config src-tauri/tauri.release.conf.json
           releaseAssetNamePattern: Fruit-Truck-macOS-universal[ext]
 
-      - name: Notarize and staple Universal DMG
+      - name: Notarize and staple DMG
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          DMG_PATH=$(find apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/dmg -name '*.dmg' -print -quit)
+          DMG_PATH=$(find apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg -name 'Fruit Truck_*_aarch64.dmg' -print -quit)
           test -n "$DMG_PATH"
           xcrun notarytool submit "$DMG_PATH" \
             --apple-id "$APPLE_ID" \
@@ -305,10 +233,10 @@ jobs:
             --wait
           xcrun stapler staple "$DMG_PATH"
 
-      - name: Verify app bundle is self-contained and accepted by Gatekeeper
+      - name: Verify the installed app is self-contained and trusted
         run: |
-          APP_PATH=$(find apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos -name 'Fruit Truck.app' -print -quit)
-          DMG_PATH=$(find apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/dmg -name '*.dmg' -print -quit)
+          APP_PATH=$(find apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos -name 'Fruit Truck.app' -print -quit)
+          DMG_PATH=$(find apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg -name 'Fruit Truck_*_aarch64.dmg' -print -quit)
           test -n "$APP_PATH"
           test -n "$DMG_PATH"
           bash apps/desktop/scripts/verify-app-bundle-media-tools.sh "$APP_PATH"
@@ -318,35 +246,30 @@ jobs:
           spctl --assess --type execute --verbose=2 "$APP_PATH"
           spctl --assess --type open --context context:primary-signature --verbose=2 "$DMG_PATH"
 
-      - name: Upload notarized DMG, FFmpeg compliance assets, and checksums
+      - name: Upload notarized DMG and FFmpeg compliance files
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           source apps/desktop/scripts/ffmpeg-version.env
-          DMG_PATH=$(find apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/dmg -name '*.dmg' -print -quit)
-          test -n "$DMG_PATH"
+          DMG_PATH=$(find apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg -name 'Fruit Truck_*_aarch64.dmg' -print -quit)
           cp "$DMG_PATH" Fruit-Truck-macOS-universal.dmg
-          DMG_HASH=$(shasum -a 256 Fruit-Truck-macOS-universal.dmg | cut -d ' ' -f 1)
-          printf '%s  %s\n' "$DMG_HASH" "Fruit-Truck-macOS-universal.dmg" > Fruit-Truck-macOS-universal.dmg.sha256
-          cp "$RUNNER_TEMP/ffmpeg-artifacts/ffmpeg-arm64/ffmpeg-$FFMPEG_VERSION.tar.xz" .
+          shasum -a 256 Fruit-Truck-macOS-universal.dmg > Fruit-Truck-macOS-universal.dmg.sha256
+          cp "$RUNNER_TEMP/ffmpeg-$FFMPEG_VERSION.tar.xz" .
           cp apps/desktop/src-tauri/target/bundled-tools/licenses/ffmpeg/build-config-arm64.txt .
-          cp apps/desktop/src-tauri/target/bundled-tools/licenses/ffmpeg/build-config-x86_64.txt .
           shasum -a 256 \
             "ffmpeg-$FFMPEG_VERSION.tar.xz" \
             build-config-arm64.txt \
-            build-config-x86_64.txt \
             > "ffmpeg-$FFMPEG_VERSION-assets.sha256"
           gh release upload "$RELEASE_TAG" \
             Fruit-Truck-macOS-universal.dmg \
             Fruit-Truck-macOS-universal.dmg.sha256 \
             "ffmpeg-$FFMPEG_VERSION.tar.xz" \
             build-config-arm64.txt \
-            build-config-x86_64.txt \
             "ffmpeg-$FFMPEG_VERSION-assets.sha256" \
             THIRD_PARTY_NOTICES.md \
             --clobber
 
-      - name: Verify every required release asset and updater mapping
+      - name: Verify release assets and updater
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -360,14 +283,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release edit "$RELEASE_TAG" --draft=false --latest
 
-      - name: Verify landing-page download target
+      - name: Verify permanent download URL
         run: |
           download_url="https://github.com/$GITHUB_REPOSITORY/releases/latest/download/Fruit-Truck-macOS-universal.dmg"
-          for attempt in {1..12}; do
-            if curl --fail --silent --show-error --location --head "$download_url" >/dev/null; then
-              exit 0
-            fi
+          for _ in {1..12}; do
+            curl --fail --silent --show-error --location --head "$download_url" >/dev/null && exit 0
             sleep 5
           done
-          printf 'Landing-page download target did not resolve: %s\n' "$download_url" >&2
+          printf 'Download URL did not resolve: %s\n' "$download_url" >&2
           exit 1

@@ -537,16 +537,7 @@ fn install_runtime(app: &tauri::AppHandle, root: &Path) -> Result<(PathBuf, Path
 }
 
 fn bundled_node_path(source: &Path) -> Result<PathBuf, String> {
-    let thin = source.join("node");
-    if thin.is_file() {
-        return Ok(thin);
-    }
-    let architecture = match std::env::consts::ARCH {
-        "aarch64" => "arm64",
-        "x86_64" => "x64",
-        value => return Err(format!("Unsupported Mac architecture: {value}")),
-    };
-    let path = source.join(format!("node-{architecture}"));
+    let path = source.join("node");
     path.is_file()
         .then_some(path)
         .ok_or_else(|| "This Fruit Truck build is missing its Node.js runtime.".to_string())

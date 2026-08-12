@@ -103,7 +103,7 @@ npm run tauri:dev
 
 También puedes ejecutar `./run.sh` desde la raíz del repositorio. Requiere Node.js 24+ y puede seleccionar una instalación compatible aunque una versión antigua aparezca antes en `PATH`. En macOS inicia el proceso de desarrollo con el nombre visible **Fruit Truck**. Para usar la vista de desarrollo solo en navegador, ejecuta `./run.sh --web` o `npm run dev` desde `apps/desktop`.
 
-El renderizado de escritorio desde el árbol de código usa `ffmpeg` y `ffprobe` del `PATH` del desarrollador. Homebrew es una forma opcional de obtenerlos, no un requisito. Los DMG de publicación incluyen ejecutables Universal propios.
+El renderizado de escritorio desde el árbol de código usa `ffmpeg` y `ffprobe` del `PATH` del desarrollador. Homebrew es una forma opcional de obtenerlos, no un requisito. Los DMG de publicación incluyen sus propios ejecutables para Apple Silicon.
 
 En una instalación nueva, la guía inicial configura OpenRouter antes de abrir el espacio de trabajo. Después puedes cambiar la clave en **Ajustes**; los catálogos se cargarán automáticamente.
 
@@ -160,7 +160,7 @@ Playwright se ejecuta sin interfaz a 1920×1080 y cubre la primera ejecución en
 
 ### Empaquetado de medios en macOS
 
-`npm run bundle:mac:universal` compila FFmpeg 8.1.2 desde su archivo fuente verificado para Apple Silicon e Intel, combina ambas arquitecturas, valida que solo enlace bibliotecas del sistema macOS y lo incorpora al paquete. Después crea el DMG Universal con `src-tauri/tauri.release.conf.json`.
+`npm run bundle:mac` compila FFmpeg 8.1.2 desde su archivo fuente verificado para Apple Silicon, valida que solo enlace bibliotecas del sistema macOS y lo incorpora al paquete junto con Fruit Truck Core, Node.js, Agent Kit y sus Skills. Después crea el DMG para Apple Silicon con `src-tauri/tauri.release.conf.json`.
 
 La compilación de FFmpeg desactiva componentes GPL y no libres. El renderizado usa un solo grafo de filtros para recortar, reiniciar marcas de tiempo, escalar conservando la relación de aspecto, rellenar, normalizar a 30 fps y concatenar, seguido de una codificación `h264_videotoolbox`. `allow_sw=1` ofrece la alternativa por software de Apple si el hardware no está disponible. Consulta los [avisos de terceros](../../THIRD_PARTY_NOTICES.md) y la [guía de publicación](../RELEASING.md).
 
