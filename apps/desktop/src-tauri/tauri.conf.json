@@ -40,10 +40,6 @@
     "active": true,
     "targets": ["dmg"],
     "createUpdaterArtifacts": true,
-    "externalBin": ["target/bundled-tools/fruit-truckd"],
-    "resources": {
-      "target/bundled-agent-runtime/": "agent-runtime/"
-    },
     "icon": ["icons/icon.icns"],
     "macOS": {
       "bundleName": "Fruit Truck",

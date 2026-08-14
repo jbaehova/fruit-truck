@@ -112,12 +112,14 @@ CONFIGURE_ARGS=(
   "--disable-network"
   "--disable-doc"
   "--disable-debug"
+  "--disable-ffmpeg"
   "--disable-ffplay"
   "--disable-avdevice"
+  "--disable-encoders"
+  "--disable-muxers"
+  "--disable-filters"
   "--disable-iconv"
   "--disable-securetransport"
-  "--enable-videotoolbox"
-  "--enable-audiotoolbox"
   "--enable-pthreads"
 )
 
@@ -128,9 +130,8 @@ CONFIGURE_ARGS=(
   make -s install
 )
 
-cp -f -- "${INSTALL_DIR}/bin/ffmpeg" "${OUTPUT_DIR}/ffmpeg"
 cp -f -- "${INSTALL_DIR}/bin/ffprobe" "${OUTPUT_DIR}/ffprobe"
-chmod 0755 "${OUTPUT_DIR}/ffmpeg" "${OUTPUT_DIR}/ffprobe"
+chmod 0755 "${OUTPUT_DIR}/ffprobe"
 
 {
   printf 'FFmpeg version: %s\n' "${FFMPEG_VERSION}"
@@ -148,13 +149,6 @@ if [[ -n "${KEEP_SOURCE_ARCHIVE}" ]]; then
   cp -f -- "${ARCHIVE}" "${KEEP_SOURCE_ARCHIVE}"
 fi
 
-file "${OUTPUT_DIR}/ffmpeg" "${OUTPUT_DIR}/ffprobe"
-otool -L "${OUTPUT_DIR}/ffmpeg"
-"${OUTPUT_DIR}/ffmpeg" -hide_banner -version
-ENCODERS="$("${OUTPUT_DIR}/ffmpeg" -hide_banner -encoders)"
-DEMUXERS="$("${OUTPUT_DIR}/ffmpeg" -hide_banner -demuxers)"
-DECODERS="$("${OUTPUT_DIR}/ffmpeg" -hide_banner -decoders)"
-grep -q 'h264_videotoolbox' <<<"${ENCODERS}"
-grep -Eq 'matroska|webm' <<<"${DEMUXERS}"
-grep -Eq 'vp8|vp9|av1' <<<"${DECODERS}"
+file "${OUTPUT_DIR}/ffprobe"
+otool -L "${OUTPUT_DIR}/ffprobe"
 "${OUTPUT_DIR}/ffprobe" -hide_banner -version

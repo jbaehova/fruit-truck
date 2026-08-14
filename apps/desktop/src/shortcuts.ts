@@ -15,7 +15,6 @@ export type AppCommandId =
   | "videoMode"
   | "toggleSessionSidebar"
   | "toggleInspector"
-  | "showAgent"
   | "showAssets"
   | "focusPrompt"
   | "generate"
@@ -75,7 +74,6 @@ export const APP_COMMANDS = [
   command({ id: "videoMode", labelKey: "commandVideoMode", group: "workspace", display: "⌘2", accelerator: "CmdOrCtrl+2", binding: { key: "2", meta: true } }),
   command({ id: "toggleSessionSidebar", labelKey: "commandToggleSidebar", group: "workspace", display: "⌃⌘S", accelerator: "Ctrl+Cmd+S", binding: { key: "s", meta: true, ctrl: true } }),
   command({ id: "toggleInspector", labelKey: "commandToggleInspector", group: "workspace", display: "⌥⌘I", binding: { key: "i", meta: true, alt: true } }),
-  command({ id: "showAgent", labelKey: "commandShowAgent", group: "workspace", display: "⌥⌘1", accelerator: "Cmd+Alt+1", binding: { key: "1", meta: true, alt: true } }),
   command({ id: "showAssets", labelKey: "commandShowAssets", group: "workspace", display: "⌥⌘2", accelerator: "Cmd+Alt+2", binding: { key: "2", meta: true, alt: true } }),
   command({ id: "focusPrompt", labelKey: "commandFocusPrompt", group: "workspace", display: "⇧Esc", binding: { key: "escape", shift: true } }),
   command({ id: "generate", labelKey: "commandGenerateShortcut", group: "workspace", display: "⌘Enter", accelerator: "CmdOrCtrl+Enter", binding: { key: "enter", meta: true } }),

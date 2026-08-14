@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "fruit-truck": {
-      "command": "fruit-truck-mcp",
-      "args": ["--agent-host", "codex"]
-    }
-  }
-}

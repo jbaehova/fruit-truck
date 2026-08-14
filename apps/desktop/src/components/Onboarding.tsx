@@ -9,49 +9,36 @@ import {
   ArrowRight,
   Check,
   CheckCircle2,
-  CircleAlert,
   ExternalLink,
   Eye,
   EyeOff,
   KeyRound,
   LoaderCircle,
   LockKeyhole,
-  PlugZap,
   Sparkles,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useI18n } from "@/i18n";
 import { isTauriRuntime } from "@/openrouter";
-import {
-  installAgentIntegration,
-  listAgentIntegrations,
-  type AgentIntegrationStatus,
-  type AgentIntegrationTarget,
-} from "@/agentBridge";
 
 const OPENROUTER_KEYS_URL = "https://openrouter.ai/settings/keys";
 
-type OnboardingStep = "welcome" | "connect" | "agents" | "complete";
+type OnboardingStep = "welcome" | "connect" | "complete";
 
 type Props = {
   ready: boolean;
-  initialStep?: "welcome" | "agents";
   onSave: (apiKey: string) => Promise<void>;
   onComplete: () => void;
 };
 
-export function Onboarding({ ready, initialStep = "welcome", onSave, onComplete }: Props) {
+export function Onboarding({ ready, onSave, onComplete }: Props) {
   const { t } = useI18n();
-  const [step, setStep] = useState<OnboardingStep>(initialStep);
+  const [step, setStep] = useState<OnboardingStep>("welcome");
   const [apiKey, setApiKey] = useState("");
   const [showKey, setShowKey] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [connections, setConnections] = useState<AgentIntegrationStatus[]>([]);
-  const [agentStatusLoading, setAgentStatusLoading] = useState(initialStep === "agents");
-  const [agentBusy, setAgentBusy] = useState<AgentIntegrationTarget | "all" | null>(null);
-  const [agentError, setAgentError] = useState<string | null>(null);
   const completionTimer = useRef<number | undefined>(undefined);
 
   useEffect(() => () => {
@@ -59,17 +46,8 @@ export function Onboarding({ ready, initialStep = "welcome", onSave, onComplete 
   }, []);
 
   useEffect(() => {
-    if (ready) setStep(initialStep);
-  }, [initialStep, ready]);
-
-  useEffect(() => {
-    if (!ready || initialStep !== "agents") return;
-    setAgentStatusLoading(true);
-    void listAgentIntegrations()
-      .then(setConnections)
-      .catch(() => setAgentError(t("agentStatusFailed")))
-      .finally(() => setAgentStatusLoading(false));
-  }, [initialStep, ready, t]);
+    if (ready) setStep("welcome");
+  }, [ready]);
 
   const openKeys = (event: React.MouseEvent<HTMLAnchorElement>) => {
     if (!isTauriRuntime()) return;
@@ -82,50 +60,11 @@ export function Onboarding({ ready, initialStep = "welcome", onSave, onComplete 
       setBusy(true);
       setError(null);
       await onSave(apiKey.trim());
-      setAgentStatusLoading(true);
-      setConnections(await listAgentIntegrations().catch(() => {
-        setAgentError(t("agentStatusFailed"));
-        return [];
-      }));
-      setAgentStatusLoading(false);
-      setStep("agents");
+      finish();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message.replace(/^Error:\s*/, "") : String(cause));
     } finally {
       setBusy(false);
-    }
-  };
-
-  const connectAgent = async (target: AgentIntegrationTarget) => {
-    const result = await installAgentIntegration(target);
-    setConnections((current) => current.map((item) => item.target === target ? result.status : item));
-  };
-
-  const connectOne = async (target: AgentIntegrationTarget) => {
-    try {
-      setAgentBusy(target);
-      setAgentError(null);
-      await connectAgent(target);
-    } catch {
-      setAgentError(t("agentConnectionFailed"));
-      setConnections(await listAgentIntegrations().catch(() => connections));
-    } finally {
-      setAgentBusy(null);
-    }
-  };
-
-  const connectAll = async () => {
-    try {
-      setAgentBusy("all");
-      setAgentError(null);
-      for (const connection of connections.filter((item) => item.cliAvailable && (!item.connected || item.needsUpdate))) {
-        await connectAgent(connection.target);
-      }
-    } catch {
-      setAgentError(t("agentConnectionFailed"));
-      setConnections(await listAgentIntegrations().catch(() => connections));
-    } finally {
-      setAgentBusy(null);
     }
   };
 
@@ -134,7 +73,7 @@ export function Onboarding({ ready, initialStep = "welcome", onSave, onComplete 
     completionTimer.current = window.setTimeout(onComplete, 900);
   };
 
-  const activeStep = step === "welcome" ? 1 : step === "connect" ? 2 : 3;
+  const activeStep = step === "welcome" ? 1 : 2;
 
   return (
     <Dialog.Root open>
@@ -162,13 +101,9 @@ export function Onboarding({ ready, initialStep = "welcome", onSave, onComplete 
                         <span>{activeStep > 1 ? <Check /> : "01"}</span>
                         <div><strong>{t("onboardingWelcomeStep")}</strong><small>{t("onboardingWelcomeStepHint")}</small></div>
                       </li>
-                      <li className={activeStep === 2 ? "active" : activeStep > 2 ? "complete" : ""}>
-                        <span>{activeStep > 2 ? <Check /> : "02"}</span>
+                      <li className={activeStep === 2 ? "active" : ""}>
+                        <span>{step === "complete" ? <Check /> : "02"}</span>
                         <div><strong>{t("onboardingConnectStep")}</strong><small>{t("onboardingConnectStepHint")}</small></div>
-                      </li>
-                      <li className={step === "complete" ? "complete" : activeStep === 3 ? "active" : ""}>
-                        <span>{step === "complete" ? <Check /> : "03"}</span>
-                        <div><strong>{t("onboardingAgentsStep")}</strong><small>{t("onboardingAgentsStepHint")}</small></div>
                       </li>
                     </ol>
                   </div>
@@ -282,51 +217,6 @@ export function Onboarding({ ready, initialStep = "welcome", onSave, onComplete 
                           </Button>
                         </footer>
                       </Form>
-                    </section>
-                  ) : step === "agents" ? (
-                    <section className="onboarding-stage onboarding-agents" key="agents">
-                      <span className="onboarding-kicker"><PlugZap /> {t("onboardingAgentsKicker")}</span>
-                      <Dialog.Title className="onboarding-title">{t("onboardingAgentsTitle")}</Dialog.Title>
-                      <Dialog.Description id="onboarding-description" className="onboarding-description">
-                        {t("onboardingAgentsDescription")}
-                      </Dialog.Description>
-
-                      <div className="onboarding-agent-list" aria-busy={agentStatusLoading}>
-                        {agentStatusLoading ? <p className="agent-connections-loading"><LoaderCircle className="spin" /> {t("checkingAgents")}</p> : null}
-                        {connections.map((connection) => {
-                          const actionable = connection.cliAvailable && (!connection.connected || connection.needsUpdate);
-                          return (
-                            <article className={connection.connected ? "connected" : ""} key={connection.target}>
-                              <span aria-hidden="true">{connection.target === "claude" ? "CL" : connection.target === "codex" ? "CX" : "HM"}</span>
-                              <div><strong>{connection.displayName}</strong><small>{connection.connected ? t("agentConnectedHint") : connection.cliAvailable ? t("agentReadyHint") : t("agentMissingHint")}</small></div>
-                              {actionable ? (
-                                <Button type="button" size="sm" variant={connection.connected ? "outline" : "default"} disabled={agentBusy !== null} onClick={() => void connectOne(connection.target)}>
-                                  {agentBusy === connection.target || agentBusy === "all" ? <LoaderCircle className="spin" /> : <PlugZap />}
-                                  {connection.needsUpdate ? t("updateConnection") : t("connectAgent")}
-                                </Button>
-                              ) : connection.connected ? (
-                                <span className="onboarding-agent-missing"><Check /> {t("agentConnected")}</span>
-                              ) : <span className="onboarding-agent-missing"><CircleAlert /> {t("agentNotInstalled")}</span>}
-                            </article>
-                          );
-                        })}
-                      </div>
-                      {agentError ? <p className="onboarding-agent-error" role="alert">{agentError}</p> : null}
-                      <p className="onboarding-agent-privacy"><LockKeyhole /> {t("agentConnectionPrivacy")}</p>
-
-                      <footer className="onboarding-actions">
-                        {connections.some((item) => item.cliAvailable && (!item.connected || item.needsUpdate)) ? (
-                          <Button type="button" variant="ghost" size="lg" disabled={agentStatusLoading} onClick={finish}>{t("onboardingSkipAgents")}</Button>
-                        ) : <span />}
-                        {connections.some((item) => item.cliAvailable && (!item.connected || item.needsUpdate)) ? (
-                          <Button type="button" size="lg" disabled={agentBusy !== null} onClick={() => void connectAll()}>
-                            {agentBusy === "all" ? <LoaderCircle className="spin" /> : <PlugZap />}
-                            {t("connectAvailableAgents")}
-                          </Button>
-                        ) : (
-                          <Button type="button" size="lg" disabled={agentStatusLoading} onClick={finish}>{t("continue")} <ArrowRight /></Button>
-                        )}
-                      </footer>
                     </section>
                   ) : (
                     <section className="onboarding-stage onboarding-complete" key="complete" role="status">

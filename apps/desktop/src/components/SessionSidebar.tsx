@@ -114,9 +114,6 @@ export function SessionSidebar({
           {!filtered.length ? <p className="session-empty">{t("noMatchingSessions")}</p> : null}
           {filtered.map((session) => {
             const active = session.id === activeId;
-            const pendingUiDecisions = session.agent.decisions.filter((decision) =>
-              decision.status === "pending" && decision.channel === "fruit_truck_ui"
-            ).length;
             const runningThreads = [...session.threads.image, ...session.threads.video]
               .filter((thread) => Boolean(activeGenerationAttempt(thread))).length;
             return (
@@ -148,10 +145,8 @@ export function SessionSidebar({
                   <span>
                     <strong>{session.name}</strong>
                     <small>{runningThreads
-                      ? t("parallelAgentActions", { count: runningThreads })
-                      : pendingUiDecisions
-                        ? t("pendingReviewCount", { count: pendingUiDecisions })
-                        : new Date(session.updatedAt).toLocaleString(locale)}</small>
+                      ? t("activeGenerations", { count: runningThreads })
+                      : new Date(session.updatedAt).toLocaleString(locale)}</small>
                   </span>
                 </button>
                 <div className="session-row-actions">

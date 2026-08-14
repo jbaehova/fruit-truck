@@ -156,6 +156,7 @@ export function AssetPreview({
 
   if (!source) return <span className={`asset-missing ${className ?? ""}`} />;
   if (asset.kind === "image") return <img className={className} src={source} alt={asset.name} draggable={false} />;
+  if (asset.kind === "audio") return <audio className={className} src={source} controls preload="metadata" />;
   if (transparentControls) return <TransparentVideoPlayer source={source} name={asset.name} className={className} />;
   return <video
     className={className}

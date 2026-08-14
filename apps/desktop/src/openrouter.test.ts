@@ -89,7 +89,7 @@ test("video request separates references from first and last frames", () => {
   assert.deepEqual(request.provider, { order: ["Alibaba"] });
 });
 
-test("video generation ignores video inputs and exposes only image roles", () => {
+test("video generation serializes declared image and video reference inputs", () => {
   const proseOnly: VideoModel = {
     id: "example/prose",
     name: "Prose",
@@ -99,12 +99,13 @@ test("video generation ignores video inputs and exposes only image roles", () =>
     id: "example/declared",
     name: "Declared",
     architecture: { input_modalities: ["text", "video", "image"] },
+    input_reference_types: ["image", "video"],
     max_input_references: 2,
   };
 
   assert.deepEqual(allowedAssetRoles("video", proseOnly), []);
   assert.deepEqual(allowedAssetRoles("video", declared), ["reference"]);
-  assert.equal(modelInputSignature("video", declared), "Text + image");
+  assert.equal(modelInputSignature("video", declared), "Text + image ref + video ref");
 
   const request = buildRequest({
     mode: "video",
@@ -114,7 +115,7 @@ test("video generation ignores video inputs and exposes only image roles", () =>
     options: {},
     providerJson: "",
   }, declared);
-  assert.equal(request.input_references, undefined);
+  assert.deepEqual(request.input_references, [{ type: "video_url", video_url: { url: "data:video/mp4;base64,source" } }]);
 });
 
 test("video statuses preserve every OpenRouter terminal state and fail safely", () => {

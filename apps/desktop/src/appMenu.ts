@@ -51,7 +51,7 @@ export async function createNativeAppMenu(
     settings, quit,
     newSession, newThread, duplicateThread, archiveThread, restoreThread, importAssets, exportAsset, generate,
     undo, redo, cut, copy, paste, selectAll,
-    findSessions, toggleSidebar, toggleInspector, imageMode, videoMode, showAgent, showAssets, previousThread, nextThread,
+    findSessions, toggleSidebar, toggleInspector, imageMode, videoMode, showAssets, previousThread, nextThread,
     minimize, fullscreen, bringAllToFront,
     shortcutHelp,
   ] = await Promise.all([
@@ -59,7 +59,7 @@ export async function createNativeAppMenu(
     item("settings"), item("quit"),
     item("newSession"), item("newThread"), item("duplicateThread"), item("archiveThread"), item("restoreThread"), item("importAssets"), item("exportAsset"), item("generate"),
     predefined("Undo"), predefined("Redo"), predefined("Cut"), predefined("Copy"), predefined("Paste"), predefined("SelectAll"),
-    item("findSessions"), item("toggleSessionSidebar", true), item("toggleInspector", true), item("imageMode", true), item("videoMode", true), item("showAgent", true), item("showAssets", true), item("previousThread"), item("nextThread"),
+    item("findSessions"), item("toggleSessionSidebar", true), item("toggleInspector", true), item("imageMode", true), item("videoMode", true), item("showAssets", true), item("previousThread"), item("nextThread"),
     predefined("Minimize"), predefined("Fullscreen"), predefined("BringAllToFront"),
     item("shortcutHelp"),
   ]);
@@ -83,7 +83,7 @@ export async function createNativeAppMenu(
     Submenu.new({
       id: "view-menu",
       text: t("menuView"),
-      items: [toggleSidebar, toggleInspector, await separator(), imageMode, videoMode, await separator(), showAgent, showAssets, await separator(), previousThread, nextThread],
+      items: [toggleSidebar, toggleInspector, await separator(), imageMode, videoMode, await separator(), showAssets, await separator(), previousThread, nextThread],
     }),
     Submenu.new({
       id: "window-menu",

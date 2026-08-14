@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -21,6 +21,7 @@ const tauriConfig = readJson("apps/desktop/src-tauri/tauri.conf.json");
 const releaseConfig = readJson("apps/desktop/src-tauri/tauri.release.conf.json");
 const cargoToml = readText("apps/desktop/src-tauri/Cargo.toml");
 const ffmpegEnvironment = readText("apps/desktop/scripts/ffmpeg-version.env");
+const mediaBuildScript = readText("apps/desktop/scripts/build-ffmpeg-macos.sh");
 const landingSource = readText("apps/landing/src/main.ts");
 const landingHtml = readText("apps/landing/index.html");
 const releaseWorkflow = readText(".github/workflows/release.yml");
@@ -51,35 +52,33 @@ const decodedPublicKey = Buffer.from(updater.pubkey, "base64").toString("utf8");
 assert.match(decodedPublicKey, /minisign public key/i, "The updater public key is not a valid encoded minisign public key.");
 
 const externalBins = new Set(releaseConfig.bundle?.externalBin ?? []);
-for (const binary of [
-  "target/bundled-tools/ffmpeg",
-  "target/bundled-tools/ffprobe",
-  "target/bundled-tools/fruit-truckd",
-]) {
-  assert.ok(externalBins.has(binary), `Release bundle is missing external binary: ${binary}`);
-}
+assert.deepEqual(
+  [...externalBins],
+  ["target/bundled-tools/ffprobe"],
+  "Release bundle must contain FFprobe and no removed sidecars.",
+);
 assert.equal(
   releaseConfig.bundle?.resources?.["target/bundled-tools/licenses/"],
   "licenses/",
   "Release bundle is not packaging the FFmpeg license directory.",
 );
-assert.equal(
-  releaseConfig.bundle?.resources?.["target/bundled-agent-runtime/"],
-  "agent-runtime/",
-  "Release bundle is not packaging the self-contained Agent Kit runtime.",
-);
-const agentKitPackage = readJson("agent-kit/package.json");
-const agentIntegrationSource = readText("apps/desktop/src-tauri/src/agent_integrations.rs");
-assert.ok(
-  agentIntegrationSource.includes(`const AGENT_KIT_VERSION: &str = "${agentKitPackage.version}";`),
-  "The desktop agent integration version differs from the bundled Agent Kit.",
-);
-const agentRuntimeEnvironment = readText("apps/desktop/scripts/agent-runtime-version.env");
-assert.match(
-  agentRuntimeEnvironment,
-  /^NODE_VERSION=24\.\d+\.\d+$/m,
-  "The bundled Agent Kit runtime must pin Node.js 24.",
-);
+for (const removedPath of [
+  "agent-kit",
+  "apps/desktop/src/agent.ts",
+  "apps/desktop/src/agentBridge.ts",
+  "apps/desktop/src/components/AssemblyDialog.tsx",
+  "apps/desktop/src-tauri/src/core_client.rs",
+  "apps/desktop/src-tauri/crates/fruit-truck-cli",
+  "apps/desktop/src-tauri/crates/fruit-truck-core",
+  "apps/desktop/src-tauri/crates/fruit-truck-protocol",
+  "apps/desktop/src-tauri/crates/fruit-truckd",
+]) {
+  assert.equal(existsSync(resolve(repositoryDirectory, removedPath)), false, `Removed path still exists: ${removedPath}`);
+}
+const nativeSource = readText("apps/desktop/src-tauri/src/lib.rs");
+for (const removedCommand of ["assemble_video", "read_agent_sessions", "commit_agent_operations", "report_desktop_runtime"]) {
+  assert.ok(!nativeSource.includes(removedCommand), `Removed native command is still exposed: ${removedCommand}`);
+}
 assert.match(
   releaseWorkflow,
   /prepare-macos-release-assets\.sh/,
@@ -103,30 +102,10 @@ assert.ok(
   !checkWorkflow.includes("brew install ffmpeg"),
   "Browser CI must not install FFmpeg; release packaging builds its pinned copy from source.",
 );
-assert.match(
-  nativeBuildWorkflow,
-  /agent-kit\/package-lock\.json/,
-  "The native desktop check does not cache the Agent Kit lockfile.",
-);
-assert.match(
-  nativeBuildWorkflow,
-  /npm ci --prefix agent-kit/,
-  "The native desktop check does not install Agent Kit dependencies.",
-);
-const nativeCorePreparationIndex = nativeBuildWorkflow.indexOf("prepare-core-sidecar.sh");
-const nativeAgentPreparationIndex = nativeBuildWorkflow.indexOf("prepare-agent-runtime.sh");
 const nativeCargoTestIndex = nativeBuildWorkflow.indexOf("cargo test");
 assert.ok(
-  nativeCorePreparationIndex !== -1,
-  "The native desktop check does not prepare Fruit Truck Core.",
-);
-assert.ok(
-  nativeAgentPreparationIndex > nativeCorePreparationIndex,
-  "The native desktop check must prepare Agent Kit after Fruit Truck Core.",
-);
-assert.ok(
-  nativeCargoTestIndex > nativeAgentPreparationIndex,
-  "The native desktop check must prepare bundled resources before compiling Rust tests.",
+  nativeCargoTestIndex !== -1,
+  "The native desktop check does not run Rust tests.",
 );
 assert.match(
   nativeBuildWorkflow,
@@ -152,6 +131,8 @@ assert.equal(
   `https://ffmpeg.org/releases/ffmpeg-${ffmpegValues.FFMPEG_VERSION}.tar.xz`,
   "Pinned FFmpeg source URL and version differ.",
 );
+assert.match(mediaBuildScript, /--disable-ffmpeg/, "The release media build still enables the removed FFmpeg program.");
+assert.ok(!mediaBuildScript.includes('INSTALL_DIR}/bin/ffmpeg"'), "The release media build still copies the removed FFmpeg program.");
 
 const downloadUrl = "https://github.com/jbaehova/fruit-truck/releases/latest/download/Fruit-Truck-macOS-universal.dmg";
 assert.ok(landingSource.includes(`const DOWNLOAD_URL = "${downloadUrl}"`), "Landing-page runtime download URL changed.");

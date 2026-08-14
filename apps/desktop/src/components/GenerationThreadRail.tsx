@@ -55,10 +55,9 @@ export function GenerationThreadRail({
           const latest = latestGenerationAttempt(thread);
           const state = activeAttempt?.status ?? latest?.status ?? "idle";
           const stateKey = state === "idle" ? "threadReady"
-            : state === "awaiting_host" ? "threadAwaitingHost"
-              : state === "uncertain" ? "threadUncertain"
+            : state === "uncertain" ? "threadUncertain"
                 : state === "canceled" ? "statusCanceled"
-                  : ["queued", "enhancing", "submitting", "in_progress"].includes(state) ? "statusInProgress"
+                  : ["enhancing", "submitting", "in_progress"].includes(state) ? "statusInProgress"
                   : state === "completed" ? "statusCompleted" : "statusFailed";
           const timing = activeAttempt?.jobId
             ? [

@@ -1,3 +1,5 @@
+import { applyKnownVideoCapabilities, videoInputPolicy, type InputMediaKind } from "./modelPolicies.ts";
+
 export type GenerationMode = "image" | "video";
 export type ReferenceRole = "reference" | "first_frame" | "last_frame";
 
@@ -65,7 +67,7 @@ export type VideoModel = {
     input_modalities?: string[];
     output_modalities?: string[];
   };
-  input_reference_types?: Array<"image" | "audio"> | null;
+  input_reference_types?: InputMediaKind[] | null;
   max_input_references?: number | null;
   supported_resolutions?: string[] | null;
   supported_aspect_ratios?: string[] | null;
@@ -469,7 +471,7 @@ export async function loadModels(mode: GenerationMode): Promise<GenerationModel[
   const architecture = new Map(
     (modalCatalog.data ?? []).map((model) => [model.id, model.architecture]),
   );
-  return (videoCatalog.data ?? []).map((model) => ({
+  return (videoCatalog.data ?? []).map((model) => applyKnownVideoCapabilities({
     ...model,
     architecture: model.architecture ?? architecture.get(model.id),
   }));
@@ -512,18 +514,23 @@ export function imageReferenceLimit(model: ImageModel | null): number {
   return model?.supported_parameters.input_references?.max ?? 0;
 }
 
-function videoReferenceTypes(model: VideoModel | null): Array<"image"> {
+export function videoReferenceTypes(model: VideoModel | null): InputMediaKind[] {
   if (!model) return [];
-  if (Array.isArray(model.input_reference_types)) {
-    return model.input_reference_types.filter((value): value is "image" => value === "image");
-  }
-  const declared = model.architecture?.input_modalities ?? [];
-  return declared.filter((value): value is "image" => value === "image");
+  return (model.input_reference_types ?? []).filter((value): value is InputMediaKind => ["image", "video", "audio"].includes(value));
 }
 
-export function videoReferenceLimit(model: VideoModel | null): number {
-  if (!model || videoReferenceTypes(model).length === 0) return 0;
-  return model.max_input_references ?? 1;
+export function videoReferenceLimit(model: VideoModel | null, kind: InputMediaKind = "image"): number {
+  if (!model || !videoReferenceTypes(model).includes(kind)) return 0;
+  return videoInputPolicy(model.id).references[kind] ?? model.max_input_references ?? 1;
+}
+
+export function videoTotalInputLimit(model: VideoModel | null): number {
+  if (!model) return 0;
+  const policy = videoInputPolicy(model.id);
+  const referenceTotal = policy.totalReferenceLimit
+    ?? (["image", "video", "audio"] as const).reduce((sum, kind) => sum + videoReferenceLimit(model, kind), 0);
+  const frameTotal = model.supported_frame_images?.length ?? 0;
+  return policy.combination === "allow" ? referenceTotal + frameTotal : Math.max(referenceTotal, frameTotal);
 }
 
 export function modelInputSignature(
@@ -537,7 +544,7 @@ export function modelInputSignature(
   const video = model as VideoModel;
   const parts = ["Text"];
   const referenceTypes = videoReferenceTypes(video);
-  if (referenceTypes.includes("image")) parts.push("image");
+  for (const kind of referenceTypes) parts.push(`${kind} ref`);
   if (video.supported_frame_images?.includes("first_frame")) parts.push("first frame");
   if (video.supported_frame_images?.includes("last_frame")) parts.push("last frame");
   return parts.join(" + ");
@@ -554,6 +561,22 @@ export function allowedAssetRoles(
   if (types.includes("image")) roles.push("reference");
   if (video?.supported_frame_images?.includes("first_frame")) roles.push("first_frame");
   if (video?.supported_frame_images?.includes("last_frame")) roles.push("last_frame");
+  return roles;
+}
+
+export function allowedAssetRolesForKind(
+  mode: GenerationMode,
+  model: GenerationModel | null,
+  kind: InputMediaKind,
+): ReferenceRole[] {
+  if (mode === "image") return kind === "image" ? allowedAssetRoles(mode, model) : [];
+  const video = model as VideoModel | null;
+  const roles: ReferenceRole[] = [];
+  if (videoReferenceTypes(video).includes(kind)) roles.push("reference");
+  if (kind === "image") {
+    if (video?.supported_frame_images?.includes("first_frame")) roles.push("first_frame");
+    if (video?.supported_frame_images?.includes("last_frame")) roles.push("last_frame");
+  }
   return roles;
 }
 
@@ -592,7 +615,10 @@ function parseProviderJson(raw: string): Record<string, unknown> | undefined {
 }
 
 function asReference(asset: ReferenceAsset) {
-  return { type: "image_url", image_url: { url: asset.dataUrl } };
+  const kind: InputMediaKind = asset.mediaType.startsWith("video/") ? "video"
+    : asset.mediaType.startsWith("audio/") ? "audio" : "image";
+  const type = `${kind}_url`;
+  return { type, [type]: { url: asset.dataUrl } };
 }
 
 export function buildRequest(draft: GenerationDraft, model: GenerationModel | null): Record<string, unknown> {
@@ -627,16 +653,23 @@ export function buildRequest(draft: GenerationDraft, model: GenerationModel | nu
       if (supported[key] && value !== undefined && value !== "") payload[key] = value;
     }
     const referenceTypes = videoReferenceTypes(videoModel);
-    const references = draft.assets.filter((asset) =>
-      asset.role === "reference" && asset.mediaType.startsWith("image/") && referenceTypes.includes("image")
-    );
-    const limit = videoReferenceLimit(videoModel);
+    const references = draft.assets.filter((asset) => {
+      const kind: InputMediaKind = asset.mediaType.startsWith("video/") ? "video"
+        : asset.mediaType.startsWith("audio/") ? "audio" : "image";
+      return asset.role === "reference" && referenceTypes.includes(kind);
+    });
     const frames = draft.assets.filter((asset) =>
       (asset.role === "first_frame" || asset.role === "last_frame")
       && videoModel.supported_frame_images?.includes(asset.role),
     );
-    if (references.length && limit > 0) {
-      const selected = references.slice(0, limit);
+    if (references.length) {
+      const counts: Record<InputMediaKind, number> = { image: 0, video: 0, audio: 0 };
+      const selected = references.filter((asset) => {
+        const kind: InputMediaKind = asset.mediaType.startsWith("video/") ? "video"
+          : asset.mediaType.startsWith("audio/") ? "audio" : "image";
+        counts[kind] += 1;
+        return counts[kind] <= videoReferenceLimit(videoModel, kind);
+      });
       sentAssets.push(...selected);
       payload.input_references = selected.map(asReference);
     }
@@ -811,8 +844,14 @@ export async function generateImage(payload: Record<string, unknown>, onActualCo
   return { kind: "image", urls, actualCostUsd };
 }
 
+function serializedVideoError(error: unknown): string | undefined {
+  if (typeof error === "string") return error;
+  if (!error) return undefined;
+  try { return JSON.stringify({ error }); } catch { return String(error); }
+}
+
 export async function submitVideo(payload: Record<string, unknown>, onActualCost?: ActualCostHandler): Promise<VideoResult> {
-  const response = await request<{ id?: string; job_id?: string; status?: unknown; usage?: { cost?: number } }>(
+  const response = await request<{ id?: string; job_id?: string; status?: unknown; error?: unknown; usage?: { cost?: number } }>(
     "POST",
     "/videos",
     payload,
@@ -820,7 +859,7 @@ export async function submitVideo(payload: Record<string, unknown>, onActualCost
   const actualCostUsd = reportActualCost(response, onActualCost);
   const jobId = response.id ?? response.job_id;
   if (!jobId) throw new Error("OpenRouter returned no video job ID.");
-  return { kind: "video", jobId, status: normalizeVideoStatus(response.status, "pending"), actualCostUsd };
+  return { kind: "video", jobId, status: normalizeVideoStatus(response.status, "pending"), error: serializedVideoError(response.error), actualCostUsd };
 }
 
 export async function pollVideo(jobId: string, onActualCost?: ActualCostHandler): Promise<VideoResult> {
@@ -828,13 +867,13 @@ export async function pollVideo(jobId: string, onActualCost?: ActualCostHandler)
     id?: string;
     status?: unknown;
     progress?: number;
-    error?: string | { message?: string };
+    error?: unknown;
     unsigned_urls?: string[];
     data?: Array<{ url?: string }>;
     usage?: { cost?: number };
   }>("GET", `/videos/${encodeURIComponent(jobId)}`);
   const actualCostUsd = reportActualCost(response, onActualCost);
-  const error = typeof response.error === "string" ? response.error : response.error?.message;
+  const error = serializedVideoError(response.error);
   const url = response.unsigned_urls?.[0] ?? response.data?.[0]?.url;
   return {
     kind: "video",

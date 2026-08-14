@@ -30,10 +30,6 @@
     }
   },
   "bundle": {
-    "externalBin": ["target/bundled-tools/fruit-truckd"],
-    "resources": {
-      "target/bundled-agent-runtime/": "agent-runtime/"
-    },
     "active": true,
     "targets": ["app"],
     "createUpdaterArtifacts": false,

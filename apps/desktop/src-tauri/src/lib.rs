@@ -1,19 +1,14 @@
-mod agent_integrations;
-mod core_client;
+mod legacy_cleanup;
 
-use agent_integrations::{
-    agent_integration_status, install_agent_integration, remove_agent_integration,
-};
+use legacy_cleanup::cleanup_legacy_installations;
 
 use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Mutex;
 
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use tauri::{Emitter, Manager};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_shell::{
@@ -23,18 +18,15 @@ use tauri_plugin_shell::{
 
 const API_BASE: &str = "https://openrouter.ai/api/v1";
 const CREDENTIALS_FILE: &str = "credentials.json";
-const AGENT_SESSIONS_FILE: &str = "agent-sessions.json";
-const AGENT_SESSIONS_DIRECTORY: &str = "agent-sessions";
 const MAX_ERROR_BYTES: usize = 2_000;
 const MAX_IMAGE_BYTES: u64 = 30 * 1024 * 1024;
 const MAX_VIDEO_BYTES: u64 = 700 * 1024 * 1024;
+const MAX_AUDIO_BYTES: u64 = 50 * 1024 * 1024;
+const MAX_REQUEST_MEDIA_BYTES: u64 = 30 * 1024 * 1024;
 const MAX_OPENROUTER_JSON_BYTES: u64 = 48 * 1024 * 1024;
-const MAX_AGENT_SESSION_BYTES: u64 = 50 * 1024 * 1024;
 const LOCAL_MEDIA_MARKER: &str = "fruit-truck-local:";
 static MEDIA_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 static ALLOW_APP_EXIT: AtomicBool = AtomicBool::new(false);
-static CORE_BOOTSTRAPPED: AtomicBool = AtomicBool::new(false);
-static CORE_BOOTSTRAP_LOCK: Mutex<()> = Mutex::new(());
 
 const EVENT_QUIT_REQUESTED: &str = "app-quit-requested";
 
@@ -60,7 +52,7 @@ struct CachedMedia {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct SharedAssetInput {
+struct ManagedAssetInput {
     asset_id: String,
     name: String,
     mime_type: String,
@@ -77,38 +69,14 @@ struct ManagedAssetFile {
     byte_size: u64,
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, PartialEq, Debug)]
 #[serde(rename_all = "camelCase")]
-struct AssemblyClip {
-    source: String,
-    name: String,
-    start_seconds: f64,
-    end_seconds: f64,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct AssemblyResult {
-    path: String,
-    duration: f64,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SavedCustomSkill {
-    name: String,
-    version: u64,
-    markdown: String,
-    path: String,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct CustomSkillSummary {
-    name: String,
-    version: u64,
-    path: String,
-    versions: Vec<u64>,
+struct ManagedAssetMetadata {
+    width: Option<u32>,
+    height: Option<u32>,
+    duration: Option<f64>,
+    fps: Option<f64>,
+    codec: Option<String>,
 }
 
 fn credentials_directory(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -128,14 +96,6 @@ fn credentials_directory(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 
 fn credentials_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(credentials_directory(app)?.join(CREDENTIALS_FILE))
-}
-
-fn agent_sessions_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    Ok(credentials_directory(app)?.join(AGENT_SESSIONS_FILE))
-}
-
-fn agent_sessions_directory(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    Ok(credentials_directory(app)?.join(AGENT_SESSIONS_DIRECTORY))
 }
 
 fn generated_directory(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -163,16 +123,32 @@ fn inspect_media(
         ("image", "image/gif", "gif")
     } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
         ("image", "image/webp", "webp")
+    } else if bytes.starts_with(b"fLaC") {
+        ("audio", "audio/flac", "flac")
+    } else if bytes.starts_with(b"ID3")
+        || (bytes.len() >= 2 && bytes[0] == 0xff && bytes[1] & 0xe0 == 0xe0 && extension == "mp3")
+    {
+        ("audio", "audio/mpeg", "mp3")
+    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WAVE" {
+        ("audio", "audio/wav", "wav")
+    } else if bytes.len() >= 2
+        && bytes[0] == 0xff
+        && matches!(bytes[1] & 0xf6, 0xf0 | 0xf4)
+        && extension == "aac"
+    {
+        ("audio", "audio/aac", "aac")
     } else if bytes.starts_with(b"\x1a\x45\xdf\xa3") {
         ("video", "video/webm", "webm")
     } else if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
-        if extension == "mov" {
+        if extension == "m4a" {
+            ("audio", "audio/mp4", "m4a")
+        } else if extension == "mov" {
             ("video", "video/quicktime", "mov")
         } else {
             ("video", "video/mp4", "mp4")
         }
     } else {
-        return Err("The selected file is not a supported image or video.".into());
+        return Err("The selected file is not a supported image, video, or audio file.".into());
     };
     let extension_matches = match detected.2 {
         "jpg" => matches!(extension.as_str(), "jpg" | "jpeg"),
@@ -270,6 +246,8 @@ fn write_managed_media(
     let (kind, mime_type, extension) = inspect_media(bytes, name)?;
     let limit = if kind == "video" {
         MAX_VIDEO_BYTES
+    } else if kind == "audio" {
+        MAX_AUDIO_BYTES
     } else {
         MAX_IMAGE_BYTES
     };
@@ -319,6 +297,8 @@ fn import_media_file(source: &Path, root: &Path) -> Result<ManagedAssetFile, Str
     let (kind, mime_type, extension) = inspect_media(&header[..read], name)?;
     let limit = if kind == "video" {
         MAX_VIDEO_BYTES
+    } else if kind == "audio" {
+        MAX_AUDIO_BYTES
     } else {
         MAX_IMAGE_BYTES
     };
@@ -351,7 +331,7 @@ fn import_media_file(source: &Path, root: &Path) -> Result<ManagedAssetFile, Str
     })
 }
 
-fn validate_shared_asset_input(input: &SharedAssetInput) -> Result<(), String> {
+fn validate_managed_asset_input(input: &ManagedAssetInput) -> Result<(), String> {
     if input.asset_id.is_empty()
         || input.asset_id.len() > 128
         || !input
@@ -359,15 +339,18 @@ fn validate_shared_asset_input(input: &SharedAssetInput) -> Result<(), String> {
             .chars()
             .all(|value| value.is_ascii_alphanumeric() || value == '-' || value == '_')
     {
-        return Err("Shared asset ID is invalid.".into());
+        return Err("Managed asset ID is invalid.".into());
     }
-    if !input.mime_type.starts_with("image/") && !input.mime_type.starts_with("video/") {
-        return Err("Only image and video assets may be shared.".into());
+    if !input.mime_type.starts_with("image/")
+        && !input.mime_type.starts_with("video/")
+        && !input.mime_type.starts_with("audio/")
+    {
+        return Err("Only image, video, and audio assets may be shared.".into());
     }
     Ok(())
 }
 
-fn shared_asset_root(app: &tauri::AppHandle, origin: Option<&str>) -> Result<PathBuf, String> {
+fn upload_asset_root(app: &tauri::AppHandle, origin: Option<&str>) -> Result<PathBuf, String> {
     if origin == Some("upload") {
         assets_directory(app)
     } else {
@@ -375,7 +358,7 @@ fn shared_asset_root(app: &tauri::AppHandle, origin: Option<&str>) -> Result<Pat
     }
 }
 
-fn shared_upload_path(root: &Path, upload_id: &str) -> Result<PathBuf, String> {
+fn asset_upload_path(root: &Path, upload_id: &str) -> Result<PathBuf, String> {
     if upload_id.is_empty()
         || upload_id.len() > 128
         || !upload_id
@@ -385,24 +368,20 @@ fn shared_upload_path(root: &Path, upload_id: &str) -> Result<PathBuf, String> {
         return Err("Shared upload ID is invalid.".into());
     }
     secure_directory(root)?;
-    Ok(root.join(format!(".shared-{upload_id}.part")))
+    Ok(root.join(format!(".upload-{upload_id}.part")))
 }
 
-fn append_shared_asset_chunk_to_root(
-    root: &Path,
-    upload_id: &str,
-    bytes: &[u8],
-) -> Result<(), String> {
+fn append_asset_chunk_to_root(root: &Path, upload_id: &str, bytes: &[u8]) -> Result<(), String> {
     if bytes.is_empty() {
-        return Err("Shared asset chunk is empty.".into());
+        return Err("Managed asset chunk is empty.".into());
     }
-    let temporary = shared_upload_path(root, upload_id)?;
+    let temporary = asset_upload_path(root, upload_id)?;
     let current_size = std::fs::metadata(&temporary)
         .map(|value| value.len())
         .unwrap_or(0);
     if current_size.saturating_add(bytes.len() as u64) > MAX_VIDEO_BYTES {
         let _ = std::fs::remove_file(&temporary);
-        return Err("Shared asset exceeds the local safety limit.".into());
+        return Err("Managed asset exceeds the local safety limit.".into());
     }
     let mut output = std::fs::OpenOptions::new()
         .create(true)
@@ -414,23 +393,25 @@ fn append_shared_asset_chunk_to_root(
     set_private_file_permissions(&temporary)
 }
 
-fn finish_shared_asset_to_root(
+fn finish_asset_upload_to_root(
     root: &Path,
     upload_id: &str,
-    input: &SharedAssetInput,
+    input: &ManagedAssetInput,
 ) -> Result<CachedMedia, String> {
-    validate_shared_asset_input(input)?;
-    let temporary = shared_upload_path(root, upload_id)?;
+    validate_managed_asset_input(input)?;
+    let temporary = asset_upload_path(root, upload_id)?;
     let result = (|| {
         let metadata = std::fs::metadata(&temporary)
-            .map_err(|_| "Shared asset upload is missing.".to_string())?;
+            .map_err(|_| "Managed asset upload is missing.".to_string())?;
         let limit = if input.mime_type.starts_with("video/") {
             MAX_VIDEO_BYTES
+        } else if input.mime_type.starts_with("audio/") {
+            MAX_AUDIO_BYTES
         } else {
             MAX_IMAGE_BYTES
         };
         if metadata.len() == 0 || metadata.len() > limit {
-            return Err("Shared asset exceeds the local safety limit.".into());
+            return Err("Managed asset exceeds the local safety limit.".into());
         }
         let mut source = std::fs::File::open(&temporary).map_err(|error| error.to_string())?;
         let mut header = [0u8; 16];
@@ -439,7 +420,7 @@ fn finish_shared_asset_to_root(
             .map_err(|error| error.to_string())?;
         let (_, detected_mime, extension) = inspect_media(&header[..read], &input.name)?;
         if detected_mime != input.mime_type {
-            return Err("Shared asset MIME type does not match its contents.".into());
+            return Err("Managed asset MIME type does not match its contents.".into());
         }
         let path = unique_media_path(root, "legacy", extension)?;
         std::fs::rename(&temporary, &path).map_err(|error| error.to_string())?;
@@ -455,7 +436,7 @@ fn finish_shared_asset_to_root(
 }
 
 #[tauri::command]
-fn append_shared_asset_chunk(
+fn append_asset_chunk(
     app: tauri::AppHandle,
     request: tauri::ipc::Request<'_>,
 ) -> Result<(), String> {
@@ -471,32 +452,32 @@ fn append_shared_asset_chunk(
     let bytes = match request.body() {
         tauri::ipc::InvokeBody::Raw(bytes) => bytes,
         tauri::ipc::InvokeBody::Json(_) => {
-            return Err("Shared asset chunks must use raw IPC.".into())
+            return Err("Managed asset chunks must use raw IPC.".into())
         }
     };
-    let root = shared_asset_root(&app, origin)?;
-    append_shared_asset_chunk_to_root(&root, upload_id, bytes)
+    let root = upload_asset_root(&app, origin)?;
+    append_asset_chunk_to_root(&root, upload_id, bytes)
 }
 
 #[tauri::command]
-fn finish_shared_asset(
+fn finish_asset_upload(
     app: tauri::AppHandle,
     upload_id: String,
-    input: SharedAssetInput,
+    input: ManagedAssetInput,
 ) -> Result<CachedMedia, String> {
-    validate_shared_asset_input(&input)?;
-    let root = shared_asset_root(&app, input.origin.as_deref())?;
-    finish_shared_asset_to_root(&root, &upload_id, &input)
+    validate_managed_asset_input(&input)?;
+    let root = upload_asset_root(&app, input.origin.as_deref())?;
+    finish_asset_upload_to_root(&root, &upload_id, &input)
 }
 
 #[tauri::command]
-fn abort_shared_asset(
+fn abort_asset_upload(
     app: tauri::AppHandle,
     upload_id: String,
     origin: Option<String>,
 ) -> Result<(), String> {
-    let root = shared_asset_root(&app, origin.as_deref())?;
-    let temporary = shared_upload_path(&root, &upload_id)?;
+    let root = upload_asset_root(&app, origin.as_deref())?;
+    let temporary = asset_upload_path(&root, &upload_id)?;
     match std::fs::remove_file(temporary) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -510,8 +491,11 @@ async fn pick_and_import_assets(app: tauri::AppHandle) -> Result<Vec<ManagedAsse
         .dialog()
         .file()
         .add_filter(
-            "Images and videos",
-            &["png", "jpg", "jpeg", "webp", "gif", "mp4", "mov", "webm"],
+            "Images, videos, and audio",
+            &[
+                "png", "jpg", "jpeg", "webp", "gif", "mp4", "mov", "webm", "mp3", "wav", "flac",
+                "m4a", "aac",
+            ],
         )
         .blocking_pick_files();
     let Some(files) = selection else {
@@ -750,635 +734,6 @@ fn remove_api_key(app: tauri::AppHandle) -> Result<CredentialStatus, String> {
     credential_status(app)
 }
 
-fn read_agent_sessions_file(app: &tauri::AppHandle) -> Result<Value, String> {
-    let mut last_error = None;
-    for attempt in 0..8 {
-        match read_agent_sessions_file_once(app) {
-            Ok(value) => return Ok(value),
-            Err(error) if error.contains(" is missing:") && attempt < 7 => {
-                last_error = Some(error);
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
-            Err(error) => return Err(error),
-        }
-    }
-    Err(last_error
-        .unwrap_or_else(|| "The agent session bridge could not be read consistently.".into()))
-}
-
-fn read_agent_sessions_file_once(app: &tauri::AppHandle) -> Result<Value, String> {
-    let path = agent_sessions_path(app)?;
-    if !path.exists() {
-        return Ok(serde_json::json!({ "schemaVersion": 4, "revision": 0, "sessions": [] }));
-    }
-    let metadata = std::fs::metadata(&path).map_err(|error| error.to_string())?;
-    if metadata.len() > 50 * 1024 * 1024 {
-        return Err("The agent session bridge index exceeds the 50 MB recovery limit.".into());
-    }
-    let raw = std::fs::read(&path).map_err(|error| error.to_string())?;
-    let value: Value = serde_json::from_slice(&raw)
-        .map_err(|_| "The agent session bridge file is invalid JSON.")?;
-    if !matches!(
-        value.get("schemaVersion").and_then(Value::as_u64),
-        Some(1) | Some(2) | Some(3) | Some(4)
-    ) {
-        return Err("The agent session bridge file has an unsupported schema.".into());
-    }
-    if value.get("sessions").is_some_and(Value::is_array) {
-        let mut value = value;
-        value["schemaVersion"] = Value::from(4);
-        return Ok(value);
-    }
-    let files = value
-        .get("sessionFiles")
-        .and_then(Value::as_array)
-        .ok_or("The agent session bridge index has no session files.")?;
-    let root = agent_sessions_directory(app)?;
-    let mut sessions = Vec::with_capacity(files.len());
-    for entry in files {
-        let id = entry
-            .get("id")
-            .and_then(Value::as_str)
-            .ok_or("Agent session index entry has no ID.")?;
-        let file = entry
-            .get("file")
-            .and_then(Value::as_str)
-            .ok_or("Agent session index entry has no file.")?;
-        if id.is_empty()
-            || id.len() > 128
-            || !id
-                .chars()
-                .all(|value| value.is_ascii_alphanumeric() || value == '-' || value == '_')
-            || !file.ends_with(".json")
-            || !file
-                .chars()
-                .all(|value| value.is_ascii_alphanumeric() || matches!(value, '-' | '_' | '.'))
-        {
-            return Err("Agent session index contains an invalid file reference.".into());
-        }
-        let session_path = root.join(file);
-        let metadata = std::fs::metadata(&session_path)
-            .map_err(|error| format!("Agent session {id} is missing: {error}"))?;
-        if metadata.len() > MAX_AGENT_SESSION_BYTES {
-            return Err(format!(
-                "Agent session {id} exceeds the 50 MB per-session limit."
-            ));
-        }
-        let session: Value = serde_json::from_slice(
-            &std::fs::read(session_path).map_err(|error| error.to_string())?,
-        )
-        .map_err(|_| format!("Agent session {id} contains invalid JSON."))?;
-        if session.get("id").and_then(Value::as_str) != Some(id) {
-            return Err(format!(
-                "Agent session file {file} does not match index ID {id}."
-            ));
-        }
-        sessions.push(session);
-    }
-    Ok(serde_json::json!({
-      "schemaVersion": 4,
-      "revision": value.get("revision").and_then(Value::as_u64).unwrap_or(0),
-      "sessions": sessions,
-    }))
-}
-
-#[tauri::command]
-async fn report_desktop_runtime(
-    app: tauri::AppHandle,
-    active_session_id: Option<String>,
-) -> Result<Value, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let home = core_client::core_home(&app)?;
-        secure_directory(&home)?;
-        let heartbeat_at_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|error| error.to_string())?
-            .as_millis() as u64;
-        let runtime = serde_json::json!({
-          "schemaVersion": 2,
-          "pid": std::process::id(),
-          "version": app.package_info().version.to_string(),
-          "heartbeatAtMs": heartbeat_at_ms,
-          "activeSessionId": active_session_id,
-        });
-        let temporary = home.join(format!(
-            ".desktop-runtime-{}-{}.tmp",
-            std::process::id(),
-            MEDIA_SEQUENCE.fetch_add(1, Ordering::Relaxed),
-        ));
-        let write_result = (|| {
-            std::fs::write(
-                &temporary,
-                serde_json::to_vec(&runtime).map_err(|error| error.to_string())?,
-            )
-            .map_err(|error| error.to_string())?;
-            set_private_file_permissions(&temporary)?;
-            std::fs::rename(&temporary, home.join("desktop-runtime.json"))
-                .map_err(|error| error.to_string())
-        })();
-        if let Err(error) = write_result {
-            let _ = std::fs::remove_file(temporary);
-            return Err(error);
-        }
-        Ok(runtime)
-    })
-    .await
-    .map_err(|error| format!("Desktop status task failed: {error}"))?
-}
-
-#[cfg(test)]
-fn contains_embedded_media(bytes: &[u8]) -> bool {
-    bytes
-        .windows(b"data:image/".len())
-        .any(|window| window.eq_ignore_ascii_case(b"data:image/"))
-        || bytes
-            .windows(b"data:video/".len())
-            .any(|window| window.eq_ignore_ascii_case(b"data:video/"))
-        || bytes
-            .windows(b";base64,".len())
-            .any(|window| window.eq_ignore_ascii_case(b";base64,"))
-}
-
-#[tauri::command]
-async fn read_agent_sessions(app: tauri::AppHandle) -> Result<Value, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        bootstrap_core_sessions(&app)?;
-        core_client::request(&app, "session.read_all", serde_json::json!({}))
-    })
-    .await
-    .map_err(|error| format!("Agent session read task failed: {error}"))?
-}
-
-#[tauri::command]
-async fn wait_for_agent_sessions(
-    app: tauri::AppHandle,
-    after_revision: u64,
-    timeout_ms: Option<u64>,
-) -> Result<Value, String> {
-    let timeout_ms = timeout_ms.unwrap_or(20_000).clamp(100, 25_000);
-    tauri::async_runtime::spawn_blocking(move || {
-        bootstrap_core_sessions(&app)?;
-        core_client::request(
-            &app,
-            "event.wait",
-            serde_json::json!({
-              "afterEvent": after_revision,
-              "timeoutMs": timeout_ms,
-            }),
-        )?;
-        core_client::request(&app, "session.read_all", serde_json::json!({}))
-    })
-    .await
-    .map_err(|error| format!("Agent session wait task failed: {error}"))?
-}
-
-#[tauri::command]
-async fn wait_for_agent_session_events(
-    app: tauri::AppHandle,
-    after_event: u64,
-    timeout_ms: Option<u64>,
-) -> Result<Value, String> {
-    let timeout_ms = timeout_ms.unwrap_or(20_000).clamp(100, 25_000);
-    tauri::async_runtime::spawn_blocking(move || {
-        bootstrap_core_sessions(&app)?;
-        core_client::request(
-            &app,
-            "event.wait",
-            serde_json::json!({ "afterEvent": after_event, "timeoutMs": timeout_ms }),
-        )
-    })
-    .await
-    .map_err(|error| format!("Agent event wait task failed: {error}"))?
-}
-
-#[tauri::command]
-async fn read_agent_session(
-    app: tauri::AppHandle,
-    session_id: String,
-    view: Option<String>,
-) -> Result<Value, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-    bootstrap_core_sessions(&app)?;
-    core_client::request(
-      &app,
-      "session.read",
-      serde_json::json!({ "sessionId": session_id, "view": view.unwrap_or_else(|| "recovery".into()) }),
-    )
-  })
-  .await
-  .map_err(|error| format!("Agent session read task failed: {error}"))?
-}
-
-#[tauri::command]
-async fn upsert_agent_session(
-    app: tauri::AppHandle,
-    session: Value,
-    expected_revision: Option<u64>,
-) -> Result<Value, String> {
-    let id = session
-        .get("id")
-        .and_then(Value::as_str)
-        .ok_or("Agent session ID is required.")?
-        .to_string();
-    if id.is_empty()
-        || id.len() > 128
-        || !id
-            .chars()
-            .all(|value| value.is_ascii_alphanumeric() || value == '-' || value == '_')
-    {
-        return Err("Agent session ID is invalid.".into());
-    }
-    if !session.get("agent").is_some_and(Value::is_object) {
-        return Err("Agent session state is required.".into());
-    }
-    tauri::async_runtime::spawn_blocking(move || {
-        bootstrap_core_sessions(&app)?;
-        let base_revision = expected_revision.unwrap_or(0);
-        let command_id = format!(
-            "desktop-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_err(|error| error.to_string())?
-                .as_nanos(),
-        );
-        core_client::request(
-            &app,
-            "session.commit_snapshot",
-            serde_json::json!({
-              "sessionId": id,
-              "baseRevision": base_revision,
-              "snapshot": session,
-              "commandId": command_id,
-              "changed": ["desktop"],
-              "eventType": "session.desktop_changed",
-            }),
-        )
-        .map_err(|error| error.replace("SESSION_CONFLICT", "AGENT_SESSION_CONFLICT"))?;
-        core_client::request(&app, "session.read_all", serde_json::json!({}))
-    })
-    .await
-    .map_err(|error| format!("Agent session write task failed: {error}"))?
-}
-
-#[tauri::command]
-async fn commit_agent_operations(
-    app: tauri::AppHandle,
-    session_id: String,
-    base_revision: u64,
-    request_key: String,
-    ops: Vec<Value>,
-) -> Result<Value, String> {
-    if ops.is_empty() || ops.len() > 64 {
-        return Err("Agent command must contain 1 to 64 operations.".into());
-    }
-    tauri::async_runtime::spawn_blocking(move || {
-        bootstrap_core_sessions(&app)?;
-        let request_body = serde_json::json!({
-          "sessionId": session_id,
-          "baseRevision": base_revision,
-          "ops": ops,
-        });
-        let mut hasher = Sha256::new();
-        hasher.update(serde_json::to_vec(&request_body).map_err(|error| error.to_string())?);
-        let request_hash = format!("{:x}", hasher.finalize());
-        let command_id = format!(
-            "desktop-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_err(|error| error.to_string())?
-                .as_nanos(),
-        );
-        let receipt = core_client::request(
-            &app,
-            "session.commit",
-            serde_json::json!({
-            "sessionId": request_body["sessionId"],
-            "baseRevision": base_revision,
-            "commandId": command_id,
-            "requestKey": request_key,
-            "requestHash": request_hash,
-            "ops": request_body["ops"],
-            }),
-        )
-        .map_err(|error| error.replace("SESSION_CONFLICT", "AGENT_SESSION_CONFLICT"))?;
-        let read = core_client::request(
-            &app,
-            "session.read",
-            serde_json::json!({ "sessionId": session_id, "view": "recovery" }),
-        )?;
-        Ok(serde_json::json!({
-          "receipt": receipt,
-          "session": read.get("projection").cloned().unwrap_or(Value::Null),
-        }))
-    })
-    .await
-    .map_err(|error| format!("Agent command task failed: {error}"))?
-}
-
-#[tauri::command]
-async fn record_agent_telemetry(
-    app: tauri::AppHandle,
-    trace_id: String,
-    command_id: Option<String>,
-    name: String,
-    duration_us: u64,
-    fields: Value,
-) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        core_client::request(
-            &app,
-            "telemetry.record",
-            serde_json::json!({
-              "traceId": trace_id,
-              "commandId": command_id,
-              "name": name,
-              "durationUs": duration_us,
-              "fields": fields,
-            }),
-        )?;
-        Ok(())
-    })
-    .await
-    .map_err(|error| format!("Telemetry task failed: {error}"))?
-}
-
-fn bootstrap_core_sessions(app: &tauri::AppHandle) -> Result<(), String> {
-    if CORE_BOOTSTRAPPED.load(Ordering::Acquire) {
-        return Ok(());
-    }
-    let _guard = CORE_BOOTSTRAP_LOCK
-        .lock()
-        .map_err(|_| "Core bootstrap state is unavailable.".to_string())?;
-    if CORE_BOOTSTRAPPED.load(Ordering::Acquire) {
-        return Ok(());
-    }
-    let legacy_path = agent_sessions_path(app)?;
-    if !legacy_path.exists() {
-        CORE_BOOTSTRAPPED.store(true, Ordering::Release);
-        return Ok(());
-    }
-    let legacy = read_agent_sessions_file(app)?;
-    core_client::request(app, "session.import_legacy", legacy)?;
-    CORE_BOOTSTRAPPED.store(true, Ordering::Release);
-    Ok(())
-}
-
-fn custom_skill_slug(name: &str) -> String {
-    let mut slug = String::new();
-    let mut separator = false;
-    for value in name.to_ascii_lowercase().chars() {
-        if value.is_ascii_alphanumeric() {
-            slug.push(value);
-            separator = false;
-        } else if !separator && !slug.is_empty() {
-            slug.push('-');
-            separator = true;
-        }
-    }
-    let slug = slug.trim_matches('-');
-    if slug.is_empty() {
-        "custom-production".into()
-    } else {
-        slug.into()
-    }
-}
-
-fn validate_custom_skill_text(markdown: &str) -> Result<(), String> {
-    if markdown.trim().is_empty() || markdown.len() > 200_000 {
-        return Err("Custom Skill Markdown must be between 1 and 200,000 characters.".into());
-    }
-    let lower = markdown.to_ascii_lowercase();
-    let contains_bound_id = lower
-        .split(|value: char| !(value.is_ascii_alphanumeric() || value == '-'))
-        .any(|value| {
-            let uuid_like = value.len() == 36
-                && value.chars().enumerate().all(|(index, character)| {
-                    if matches!(index, 8 | 13 | 18 | 23) {
-                        character == '-'
-                    } else {
-                        character.is_ascii_hexdigit()
-                    }
-                });
-            ((value.starts_with("asset-") || value.starts_with("session-")) && value.len() > 16)
-                || uuid_like
-        });
-    if lower.contains("file://")
-        || lower.contains("/users/")
-        || lower.contains("/home/")
-        || lower.contains("~/")
-        || lower.contains("api_key")
-        || lower.contains("api-key")
-        || lower.contains("access_token")
-        || contains_bound_id
-        || lower.contains("begin rsa private key")
-        || lower.contains("begin openssh private key")
-        || lower.contains("begin ec private key")
-        || lower.contains("sk-or-")
-        || lower.contains("sk-proj-")
-        || markdown.lines().any(|line| {
-            let trimmed = line.trim();
-            trimmed.len() > 3
-                && trimmed.as_bytes()[1] == b':'
-                && trimmed.as_bytes()[0].is_ascii_alphabetic()
-                && matches!(trimmed.as_bytes()[2], b'\\' | b'/')
-        })
-    {
-        return Err("Custom Skill text contains a local path or secret-like value.".into());
-    }
-    Ok(())
-}
-
-fn save_custom_skill_to_root(
-    skills_root: &Path,
-    name: &str,
-    markdown: &str,
-) -> Result<SavedCustomSkill, String> {
-    let name = name.trim();
-    if name.is_empty() || name.len() > 100 {
-        return Err("Custom Skill name must be between 1 and 100 characters.".into());
-    }
-    validate_custom_skill_text(markdown)?;
-    let directory = skills_root.join(custom_skill_slug(name));
-    secure_directory(&directory)?;
-    let path = directory.join("SKILL.md");
-    let version = if path.exists() {
-        let current = std::fs::read_to_string(&path).unwrap_or_default();
-        current
-            .lines()
-            .find_map(|line| {
-                line.strip_prefix("version:")
-                    .and_then(|value| value.trim().parse::<u64>().ok())
-            })
-            .unwrap_or(1)
-            + 1
-    } else {
-        1
-    };
-    let mut replaced = false;
-    let markdown = markdown
-        .lines()
-        .map(|line| {
-            if !replaced && line.starts_with("version:") {
-                replaced = true;
-                format!("version: {version}")
-            } else {
-                line.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let temporary = directory.join(format!(".skill-{}.tmp", std::process::id()));
-    std::fs::write(&temporary, &markdown).map_err(|error| error.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o600))
-            .map_err(|error| error.to_string())?;
-    }
-    std::fs::rename(&temporary, &path).map_err(|error| error.to_string())?;
-    let versions = directory.join("versions");
-    secure_directory(&versions)?;
-    let version_path = versions.join(format!("{version}.md"));
-    std::fs::write(&version_path, &markdown).map_err(|error| error.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&version_path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|error| error.to_string())?;
-    }
-    Ok(SavedCustomSkill {
-        name: name.into(),
-        version,
-        markdown,
-        path: path.to_string_lossy().into_owned(),
-    })
-}
-
-fn list_custom_skills_from_root(skills_root: &Path) -> Result<Vec<CustomSkillSummary>, String> {
-    if !skills_root.exists() {
-        return Ok(Vec::new());
-    }
-    let mut summaries = Vec::new();
-    for entry in std::fs::read_dir(skills_root).map_err(|error| error.to_string())? {
-        let entry = entry.map_err(|error| error.to_string())?;
-        if !entry
-            .file_type()
-            .map_err(|error| error.to_string())?
-            .is_dir()
-        {
-            continue;
-        }
-        let path = entry.path().join("SKILL.md");
-        if !path.exists() {
-            continue;
-        }
-        let markdown = std::fs::read_to_string(&path).map_err(|error| error.to_string())?;
-        let fallback_name = entry.file_name().to_string_lossy().into_owned();
-        let name = markdown
-            .lines()
-            .find_map(|line| line.strip_prefix("name:").map(str::trim))
-            .filter(|value| !value.is_empty())
-            .unwrap_or(&fallback_name)
-            .to_string();
-        let version = markdown
-            .lines()
-            .find_map(|line| {
-                line.strip_prefix("version:")
-                    .and_then(|value| value.trim().parse::<u64>().ok())
-            })
-            .unwrap_or(1);
-        let versions_directory = entry.path().join("versions");
-        let mut versions = if versions_directory.exists() {
-            std::fs::read_dir(&versions_directory)
-                .map_err(|error| error.to_string())?
-                .filter_map(Result::ok)
-                .filter_map(|item| item.path().file_stem()?.to_str()?.parse::<u64>().ok())
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
-        if !versions.contains(&version) {
-            versions.push(version);
-        }
-        versions.sort_unstable_by(|left, right| right.cmp(left));
-        summaries.push(CustomSkillSummary {
-            name,
-            version,
-            path: path.to_string_lossy().into_owned(),
-            versions,
-        });
-    }
-    summaries.sort_by_key(|item| item.name.to_ascii_lowercase());
-    Ok(summaries)
-}
-
-fn read_custom_skill_from_root(
-    skills_root: &Path,
-    name: &str,
-    version: Option<u64>,
-) -> Result<SavedCustomSkill, String> {
-    let directory = skills_root.join(custom_skill_slug(name));
-    let path = version
-        .map(|value| directory.join("versions").join(format!("{value}.md")))
-        .unwrap_or_else(|| directory.join("SKILL.md"));
-    if !path.exists() {
-        return Err("Custom Skill version does not exist.".into());
-    }
-    let markdown = std::fs::read_to_string(&path).map_err(|error| error.to_string())?;
-    let resolved_version = markdown
-        .lines()
-        .find_map(|line| {
-            line.strip_prefix("version:")
-                .and_then(|value| value.trim().parse::<u64>().ok())
-        })
-        .or(version)
-        .unwrap_or(1);
-    Ok(SavedCustomSkill {
-        name: name.trim().into(),
-        version: resolved_version,
-        markdown,
-        path: path.to_string_lossy().into_owned(),
-    })
-}
-
-#[tauri::command]
-fn list_custom_skills(app: tauri::AppHandle) -> Result<Vec<CustomSkillSummary>, String> {
-    list_custom_skills_from_root(&credentials_directory(&app)?.join("skills"))
-}
-
-#[tauri::command]
-fn read_custom_skill(
-    app: tauri::AppHandle,
-    name: String,
-    version: Option<u64>,
-) -> Result<SavedCustomSkill, String> {
-    read_custom_skill_from_root(&credentials_directory(&app)?.join("skills"), &name, version)
-}
-
-#[tauri::command]
-fn import_custom_skill_text(
-    app: tauri::AppHandle,
-    name: String,
-    markdown: String,
-) -> Result<SavedCustomSkill, String> {
-    let skills_root = credentials_directory(&app)?.join("skills");
-    secure_directory(&skills_root)?;
-    save_custom_skill_to_root(&skills_root, &name, &markdown)
-}
-
-#[tauri::command]
-fn rollback_custom_skill(
-    app: tauri::AppHandle,
-    name: String,
-    version: u64,
-) -> Result<SavedCustomSkill, String> {
-    let skills_root = credentials_directory(&app)?.join("skills");
-    let historical = read_custom_skill_from_root(&skills_root, &name, Some(version))?;
-    save_custom_skill_to_root(&skills_root, &name, &historical.markdown)
-}
-
 fn openrouter_url(path: &str) -> Result<reqwest::Url, String> {
     let relative = path
         .strip_prefix('/')
@@ -1450,7 +805,40 @@ async fn response_error(response: reqwest::Response) -> String {
             .or_else(|| payload.get("detail"))
             .and_then(Value::as_str);
         if let Some(message) = message {
-            return format!("OpenRouter {}: {}", status.as_u16(), message);
+            let diagnostics = [
+                payload.pointer("/error/metadata/error_type"),
+                payload.pointer("/error/metadata/provider_code"),
+                payload.pointer("/error/code"),
+                payload.pointer("/error/metadata/provider_name"),
+                payload.pointer("/error/metadata/provider_slug"),
+                payload.pointer("/error/metadata/model_slug"),
+                payload.pointer("/error/metadata/reasons"),
+            ]
+            .into_iter()
+            .flatten()
+            .filter_map(|value| {
+                value
+                    .as_str()
+                    .map(str::to_owned)
+                    .or_else(|| value.as_i64().map(|number| number.to_string()))
+                    .or_else(|| (!value.is_null()).then(|| value.to_string()))
+            })
+            .fold(Vec::<String>::new(), |mut values, value| {
+                if !values.contains(&value) {
+                    values.push(value);
+                }
+                values
+            });
+            return if diagnostics.is_empty() {
+                format!("OpenRouter {}: {}", status.as_u16(), message)
+            } else {
+                format!(
+                    "OpenRouter {}: {} [{}]",
+                    status.as_u16(),
+                    message,
+                    diagnostics.join(" · ")
+                )
+            };
         }
     }
     format!(
@@ -1478,11 +866,8 @@ fn hydrate_local_media_references(app: &tauri::AppHandle, value: &mut Value) -> 
                 .file_name()
                 .and_then(|item| item.to_str())
                 .unwrap_or("media.png");
-            let (kind, mime_type, _) = inspect_media(&bytes[..bytes.len().min(16)], name)?;
-            if kind == "video" {
-                return Err("Video generation inputs must be images.".into());
-            }
-            if bytes.len() as u64 > MAX_IMAGE_BYTES {
+            let (_, mime_type, _) = inspect_media(&bytes[..bytes.len().min(16)], name)?;
+            if bytes.len() as u64 > MAX_REQUEST_MEDIA_BYTES {
                 return Err("A managed request asset exceeds the local safety limit.".into());
             }
             *source = format!(
@@ -1868,219 +1253,83 @@ async fn execute_media_command(command: ShellCommand) -> Result<MediaCommandOutp
     })
 }
 
-fn parse_video_dimensions(value: &str) -> Result<(u32, u32), String> {
-    let (width, height) = value
-        .trim()
-        .split_once('x')
-        .ok_or("FFprobe returned an invalid video size.")?;
-    let width = width.parse::<u32>().map_err(|_| "Invalid video width.")?;
-    let height = height.parse::<u32>().map_err(|_| "Invalid video height.")?;
-    let width = width - width % 2;
-    let height = height - height % 2;
-    if width < 2 || height < 2 || width > 8192 || height > 8192 {
-        return Err("The assembly video size is unsupported.".into());
-    }
-    Ok((width, height))
+fn json_f64(value: Option<&Value>) -> Option<f64> {
+    let parsed = value.and_then(|item| {
+        item.as_f64()
+            .or_else(|| item.as_str().and_then(|text| text.parse::<f64>().ok()))
+    });
+    parsed.filter(|number| number.is_finite() && *number >= 0.0)
 }
 
-async fn video_dimensions(app: &tauri::AppHandle, path: &Path) -> Result<(u32, u32), String> {
-    let command = media_command(app, "ffprobe")?
+fn parse_frame_rate(value: Option<&Value>) -> Option<f64> {
+    let raw = value?.as_str()?;
+    let (numerator, denominator) = raw.split_once('/')?;
+    let numerator = numerator.parse::<f64>().ok()?;
+    let denominator = denominator.parse::<f64>().ok()?;
+    let fps = numerator / denominator;
+    (denominator > 0.0 && fps.is_finite() && fps > 0.0).then_some(fps)
+}
+
+fn parse_managed_asset_metadata(value: &str) -> Result<ManagedAssetMetadata, String> {
+    let payload: Value =
+        serde_json::from_str(value).map_err(|_| "FFprobe returned invalid media metadata.")?;
+    let streams = payload
+        .get("streams")
+        .and_then(Value::as_array)
+        .ok_or("FFprobe returned no media streams.")?;
+    let video = streams
+        .iter()
+        .find(|stream| stream.get("codec_type").and_then(Value::as_str) == Some("video"));
+    let primary = video.or_else(|| streams.first());
+    let codec = primary
+        .and_then(|stream| stream.get("codec_name"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    Ok(ManagedAssetMetadata {
+        width: video
+            .and_then(|stream| stream.get("width"))
+            .and_then(Value::as_u64)
+            .and_then(|number| u32::try_from(number).ok()),
+        height: video
+            .and_then(|stream| stream.get("height"))
+            .and_then(Value::as_u64)
+            .and_then(|number| u32::try_from(number).ok()),
+        duration: json_f64(
+            payload
+                .get("format")
+                .and_then(|format| format.get("duration")),
+        ),
+        fps: video.and_then(|stream| parse_frame_rate(stream.get("avg_frame_rate"))),
+        codec,
+    })
+}
+
+#[tauri::command]
+async fn inspect_managed_asset(
+    app: tauri::AppHandle,
+    path: String,
+) -> Result<ManagedAssetMetadata, String> {
+    let canonical = validate_managed_media_path(&app, Path::new(&path))?;
+    let command = media_command(&app, "ffprobe")?
         .args([
             "-v",
             "error",
-            "-select_streams",
-            "v:0",
             "-show_entries",
-            "stream=width,height",
+            "stream=codec_type,codec_name,width,height,avg_frame_rate:format=duration",
             "-of",
-            "csv=s=x:p=0",
+            "json",
         ])
-        .arg(path);
+        .arg(canonical);
     let output = execute_media_command(command).await?;
     if !output.success {
         let diagnostic = bounded_diagnostic(&output.stderr);
         return Err(if diagnostic.is_empty() {
-            "FFprobe could not inspect the first assembly clip.".into()
+            "FFprobe could not inspect the managed asset.".into()
         } else {
-            format!("FFprobe could not inspect the first assembly clip: {diagnostic}")
+            format!("FFprobe could not inspect the managed asset: {diagnostic}")
         });
     }
-    parse_video_dimensions(&String::from_utf8_lossy(&output.stdout))
-}
-
-fn target_video_bitrate(width: u32, height: u32) -> u64 {
-    let estimated = (width as f64 * height as f64 * 30.0 * 0.16).round() as u64;
-    estimated.clamp(4_000_000, 40_000_000)
-}
-
-fn assembly_filter_graph(clips: &[AssemblyClip], width: u32, height: u32) -> String {
-    let mut filters = clips
-        .iter()
-        .enumerate()
-        .map(|(index, clip)| {
-            format!(
-                "[{index}:v]trim=start={:.3}:end={:.3},setpts=PTS-STARTPTS,\
-scale={width}:{height}:force_original_aspect_ratio=decrease,\
-pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black,setsar=1,fps=30[v{index}]",
-                clip.start_seconds, clip.end_seconds,
-            )
-        })
-        .collect::<Vec<_>>();
-    let inputs = (0..clips.len())
-        .map(|index| format!("[v{index}]"))
-        .collect::<String>();
-    filters.push(format!("{inputs}concat=n={}:v=1:a=0[outv]", clips.len()));
-    filters.join(";")
-}
-
-fn write_assembly_source(
-    source: &str,
-    _target: &Path,
-    safe_roots: &[PathBuf],
-    total_bytes: &mut usize,
-) -> Result<PathBuf, String> {
-    let path = PathBuf::from(source);
-    let canonical = path
-        .canonicalize()
-        .map_err(|_| "An assembly source is not a readable local file.")?;
-    let allowed = safe_roots.iter().any(|root| {
-        root.canonicalize()
-            .is_ok_and(|safe_root| canonical.starts_with(safe_root))
-    });
-    if !allowed {
-        return Err("Only videos in Fruit Truck managed storage may be assembled.".into());
-    }
-    let size = std::fs::metadata(&canonical)
-        .map_err(|error| error.to_string())?
-        .len() as usize;
-    *total_bytes = total_bytes.saturating_add(size);
-    if *total_bytes > MAX_VIDEO_BYTES as usize {
-        return Err("Assembly inputs exceed the 700 MB local safety limit.".into());
-    }
-    Ok(canonical)
-}
-
-#[tauri::command]
-async fn assemble_video(
-    app: tauri::AppHandle,
-    clips: Vec<AssemblyClip>,
-    expected_duration: Option<f64>,
-) -> Result<AssemblyResult, String> {
-    if clips.is_empty() || clips.len() > 24 {
-        return Err("Choose between 1 and 24 clips for an assembly.".into());
-    }
-    let duration = clips.iter().try_fold(0.0, |total, clip| {
-        let clip_duration = clip.end_seconds - clip.start_seconds;
-        if !clip.start_seconds.is_finite()
-            || !clip.end_seconds.is_finite()
-            || clip.start_seconds < 0.0
-            || clip_duration <= 0.0
-            || clip_duration > 120.0
-        {
-            return Err(format!("{} has an invalid crop range.", clip.name));
-        }
-        if total + clip_duration > 600.0 {
-            return Err("Final video duration may not exceed 10 minutes.".into());
-        }
-        Ok(total + clip_duration)
-    })?;
-    if let Some(expected) = expected_duration {
-        let tolerance = (expected * 0.01).clamp(0.1, 0.25);
-        if !expected.is_finite() || expected <= 0.0 || (duration - expected).abs() > tolerance {
-            return Err(format!("The final assembly is {:.2} seconds, but the confirmed output length is {:.2} seconds.", duration, expected,));
-        }
-    }
-    let cache = app
-        .path()
-        .app_cache_dir()
-        .map_err(|error| error.to_string())?;
-    let assets = assets_directory(&app)?;
-    let generated = generated_directory(&app)?;
-    std::fs::create_dir_all(&cache).map_err(|error| error.to_string())?;
-    secure_directory(&generated)?;
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|error| error.to_string())?
-        .as_millis();
-    let work = cache.join(format!("assembly-{}-{stamp}", std::process::id()));
-    let output_directory = generated;
-    std::fs::create_dir_all(&work).map_err(|error| error.to_string())?;
-    std::fs::create_dir_all(&output_directory).map_err(|error| error.to_string())?;
-
-    let result = async {
-        let mut total_bytes = 0usize;
-        let mut sources = Vec::with_capacity(clips.len());
-        for (index, clip) in clips.iter().enumerate() {
-            let staged = work.join(format!("input-{index}.mp4"));
-            sources.push(write_assembly_source(
-                &clip.source,
-                &staged,
-                &[assets.clone(), output_directory.clone()],
-                &mut total_bytes,
-            )?);
-        }
-        let (width, height) = video_dimensions(&app, &sources[0]).await?;
-        let filter = assembly_filter_graph(&clips, width, height);
-        let bitrate = target_video_bitrate(width, height).to_string();
-        let temporary_output = work.join("final.mp4");
-        let output = output_directory.join(format!("final-{stamp}.mp4"));
-
-        let mut command = media_command(&app, "ffmpeg")?.args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-nostdin",
-            "-y",
-        ]);
-        for source in &sources {
-            command = command.arg("-i").arg(source);
-        }
-        let command = command
-            .args([
-                "-filter_complex",
-                &filter,
-                "-map",
-                "[outv]",
-                "-an",
-                "-c:v",
-                "h264_videotoolbox",
-                "-profile:v",
-                "high",
-                "-allow_sw",
-                "1",
-                "-prio_speed",
-                "0",
-                "-b:v",
-                &bitrate,
-                "-pix_fmt",
-                "yuv420p",
-                "-fps_mode",
-                "cfr",
-                "-movflags",
-                "+faststart",
-                "-f",
-                "mp4",
-            ])
-            .arg(&temporary_output);
-        let rendered = execute_media_command(command).await?;
-        if !rendered.success {
-            let diagnostic = bounded_diagnostic(&rendered.stderr);
-            return Err(if diagnostic.is_empty() {
-                "FFmpeg could not render the final video.".into()
-            } else {
-                format!("FFmpeg could not render the final video: {diagnostic}")
-            });
-        }
-        std::fs::rename(&temporary_output, &output).map_err(|error| error.to_string())?;
-        set_private_file_permissions(&output)?;
-        Ok(AssemblyResult {
-            path: output.to_string_lossy().into_owned(),
-            duration,
-        })
-    }
-    .await;
-    let _ = std::fs::remove_dir_all(&work);
-    result
+    parse_managed_asset_metadata(&String::from_utf8_lossy(&output.stdout))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -2093,7 +1342,12 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
-            core_client::start_desktop_presence(app.handle().clone());
+            let app_handle = app.handle().clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                if let Err(error) = cleanup_legacy_installations(&app_handle) {
+                    eprintln!("Fruit Truck could not finish legacy integration cleanup: {error}");
+                }
+            });
             Ok(())
         })
         .on_window_event(|window, event| match event {
@@ -2130,30 +1384,15 @@ pub fn run() {
             remove_api_key,
             openrouter_request,
             cache_video_content,
-            append_shared_asset_chunk,
-            finish_shared_asset,
-            abort_shared_asset,
+            append_asset_chunk,
+            finish_asset_upload,
+            abort_asset_upload,
             pick_and_import_assets,
+            inspect_managed_asset,
             delete_managed_asset,
             export_managed_asset,
             read_managed_image_data_url,
             normalize_generated_image,
-            assemble_video,
-            read_agent_sessions,
-            wait_for_agent_sessions,
-            wait_for_agent_session_events,
-            read_agent_session,
-            upsert_agent_session,
-            commit_agent_operations,
-            record_agent_telemetry,
-            report_desktop_runtime,
-            list_custom_skills,
-            read_custom_skill,
-            import_custom_skill_text,
-            rollback_custom_skill,
-            agent_integration_status,
-            install_agent_integration,
-            remove_agent_integration,
             quit_app
         ])
         .build(tauri::generate_context!())
@@ -2181,330 +1420,4 @@ fn quit_app(app: tauri::AppHandle) {
 
 fn exit_requires_confirmation(code: Option<i32>) -> bool {
     code != Some(tauri::RESTART_EXIT_CODE)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        append_shared_asset_chunk_to_root, assembly_filter_graph, contains_embedded_media,
-        exit_requires_confirmation, finish_shared_asset_to_root, image_data_url_from_file,
-        import_media_file, list_custom_skills_from_root, mask_key, openrouter_retry_delay,
-        openrouter_url, parse_video_dimensions, read_custom_skill_from_root,
-        requested_image_dimensions, save_custom_skill_to_root, target_video_bitrate,
-        unique_export_path, validate_custom_skill_text, validate_media_path_in_roots,
-        validate_remote_image_url, write_assembly_source,
-    };
-    use base64::Engine;
-
-    #[test]
-    fn generated_image_dimensions_follow_resolution_and_aspect_ratio() {
-        assert_eq!(
-            requested_image_dimensions(592, 448, Some("512"), Some("4:3")),
-            Some((512, 384))
-        );
-        assert_eq!(
-            requested_image_dimensions(448, 592, Some("1K"), Some("3:4")),
-            Some((768, 1024))
-        );
-        assert_eq!(
-            requested_image_dimensions(512, 384, Some("512"), Some("4:3")),
-            None
-        );
-    }
-
-    #[test]
-    fn update_restarts_bypass_interactive_quit_confirmation() {
-        assert!(exit_requires_confirmation(None));
-        assert!(exit_requires_confirmation(Some(0)));
-        assert!(!exit_requires_confirmation(Some(tauri::RESTART_EXIT_CODE)));
-    }
-
-    #[test]
-    fn api_paths_are_strictly_scoped() {
-        assert_eq!(
-            openrouter_url("/images/models").unwrap().path(),
-            "/api/v1/images/models"
-        );
-        assert!(openrouter_url("/chat/completions").is_ok());
-        assert!(openrouter_url("/models?output_modalities=video").is_ok());
-        assert!(openrouter_url("/videos/job-1").is_ok());
-        assert!(openrouter_url("https://example.com").is_err());
-        assert!(openrouter_url("/models").is_err());
-        assert!(openrouter_url("/videos/%2e%2e/%2e%2e/keys").is_err());
-        assert!(openrouter_url("/videos/%2E%2E/%2E%2E/credits").is_err());
-        assert!(openrouter_url("//example.com/api/v1/images").is_err());
-    }
-
-    #[test]
-    fn openrouter_retries_honor_seconds_and_bound_backoff() {
-        assert_eq!(
-            openrouter_retry_delay(Some("2"), 0),
-            std::time::Duration::from_secs(2)
-        );
-        assert_eq!(
-            openrouter_retry_delay(None, 0),
-            std::time::Duration::from_millis(500)
-        );
-        assert_eq!(
-            openrouter_retry_delay(None, 3),
-            std::time::Duration::from_secs(4)
-        );
-        assert_eq!(
-            openrouter_retry_delay(Some("999"), 0),
-            std::time::Duration::from_secs(30)
-        );
-    }
-
-    #[test]
-    fn agent_session_snapshots_reject_embedded_media() {
-        assert!(contains_embedded_media(
-            br#"{"request":"data:image/png;base64,AAAA"}"#
-        ));
-        assert!(contains_embedded_media(br#"{"payload":";base64,AAAA"}"#));
-        assert!(!contains_embedded_media(
-            br#"{"assetId":"asset-1","localPath":"/managed/reference.png"}"#
-        ));
-    }
-
-    #[test]
-    fn api_keys_are_masked() {
-        assert_eq!(mask_key("sk-or-v1-1234567890"), "sk-or-v…7890");
-        assert_eq!(
-            mask_key("가나다라마바사아자차카타"),
-            "가나다라마바사…자차카타"
-        );
-    }
-
-    #[test]
-    fn remote_image_urls_reject_local_targets() {
-        assert!(validate_remote_image_url("https://images.example.com/output.png").is_ok());
-        assert!(validate_remote_image_url("file:///tmp/output.png").is_err());
-        assert!(validate_remote_image_url("http://localhost/output.png").is_err());
-        assert!(validate_remote_image_url("http://127.0.0.1/output.png").is_err());
-        assert!(validate_remote_image_url("http://192.168.1.2/output.png").is_err());
-        assert!(validate_remote_image_url("http://[::1]/output.png").is_err());
-        assert!(validate_remote_image_url("http://[fc00::1]/output.png").is_err());
-        assert!(validate_remote_image_url("http://[fe80::1]/output.png").is_err());
-        assert!(validate_remote_image_url("http://[::ffff:169.254.169.254]/output.png").is_err());
-    }
-
-    #[test]
-    fn assembly_video_dimensions_are_even_and_bounded() {
-        assert_eq!(parse_video_dimensions("1921x1081").unwrap(), (1920, 1080));
-        assert!(parse_video_dimensions("1x1080").is_err());
-        assert!(parse_video_dimensions("9000x1080").is_err());
-        assert!(parse_video_dimensions("not-a-size").is_err());
-    }
-
-    #[test]
-    fn assembly_bitrate_scales_and_clamps() {
-        assert_eq!(target_video_bitrate(640, 360), 4_000_000);
-        assert_eq!(target_video_bitrate(1920, 1080), 9_953_280);
-        assert_eq!(target_video_bitrate(8192, 8192), 40_000_000);
-    }
-
-    #[test]
-    fn assembly_filter_trims_normalizes_and_concatenates_once() {
-        let clips = vec![
-            super::AssemblyClip {
-                source: "/managed/one.webm".into(),
-                name: "one".into(),
-                start_seconds: 1.25,
-                end_seconds: 3.5,
-            },
-            super::AssemblyClip {
-                source: "/managed/two.mp4".into(),
-                name: "two".into(),
-                start_seconds: 0.0,
-                end_seconds: 2.0,
-            },
-        ];
-        let filter = assembly_filter_graph(&clips, 1920, 1080);
-        assert!(filter.contains("[0:v]trim=start=1.250:end=3.500"));
-        assert!(filter.contains("scale=1920:1080:force_original_aspect_ratio=decrease"));
-        assert!(filter.contains("[v0][v1]concat=n=2:v=1:a=0[outv]"));
-        assert_eq!(filter.matches("concat=").count(), 1);
-    }
-
-    #[test]
-    fn custom_skill_approval_writes_and_versions_skill_markdown() {
-        let root = std::env::temp_dir().join(format!(
-            "fruit-truck-skill-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(),
-        ));
-        std::fs::create_dir_all(&root).unwrap();
-        let markdown = "---\nname: Test workflow\nversion: 1\n---\n\n# Test workflow";
-        let first = save_custom_skill_to_root(&root, "Test workflow", markdown).unwrap();
-        let second = save_custom_skill_to_root(&root, "Test workflow", markdown).unwrap();
-        assert!(std::path::Path::new(&first.path).exists());
-        assert_eq!(first.version, 1);
-        assert_eq!(second.version, 2);
-        assert!(second.markdown.contains("version: 2"));
-        let listed = list_custom_skills_from_root(&root).unwrap();
-        assert_eq!(listed[0].versions, vec![2, 1]);
-        let historical = read_custom_skill_from_root(&root, "Test workflow", Some(1)).unwrap();
-        assert!(historical.markdown.contains("version: 1"));
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn custom_skills_reject_session_bound_ids_paths_and_secrets() {
-        assert!(validate_custom_skill_text("# Safe\nUse a restrained visual direction.").is_ok());
-        assert!(validate_custom_skill_text("# Unsafe\nasset-1234567890abcdef").is_err());
-        assert!(
-            validate_custom_skill_text("# Unsafe\n123e4567-e89b-12d3-a456-426614174000").is_err()
-        );
-        assert!(validate_custom_skill_text("# Unsafe\nC:\\Users\\creator\\clip.mp4").is_err());
-        assert!(validate_custom_skill_text("# Unsafe\napi_key = secret-value-123").is_err());
-    }
-
-    #[test]
-    fn assembly_sources_accept_only_declared_generated_roots() {
-        let root = std::env::temp_dir().join(format!(
-            "fruit-truck-assembly-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(),
-        ));
-        let generated = root.join("generated");
-        let outside = root.join("outside");
-        std::fs::create_dir_all(&generated).unwrap();
-        std::fs::create_dir_all(&outside).unwrap();
-        let allowed = generated.join("clip.mp4");
-        let rejected = outside.join("clip.mp4");
-        std::fs::write(&allowed, b"video").unwrap();
-        std::fs::write(&rejected, b"video").unwrap();
-        let mut bytes = 0;
-        assert!(write_assembly_source(
-            allowed.to_str().unwrap(),
-            &root.join("staged.mp4"),
-            std::slice::from_ref(&generated),
-            &mut bytes,
-        )
-        .is_ok());
-        assert!(write_assembly_source(
-            rejected.to_str().unwrap(),
-            &root.join("staged.mp4"),
-            &[generated],
-            &mut bytes,
-        )
-        .is_err());
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn legacy_asset_bytes_are_materialized_outside_session_json() {
-        let root = std::env::temp_dir().join(format!(
-            "fruit-truck-shared-asset-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(),
-        ));
-        let png = b"\x89PNG\r\n\x1a\nlegacy";
-        let input = super::SharedAssetInput {
-            asset_id: "asset_123".into(),
-            name: "reference.png".into(),
-            mime_type: "image/png".into(),
-            origin: Some("upload".into()),
-        };
-        append_shared_asset_chunk_to_root(&root, "upload_123", &png[..8]).unwrap();
-        append_shared_asset_chunk_to_root(&root, "upload_123", &png[8..]).unwrap();
-        let result = finish_shared_asset_to_root(&root, "upload_123", &input).unwrap();
-        assert!(std::path::Path::new(&result.path).exists());
-        assert_eq!(std::fs::read(&result.path).unwrap(), png);
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn imported_media_is_copied_and_only_managed_roots_are_readable() {
-        let root = std::env::temp_dir().join(format!(
-            "fruit-truck-managed-media-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(),
-        ));
-        let source_directory = root.join("source");
-        let assets = root.join("assets");
-        let outside = root.join("outside");
-        std::fs::create_dir_all(&source_directory).unwrap();
-        std::fs::create_dir_all(&outside).unwrap();
-        let source = source_directory.join("reference.png");
-        let outside_file = outside.join("private.png");
-        let png = b"\x89PNG\r\n\x1a\nmanaged";
-        std::fs::write(&source, png).unwrap();
-        std::fs::write(&outside_file, png).unwrap();
-
-        let imported = import_media_file(&source, &assets).unwrap();
-        let imported_path = std::path::PathBuf::from(imported.local_path);
-        assert_eq!(std::fs::read(&imported_path).unwrap(), png);
-        assert!(
-            validate_media_path_in_roots(&imported_path, std::slice::from_ref(&assets)).is_ok()
-        );
-        assert!(validate_media_path_in_roots(&outside_file, &[assets]).is_err());
-
-        let disguised = source_directory.join("disguised.png");
-        std::fs::write(&disguised, b"not an image").unwrap();
-        assert!(import_media_file(&disguised, &root.join("assets")).is_err());
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn managed_image_bytes_are_exposed_as_a_canvas_safe_data_url() {
-        let root = std::env::temp_dir().join(format!(
-            "fruit-truck-image-data-url-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(),
-        ));
-        std::fs::create_dir_all(&root).unwrap();
-        let image = root.join("reference.png");
-        let png = b"\x89PNG\r\n\x1a\ncanvas-safe";
-        std::fs::write(&image, png).unwrap();
-
-        let data_url = image_data_url_from_file(&image).unwrap();
-        assert_eq!(
-            data_url,
-            format!(
-                "data:image/png;base64,{}",
-                base64::engine::general_purpose::STANDARD.encode(png),
-            ),
-        );
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn exports_use_safe_names_without_overwriting_existing_downloads() {
-        let root = std::env::temp_dir().join(format!(
-            "fruit-truck-export-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(),
-        ));
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("result.png"), b"existing").unwrap();
-
-        assert_eq!(
-            unique_export_path(&root, "../result.png"),
-            root.join("result (1).png")
-        );
-        assert_eq!(
-            unique_export_path(&root, "../../"),
-            root.join("fruit-truck-asset")
-        );
-        let _ = std::fs::remove_dir_all(root);
-    }
 }

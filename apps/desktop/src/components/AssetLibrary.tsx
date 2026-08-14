@@ -3,7 +3,7 @@ import { Dialog } from "@base-ui/react/dialog";
 import { Progress } from "@base-ui/react/progress";
 import { Toggle } from "@base-ui/react/toggle";
 import { ToggleGroup } from "@base-ui/react/toggle-group";
-import { Check, Download, Eye, Film, ImageIcon, Plus, Trash2, Video, X } from "lucide-react";
+import { AudioLines, Check, Download, Eye, ImageIcon, Plus, Trash2, Video, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { AssetPreview } from "@/components/AssetPreview";
 import { beginAssetPointerDrag, clearAssetDragData } from "@/assetDrag";
@@ -12,7 +12,6 @@ import { toast } from "@/components/ui/toast-manager";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useI18n, type MessageKey } from "@/i18n";
 import { exportAssetToDownloads, type SessionAsset, type SessionVideoJob } from "@/studio";
-import type { ArtifactNode } from "@/agent";
 import { formatElapsedClock } from "@/videoPolling";
 
 const ORIGIN_KEYS: Record<SessionAsset["origin"], MessageKey> = {
@@ -37,9 +36,6 @@ export function AssetLibrary({
   onUse,
   onDelete,
   jobs,
-  artifacts,
-  approvedVideoCount,
-  onOpenAssembly,
   highlightedIds = new Set(),
   onFocusedAssetChange,
   onPreviewAssetChange,
@@ -52,16 +48,13 @@ export function AssetLibrary({
   onUse: (assetId: string) => void;
   onDelete: (ids: string[]) => void;
   jobs: SessionVideoJob[];
-  artifacts: ArtifactNode[];
-  approvedVideoCount: number;
-  onOpenAssembly: () => void;
   highlightedIds?: Set<string>;
   onFocusedAssetChange?: (assetId: string | null) => void;
   onPreviewAssetChange?: (assetId: string | null) => void;
 }) {
   const { t } = useI18n();
   const [preview, setPreview] = useState<SessionAsset | null>(null);
-  const [filter, setFilter] = useState<"all" | "image" | "video">("all");
+  const [filter, setFilter] = useState<"all" | "image" | "video" | "audio">("all");
   const [draggingFiles, setDraggingFiles] = useState(false);
   const [rovingAssetId, setRovingAssetId] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
@@ -185,7 +178,6 @@ export function AssetLibrary({
           <p>{t("assetLibraryHint")}</p>
         </div>
         <div className="asset-library-actions">
-          {approvedVideoCount > 0 ? <Button size="xs" variant="outline" onClick={onOpenAssembly}><Film /> {t("makeFinalVideo")}</Button> : null}
           <Button size="icon-sm" variant="outline" aria-label={t("importAssets")} aria-keyshortcuts="Meta+O" onClick={() => void onPick()}><Plus /></Button>
         </div>
       </header>
@@ -196,10 +188,10 @@ export function AssetLibrary({
           value={[filter]}
           onValueChange={(value) => {
             const next = value[0];
-            if (next === "all" || next === "image" || next === "video") setFilter(next);
+            if (next === "all" || next === "image" || next === "video" || next === "audio") setFilter(next);
           }}
         >
-          {(["all", "image", "video"] as const).map((value) => (
+          {(["all", "image", "video", "audio"] as const).map((value) => (
             <Toggle className="asset-filter" aria-label={t("showAssets", { kind: value === "all" ? t("all") : t(value) })} value={value} key={value}>
               {value === "all" ? t("all") : t(value)}
             </Toggle>
@@ -291,7 +283,7 @@ export function AssetLibrary({
               onClick={() => setPreview(asset)}
             >
               <AssetPreview asset={asset} />
-              <span>{asset.kind === "image" ? <ImageIcon /> : <Video />}{t(ORIGIN_KEYS[asset.origin])}</span>
+              <span>{asset.kind === "image" ? <ImageIcon /> : asset.kind === "video" ? <Video /> : <AudioLines />}{t(ORIGIN_KEYS[asset.origin])}</span>
             </Button>
             <footer>
               <span title={asset.name}>{asset.name}</span>
@@ -330,23 +322,6 @@ export function AssetLibrary({
                 </div>
               </header>
               {preview ? <AssetPreview asset={preview} controls transparentControls /> : null}
-              {preview ? (() => {
-                const artifact = artifacts.find((item) => item.assetId === preview.id);
-                return artifact ? (
-                  <details className="asset-provenance">
-                    <summary>{t("provenanceDetails")}</summary>
-                    <dl>
-                      <div><dt>{t("role")}</dt><dd>{artifact.role}</dd></div>
-                      <div><dt>{t("approval")}</dt><dd>{artifact.approval}</dd></div>
-                      {artifact.generationBackend ? <div><dt>{t("generationBackend")}</dt><dd>{artifact.generationBackend === "codex_builtin" ? t("codexBuiltIn") : "OpenRouter"}</dd></div> : null}
-                      {artifact.modelId ? <div><dt>{t("model")}</dt><dd>{artifact.modelId}</dd></div> : null}
-                      {artifact.planStepId ? <div><dt>{t("sourceStep")}</dt><dd>{artifact.planStepId}</dd></div> : null}
-                      <div><dt>{t("parentAssets")}</dt><dd>{artifact.parentAssetIds.length || t("none")}</dd></div>
-                    </dl>
-                    {artifact.evaluation ? <div className="asset-evaluation"><strong>{t("agentEvaluation")}</strong><p>{artifact.evaluation.technical}</p><p>{artifact.evaluation.aesthetic}</p><small>{artifact.evaluation.recommendation}</small></div> : null}
-                  </details>
-                ) : null;
-              })() : null}
             </Dialog.Popup>
           </Dialog.Viewport>
         </Dialog.Portal>

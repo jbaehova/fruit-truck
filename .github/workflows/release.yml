@@ -134,7 +134,6 @@ jobs:
           cache: npm
           cache-dependency-path: |
             apps/desktop/package-lock.json
-            agent-kit/package-lock.json
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -149,7 +148,6 @@ jobs:
       - name: Install build dependencies
         run: |
           npm ci --prefix apps/desktop
-          npm ci --prefix agent-kit
           command -v minisign >/dev/null 2>&1 || brew install minisign
 
       - name: Prepare self-contained Apple Silicon assets
@@ -159,9 +157,7 @@ jobs:
             --source-archive "$RUNNER_TEMP/ffmpeg-$FFMPEG_VERSION.tar.xz"
 
       - name: Run release checks
-        run: |
-          npm run check --prefix apps/desktop
-          npm run check --prefix agent-kit
+        run: npm run check --prefix apps/desktop
 
       - name: Find or create the draft release
         id: release
@@ -174,7 +170,7 @@ jobs:
               --draft \
               --generate-notes \
               --title "Fruit Truck $RELEASE_TAG" \
-              --notes $'Download `Fruit-Truck-macOS-universal.dmg` on an Apple Silicon Mac. Intel Macs are not supported.\n\nThe app includes Fruit Truck Core, FFmpeg, Node.js, Agent Kit, and its skills; users do not need Homebrew or separate packages.\n\nSigned in-app updates are supported for users on 0.2.0 or newer. This build is signed with a Developer ID certificate and notarized by Apple.'
+              --notes $'Download `Fruit-Truck-macOS-universal.dmg` on an Apple Silicon Mac. Intel Macs are not supported.\n\nThe app includes FFprobe for local media inspection; users do not need Homebrew.\n\nSigned in-app updates are supported for users on 0.2.0 or newer. This build is signed with a Developer ID certificate and notarized by Apple.'
             for _ in {1..5}; do
               gh release view "$RELEASE_TAG" --json databaseId,isDraft > "$RUNNER_TEMP/release.json" 2>/dev/null && break
               sleep 2
@@ -207,7 +203,7 @@ jobs:
           releaseBody: |
             Download `Fruit-Truck-macOS-universal.dmg` on an Apple Silicon Mac. Intel Macs are not supported.
 
-            Fruit Truck includes Core, FFmpeg, Node.js, Agent Kit, and its skills. No package manager or separate runtime is required.
+            Fruit Truck includes FFprobe for local media inspection. No package manager or separate runtime is required.
 
             Signed in-app updates are supported for users on 0.2.0 or newer. This build is signed with a Developer ID certificate and notarized by Apple.
           releaseDraft: true

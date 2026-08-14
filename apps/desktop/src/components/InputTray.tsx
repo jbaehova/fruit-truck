@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useI18n, type MessageKey } from "@/i18n";
 import type { ReferenceRole } from "@/openrouter";
-import type { DraftReference, SessionAsset } from "@/studio";
+import type { AssetKind, DraftReference, SessionAsset } from "@/studio";
 import { nextReferenceSlot } from "@/studio";
 
 const ROLE_LABEL_KEYS: Record<ReferenceRole, MessageKey> = {
@@ -20,6 +20,7 @@ export function InputTray({
   references,
   assets,
   roles,
+  roleOptions,
   limit,
   error,
   onChange,
@@ -29,6 +30,7 @@ export function InputTray({
   references: DraftReference[];
   assets: SessionAsset[];
   roles: ReferenceRole[];
+  roleOptions?: Record<AssetKind, ReferenceRole[]>;
   limit: number;
   error?: string | null;
   onChange: (references: DraftReference[]) => void;
@@ -37,13 +39,14 @@ export function InputTray({
 }) {
   const { t } = useI18n();
   const [dragging, setDragging] = useState(false);
-  const enabled = roles.length > 0 && limit > 0;
+  const options = useMemo(() => roleOptions ?? { image: roles, video: [], audio: [] }, [roleOptions, roles]);
+  const enabled = Object.values(options).some((value) => value.length > 0) && limit > 0;
   const assetMap = useMemo(() => new Map(assets.map((asset) => [asset.id, asset])), [assets]);
 
-  const roleFor = useCallback((asset: SessionAsset) =>
-    asset.kind === "video"
-      ? null
-      : roles.includes("reference") ? "reference" : roles[0] ?? null, [roles]);
+  const roleFor = useCallback((asset: SessionAsset) => {
+    const valid = options[asset.kind] ?? [];
+    return valid.includes("reference") ? "reference" : valid[0] ?? null;
+  }, [options]);
 
   const addAssets = useCallback((incoming: SessionAsset[]) => {
     const next = [...references];
@@ -134,7 +137,7 @@ export function InputTray({
           {references.map((reference) => {
             const asset = assetMap.get(reference.assetId);
             if (!asset) return null;
-            const validRoles = asset.kind === "video" ? [] : roles;
+            const validRoles = options[asset.kind] ?? [];
             return (
               <div className="reference-row" key={reference.assetId}>
                 <AssetPreview asset={asset} />

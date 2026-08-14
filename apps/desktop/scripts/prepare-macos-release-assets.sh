@@ -34,19 +34,19 @@ fi
 bash "${script_dir}/build-ffmpeg-macos.sh" "${ffmpeg_args[@]}"
 
 mkdir -p -- "${tools_dir}" "${license_dir}"
-for executable in ffmpeg ffprobe; do
-  cp -f -- \
-    "${build_dir}/ffmpeg/${executable}" \
-    "${tools_dir}/${executable}-aarch64-apple-darwin"
-  chmod 0755 "${tools_dir}/${executable}-aarch64-apple-darwin"
-done
+cp -f -- \
+  "${build_dir}/ffmpeg/ffprobe" \
+  "${tools_dir}/ffprobe-aarch64-apple-darwin"
+chmod 0755 "${tools_dir}/ffprobe-aarch64-apple-darwin"
+rm -f -- \
+  "${tools_dir}/ffmpeg-aarch64-apple-darwin" \
+  "${tools_dir}/fruit-truck-cli-aarch64-apple-darwin" \
+  "${tools_dir}/fruit-truckd-aarch64-apple-darwin"
 cp -f -- "${build_dir}/ffmpeg/COPYING.LGPLv2.1" "${license_dir}/COPYING.LGPLv2.1"
 cp -f -- "${build_dir}/ffmpeg/FFmpeg-LICENSE.md" "${license_dir}/FFmpeg-LICENSE.md"
 cp -f -- "${build_dir}/ffmpeg/build-config-arm64.txt" "${license_dir}/build-config-arm64.txt"
 cp -f -- "${desktop_dir}/../../THIRD_PARTY_NOTICES.md" "${license_dir}/THIRD_PARTY_NOTICES.md"
 
 bash "${script_dir}/verify-bundled-ffmpeg.sh" "${tools_dir}"
-bash "${script_dir}/prepare-core-sidecar.sh" --release
-bash "${script_dir}/prepare-agent-runtime.sh"
 
-printf 'Prepared the self-contained Apple Silicon release assets.\n'
+printf 'Prepared the Apple Silicon FFprobe release asset.\n'

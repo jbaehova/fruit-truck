@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { compareReleaseTags } from "./check-release-order.mjs";
 
-test("release ordering compares semantic core versions", () => {
+test("release ordering compares semantic versions", () => {
   assert.equal(compareReleaseTags("v0.6.2", "v0.6.1"), 1);
   assert.equal(compareReleaseTags("v0.6.1", "v0.6.1"), 0);
   assert.equal(compareReleaseTags("v0.5.9", "v0.6.1"), -1);

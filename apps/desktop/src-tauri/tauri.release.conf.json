@@ -2,13 +2,10 @@
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "bundle": {
     "externalBin": [
-      "target/bundled-tools/ffmpeg",
-      "target/bundled-tools/ffprobe",
-      "target/bundled-tools/fruit-truckd"
+      "target/bundled-tools/ffprobe"
     ],
     "resources": {
-      "target/bundled-tools/licenses/": "licenses/",
-      "target/bundled-agent-runtime/": "agent-runtime/"
+      "target/bundled-tools/licenses/": "licenses/"
     }
   }
 }

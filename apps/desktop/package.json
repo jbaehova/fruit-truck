@@ -10,14 +10,13 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
-    "test:unit": "bash scripts/prepare-core-sidecar.sh && node --test 'src/**/*.test.ts' 'scripts/**/*.test.mjs'",
+    "test:unit": "node --test 'src/**/*.test.ts' 'scripts/**/*.test.mjs'",
     "test:e2e": "playwright test",
     "preview": "vite preview",
     "tauri": "tauri",
     "check": "tsc -b && oxlint && node scripts/check-release-contract.mjs",
-    "tauri:dev": "bash scripts/prepare-core-sidecar.sh && bash scripts/prepare-agent-runtime.sh && tauri dev",
-    "mcp": "node scripts/mcp-server.ts",
-    "build:e2e:desktop": "bash scripts/prepare-core-sidecar.sh && bash scripts/prepare-agent-runtime.sh && tauri build --debug --bundles app --config src-tauri/tauri.e2e.conf.json",
+    "tauri:dev": "tauri dev",
+    "build:e2e:desktop": "tauri build --debug --bundles app --config src-tauri/tauri.e2e.conf.json",
     "bundle:mac": "bash scripts/build-macos-apple-silicon.sh"
   },
   "dependencies": {
@@ -29,7 +28,6 @@
     "@tauri-apps/plugin-updater": "^2.10.1",
     "clsx": "^2.1.1",
     "lucide-react": "^1.24.0",
-    "pngjs": "^7.0.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7"
   },
@@ -37,7 +35,6 @@
     "@playwright/test": "^1.62.0",
     "@tauri-apps/cli": "^2.11.4",
     "@types/node": "^24.13.2",
-    "@types/pngjs": "^6.0.5",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.3",

@@ -58,6 +58,20 @@ export function OptionsFields({ mode, model, options, providerJson, providerErro
   const patch = (name: string, value: string | number | boolean) => onOptionsChange({ ...options, [name]: value });
   const basic: React.ReactNode[] = [];
   const advancedFields: React.ReactNode[] = [];
+  const providerParameter = (providerSlug: string, name: string) => {
+    try {
+      const root = JSON.parse(providerJson || "{}") as { options?: Record<string, { parameters?: Record<string, unknown> }> };
+      return root.options?.[providerSlug]?.parameters?.[name];
+    } catch { return undefined; }
+  };
+  const patchProviderParameter = (providerSlug: string, name: string, value: unknown) => {
+    let root: { options?: Record<string, { parameters?: Record<string, unknown> }>; [key: string]: unknown } = {};
+    try { root = JSON.parse(providerJson || "{}") as typeof root; } catch { /* Replace invalid JSON through the validated control. */ }
+    root.options = { ...(root.options ?? {}) };
+    const current = root.options[providerSlug] ?? {};
+    root.options[providerSlug] = { ...current, parameters: { ...(current.parameters ?? {}), [name]: value } };
+    onProviderJsonChange(JSON.stringify(root, null, 2));
+  };
 
   if (mode === "image") {
     const image = model as ImageModel;
@@ -103,6 +117,26 @@ export function OptionsFields({ mode, model, options, providerJson, providerErro
     );
     if (video.seed) advancedFields.push(
       <Field.Root className="option-field" key="seed"><Field.Label>{t("seed")} ({t("optional")})</Field.Label><Input type="number" placeholder={t("random")} value={options.seed == null ? "" : Number(options.seed)} onChange={(event) => onOptionsChange({ ...options, seed: event.target.value ? Number(event.target.value) : undefined })} /><Field.Description>{t("seedHint")}</Field.Description></Field.Root>,
+    );
+    if (video.allowed_passthrough_parameters?.includes("personGeneration")) advancedFields.push(
+      <Field.Root className="option-field" key="personGeneration">
+        <Field.Label>{t("personGeneration")}</Field.Label>
+        <Select value={String(providerParameter("google-vertex", "personGeneration") ?? "allow_adult")} onValueChange={(value) => value && patchProviderParameter("google-vertex", "personGeneration", value)}>
+          <SelectTrigger><SelectValue /></SelectTrigger>
+          <SelectContent><SelectItem value="allow_adult">{t("allowAdults")}</SelectItem><SelectItem value="disallow">{t("disallowPeople")}</SelectItem></SelectContent>
+        </Select>
+        <Field.Description>{t("personGenerationHint")}</Field.Description>
+      </Field.Root>,
+    );
+    if (video.allowed_passthrough_parameters?.includes("contentModeration")) advancedFields.push(
+      <Field.Root className="option-field" key="publicFigureThreshold">
+        <Field.Label>{t("publicFigureModeration")}</Field.Label>
+        <Select value={String((providerParameter("runway", "contentModeration") as { publicFigureThreshold?: string } | undefined)?.publicFigureThreshold ?? "auto")} onValueChange={(value) => value && patchProviderParameter("runway", "contentModeration", { publicFigureThreshold: value })}>
+          <SelectTrigger><SelectValue /></SelectTrigger>
+          <SelectContent><SelectItem value="auto">{t("automatic")}</SelectItem><SelectItem value="low">{t("lessStrict")}</SelectItem></SelectContent>
+        </Select>
+        <Field.Description>{t("publicFigureModerationHint")}</Field.Description>
+      </Field.Root>,
     );
   }
 

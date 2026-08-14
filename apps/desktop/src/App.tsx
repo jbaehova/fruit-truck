@@ -18,34 +18,6 @@ import {
   Video,
 } from "lucide-react";
 import "./App.css";
-import {
-  assemblyDurationSeconds,
-  expectedVideoDurationSeconds,
-  recordActualCost,
-  recordAgentActivity,
-  exposeAgentSession,
-  resolveAgentDecisionFromDesktop,
-  setControlMode,
-  validateAssemblyDuration,
-  type AgentSessionState,
-  type VideoAssemblyClip,
-} from "@/agent";
-import {
-  commitAgentOperations,
-  commitAgentOperationsWithConflictRetry,
-  diffAgentBridgeSession,
-  materializeAgentSession,
-  preserveLocalAssetMetadata,
-  readAgentBridge,
-  readAgentBridgeSession,
-  recordAgentTelemetry,
-  serializeAgentSessionForBridge,
-  waitForAgentBridgeEvents,
-  writeSerializedAgentBridgeSession,
-  type AgentBridgeSession,
-} from "@/agentBridge";
-import { mergeBridgeSession } from "@/bridgeMerge";
-import { AgentPanel, type BatchSummary } from "@/components/AgentPanel";
 import { AttemptHistoryPopover } from "@/components/AttemptHistoryPopover";
 import { AssetLibrary } from "@/components/AssetLibrary";
 import { AssetPreview } from "@/components/AssetPreview";
@@ -67,13 +39,21 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "@/components/ui/toast-manager";
-import { useI18n } from "@/i18n";
+import { useI18n, type MessageKey } from "@/i18n";
 import { findInputMentions, mentionedInputSlots } from "@/inputMentions";
 import { createNativeAppMenu, type NativeAppMenu, type NativeMenuState } from "@/appMenu";
 import { applyAlphaMaskBlob, composeEditPrompt, hasGenerationInstructions, renderMaskGuide } from "@/mask";
+import {
+  assessInputConstraints,
+  explainGenerationError,
+  modelPolicyNotices,
+  validateInputConstraints,
+  type InputConstraint,
+} from "@/modelPolicies";
 import { invoke } from "@tauri-apps/api/core";
 import {
   allowedAssetRoles,
+  allowedAssetRolesForKind,
   buildRequest,
   cacheVideo,
   defaultOptions,
@@ -94,6 +74,7 @@ import {
   submitVideo,
   validateEnhancedPrompt,
   videoReferenceLimit,
+  videoTotalInputLimit,
   type CredentialStatus,
   type GenerationMode,
   type GenerationModel,
@@ -129,6 +110,8 @@ import {
   effectiveThreadModelId,
   exportAssetToDownloads,
   optionOverridesFromDefaults,
+  applyDefaultEnhancePrompt,
+  recordSessionCost,
   type NativeManagedAsset,
   type GenerationDraftState,
   type GenerationAttempt,
@@ -145,8 +128,6 @@ import {
   videoPollRetryDelayMs,
 } from "@/videoPolling";
 
-const AssemblyDialog = lazy(() => import("@/components/AssemblyDialog").then((module) => ({ default: module.AssemblyDialog })));
-const DecisionWorkspace = lazy(() => import("@/components/DecisionWorkspace").then((module) => ({ default: module.DecisionWorkspace })));
 const SettingsDialog = lazy(() => import("@/components/SettingsDialog").then((module) => ({ default: module.SettingsDialog })));
 
 function errorMessage(error: unknown) {
@@ -181,27 +162,10 @@ function PromptMentionHighlight({
   return <>{content}</>;
 }
 
-function summarizeBatchAttempts(attempts: GenerationAttempt[]): BatchSummary {
-  const estimatedCosts = attempts.flatMap((attempt) => attempt.estimatedCostUsd == null ? [] : [attempt.estimatedCostUsd]);
-  const actualCosts = attempts.flatMap((attempt) => attempt.actualCostUsd == null ? [] : [attempt.actualCostUsd]);
-  return {
-    total: attempts.length,
-    queued: attempts.filter((attempt) => ["queued", "enhancing", "awaiting_host"].includes(attempt.status)).length,
-    running: attempts.filter((attempt) => ["submitting", "in_progress"].includes(attempt.status)).length,
-    completed: attempts.filter((attempt) => attempt.status === "completed").length,
-    failed: attempts.filter((attempt) => attempt.status === "failed").length,
-    uncertain: attempts.filter((attempt) => attempt.status === "uncertain").length,
-    canceled: attempts.filter((attempt) => attempt.status === "canceled").length,
-    estimatedCostUsd: estimatedCosts.length ? estimatedCosts.reduce((sum, cost) => sum + cost, 0) : undefined,
-    actualCostUsd: actualCosts.length ? actualCosts.reduce((sum, cost) => sum + cost, 0) : undefined,
-  };
-}
-
 const SESSION_SIDEBAR_OPEN_KEY = "fruit-truck.session-sidebar.open";
 const SESSION_SIDEBAR_WIDTH_KEY = "fruit-truck.session-sidebar.width";
 const RIGHT_PANEL_OPEN_KEY = "fruit-truck.right-panel.open";
 const ONBOARDING_COMPLETE_KEY = "fruit-truck.onboarding.complete.v1";
-const AGENT_ONBOARDING_COMPLETE_KEY = "fruit-truck.agent-onboarding.complete.v1";
 const DEFAULT_SESSION_SIDEBAR_WIDTH = 256;
 
 function hasRunnableInstructions(mode: GenerationMode, draft: GenerationDraftState) {
@@ -226,7 +190,6 @@ export default function App() {
   const [imageEndpoints, setImageEndpoints] = useState<Record<string, ImageModelEndpoint[]>>({});
   const [credential, setCredential] = useState<CredentialStatus | null>(null);
   const [onboardingOpen, setOnboardingOpen] = useState<boolean | null>(null);
-  const [onboardingInitialStep, setOnboardingInitialStep] = useState<"welcome" | "agents">("welcome");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [shortcutHelpOpen, setShortcutHelpOpen] = useState(false);
   const [executingThreadIds, setExecutingThreadIds] = useState<Set<string>>(new Set());
@@ -239,14 +202,11 @@ export default function App() {
   const [otherDialogOpen, setOtherDialogOpen] = useState(false);
   const [highlightedAssetIds, setHighlightedAssetIds] = useState<Set<string>>(new Set());
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
-  const [rightPanelTab, setRightPanelTab] = useState<"agent" | "assets">("assets");
   const [rightPanelOpen, setRightPanelOpen] = useState(() =>
     typeof localStorage === "undefined" || localStorage.getItem(RIGHT_PANEL_OPEN_KEY) !== "false",
   );
   const [focusedAssetId, setFocusedAssetId] = useState<string | null>(null);
   const [previewAssetId, setPreviewAssetId] = useState<string | null>(null);
-  const [assemblyOpen, setAssemblyOpen] = useState(false);
-  const [decisionOpen, setDecisionOpen] = useState(false);
   const [sessionSidebarOpen, setSessionSidebarOpen] = useState(() =>
     typeof localStorage === "undefined" || localStorage.getItem(SESSION_SIDEBAR_OPEN_KEY) !== "false",
   );
@@ -280,20 +240,10 @@ export default function App() {
   const studioRef = useRef(studio);
   studioRef.current = studio;
   const migratingAssetIds = useRef(new Set<string>());
-  const bridgeRevisions = useRef(new Map<string, number>());
-  const bridgeSnapshots = useRef(new Map<string, AgentBridgeSession>());
-  const bridgeSyncing = useRef(new Set<string>());
-  const bridgeDirtyVersions = useRef(new Map<string, number>());
-  const bridgeRetryAttempts = useRef(new Map<string, number>());
-  const bridgeRetryAt = useRef(new Map<string, number>());
-  const [bridgeSyncTick, setBridgeSyncTick] = useState(0);
   const quitConfirmationPending = useRef(false);
   const confirmationRef = useRef<Confirmation | null>(null);
 
   const session = studio.sessions.find((item) => item.id === studio.activeSessionId) ?? studio.sessions[0];
-  const pendingUiDecision = session.agent.decisions.find((decision) =>
-    decision.status === "pending" && decision.channel === "fruit_truck_ui"
-  );
   const mode = session.mode;
   const modeThreads = session.threads[mode].filter((item) => !item.archivedAt);
   const thread = modeThreads.find((item) => item.id === session.activeThreadIds[mode]) ?? modeThreads[0];
@@ -301,27 +251,18 @@ export default function App() {
   const models = catalogs[mode];
   const selectedId = effectiveThreadModelId(session, thread);
   const selectedModel = models.find((model) => model.id === selectedId) ?? null;
-  const approvedVideoCount = session.agent.artifacts.filter((artifact) =>
-    artifact.approval === "approved"
-      && session.assets.find((asset) => asset.id === artifact.assetId)?.kind === "video"
-  ).length;
-  const roles = allowedAssetRoles(mode, selectedModel);
+  const roleOptions = useMemo(() => ({
+    image: allowedAssetRolesForKind(mode, selectedModel, "image"),
+    video: allowedAssetRolesForKind(mode, selectedModel, "video"),
+    audio: allowedAssetRolesForKind(mode, selectedModel, "audio"),
+  }), [mode, selectedModel]);
+  const roles = useMemo(() => [...new Set(Object.values(roleOptions).flat())], [roleOptions]);
   const referenceLimit = mode === "image"
     ? imageReferenceLimit(selectedModel as ImageModel | null)
-    : Math.max(
-      roles.length,
-      videoReferenceLimit(selectedModel as VideoModel | null)
-      + ((selectedModel as VideoModel | null)?.supported_frame_images?.length ?? 0),
-    );
+    : videoTotalInputLimit(selectedModel as VideoModel | null);
   const assetMap = useMemo(() => new Map(session.assets.map((asset) => [asset.id, asset])), [session.assets]);
+  const policyNotices = useMemo(() => modelPolicyNotices(mode, selectedModel), [mode, selectedModel]);
   const sessionVideoJobs = activeVideoJobsFromAttempts(session);
-  const persistedBatchSummary = useMemo<BatchSummary | null>(() => {
-    const attempts = [...session.threads.image, ...session.threads.video].flatMap((item) => item.attempts);
-    const requestKey = attempts.filter((attempt) => attempt.requestKey).toSorted((left, right) => right.createdAt.localeCompare(left.createdAt))[0]?.requestKey;
-    if (!requestKey) return null;
-    const batch = attempts.filter((attempt) => attempt.requestKey === requestKey);
-    return summarizeBatchAttempts(batch);
-  }, [session.threads]);
   const activeAttempt = activeGenerationAttempt(thread);
   const hasActiveAttempt = Boolean(activeAttempt);
   const generating = executingThreadIds.has(thread.id) || Boolean(activeAttempt && activeAttempt.status !== "enhancing");
@@ -380,7 +321,7 @@ export default function App() {
     for (const failure of failed) {
       toast.error(failure.sessionId === studio.activeSessionId
         ? `${failure.threadName}: ${failure.message}`
-        : t("backgroundGenerationFailed", { session: failure.sessionName, thread: failure.threadName }));
+        : `${t("backgroundGenerationFailed", { session: failure.sessionName, thread: failure.threadName })}: ${failure.message}`);
     }
   }, [studio, t]);
 
@@ -424,18 +365,8 @@ export default function App() {
       ...current,
       sessions: current.sessions.map((item) => {
         if (item.id !== id) return item;
-        const createdAt = new Date().toISOString();
         const next = update(item);
-        if (next.agentBridge) {
-          bridgeDirtyVersions.current.set(
-            item.id,
-            (bridgeDirtyVersions.current.get(item.id) ?? 0) + 1,
-          );
-        }
-        const agent = next.agentBridge && next.agent.revision <= item.agent.revision
-          ? { ...next.agent, revision: item.agent.revision + 1, updatedAt: createdAt }
-          : next.agent;
-        return { ...next, agent, updatedAt: createdAt };
+        return { ...next, updatedAt: new Date().toISOString() };
       }),
     }));
   }, []);
@@ -477,17 +408,6 @@ export default function App() {
     });
   }, [patchActive]);
 
-  const patchAgent = useCallback((update: StudioSession["agent"] | ((current: StudioSession["agent"]) => StudioSession["agent"])) => {
-    patchActive((current) => {
-      const agent = typeof update === "function" ? update(current.agent) : update;
-      return {
-        ...current,
-        agent,
-        agentBridge: current.agentBridge || agent.controlMode === "agent" || agent.plan.length > 0,
-      };
-    });
-  }, [patchActive]);
-
   const recordGenerationCost = useCallback((
     sessionId: string,
     mode: GenerationMode,
@@ -510,12 +430,12 @@ export default function App() {
           } : attempt),
         } : item),
       },
-      agent: recordActualCost(current.agent, {
-        id: `generation:${attemptId}`,
-        category: "generation",
-        actualCostUsd,
-        recordedAt,
-      }),
+      costLedger: recordSessionCost(current, {
+          id: `generation:${attemptId}`,
+          category: "generation",
+          actualCostUsd,
+          recordedAt,
+        }).costLedger,
     }));
   }, [patchSession]);
 
@@ -574,187 +494,6 @@ export default function App() {
   }, [patchSession, studio]);
 
   useEffect(() => {
-    if (!isTauriRuntime()) return;
-    const timer = window.setTimeout(() => {
-      for (const item of studio.sessions.filter((candidate) => candidate.agentBridge)) {
-        const dirtyVersion = bridgeDirtyVersions.current.get(item.id);
-        if (dirtyVersion == null || bridgeSyncing.current.has(item.id)) continue;
-        if ((bridgeRetryAt.current.get(item.id) ?? 0) > Date.now()) continue;
-        const expectedRevision = bridgeRevisions.current.get(item.id);
-        const base = bridgeSnapshots.current.get(item.id);
-        bridgeSyncing.current.add(item.id);
-        let serialized: AgentBridgeSession | undefined;
-        void serializeAgentSessionForBridge(item).then(async (value) => {
-          serialized = value;
-          let saved: AgentBridgeSession;
-          if (expectedRevision == null) {
-            const envelope = await writeSerializedAgentBridgeSession(serialized, 0);
-            saved = envelope.sessions.find((candidate) => candidate.id === item.id)
-              ?? await readAgentBridgeSession(item.id);
-          } else {
-            if (!base) throw new Error(`Core base snapshot for ${item.id} is unavailable.`);
-            const patches = diffAgentBridgeSession(base, serialized);
-            if (!patches.length) {
-              if (bridgeDirtyVersions.current.get(item.id) === dirtyVersion) {
-                bridgeDirtyVersions.current.delete(item.id);
-              }
-              setStudio((current) => ({
-                ...current,
-                sessions: current.sessions.map((candidate) => candidate.id === item.id
-                  ? { ...candidate, agent: { ...candidate.agent, revision: expectedRevision } }
-                  : candidate),
-              }));
-              return;
-            }
-            const committed = await commitAgentOperations(
-              item.id,
-              expectedRevision,
-              `desktop-projection:${item.id}:${expectedRevision}:${serialized.agent.revision}`,
-              [{ type: "apply_projection_patch", patches }],
-            );
-            saved = committed.session;
-          }
-          bridgeRevisions.current.set(item.id, saved.agent.revision);
-          bridgeSnapshots.current.set(item.id, saved);
-          bridgeRetryAttempts.current.delete(item.id);
-          bridgeRetryAt.current.delete(item.id);
-          const unchangedSinceStart = bridgeDirtyVersions.current.get(item.id) === dirtyVersion;
-          if (unchangedSinceStart) bridgeDirtyVersions.current.delete(item.id);
-          if (!unchangedSinceStart) return;
-          const incoming = materializeAgentSession(saved);
-          setStudio((current) => ({
-            ...current,
-            sessions: current.sessions.map((candidate) => candidate.id === item.id ? {
-              ...candidate,
-              ...incoming,
-              assets: preserveLocalAssetMetadata(incoming.assets, candidate.assets),
-            } : candidate),
-          }));
-        }).catch(async (error) => {
-          if (errorMessage(error).includes("AGENT_SESSION_CONFLICT") && serialized) {
-            try {
-              const remote = await readAgentBridgeSession(item.id);
-              const merged = mergeBridgeSession(base ?? remote, serialized, remote);
-              bridgeRevisions.current.set(item.id, remote.agent.revision);
-              bridgeSnapshots.current.set(item.id, remote);
-              bridgeDirtyVersions.current.set(item.id, (bridgeDirtyVersions.current.get(item.id) ?? 0) + 1);
-              bridgeRetryAttempts.current.delete(item.id);
-              bridgeRetryAt.current.delete(item.id);
-              const incoming = materializeAgentSession(merged);
-              setStudio((current) => ({
-                ...current,
-                sessions: current.sessions.map((candidate) => candidate.id === item.id ? {
-                  ...candidate,
-                  ...incoming,
-                  assets: preserveLocalAssetMetadata(incoming.assets, candidate.assets),
-                } : candidate),
-              }));
-              toast.info("The shared session changed first; local edits were rebased onto the latest Core state.");
-              return;
-            } catch (reloadError) {
-              error = reloadError;
-            }
-          }
-          const attempts = (bridgeRetryAttempts.current.get(item.id) ?? 0) + 1;
-          bridgeRetryAttempts.current.set(item.id, attempts);
-          if (attempts === 1) toast.error(`Could not sync the shared session: ${errorMessage(error)}`);
-          const delay = Math.min(30_000, 500 * 2 ** Math.min(6, attempts - 1));
-          bridgeRetryAt.current.set(item.id, Date.now() + delay);
-          window.setTimeout(() => setBridgeSyncTick((current) => current + 1), delay);
-        }).finally(() => {
-          bridgeSyncing.current.delete(item.id);
-          if (bridgeDirtyVersions.current.has(item.id) && !bridgeRetryAttempts.current.has(item.id)) {
-            setBridgeSyncTick((current) => current + 1);
-          }
-        });
-      }
-    }, 220);
-    return () => window.clearTimeout(timer);
-  }, [bridgeSyncTick, studio]);
-
-  useEffect(() => {
-    if (!isTauriRuntime()) return;
-    let active = true;
-    const applyEnvelope = (envelope: Awaited<ReturnType<typeof readAgentBridge>>) => {
-      if (!active || !envelope.sessions.length) return;
-      const projectionStarted = performance.now();
-      const discovered = envelope.sessions.filter((external) =>
-        !studioRef.current.sessions.some((item) => item.id === external.id)
-      );
-      if (discovered.length) {
-        toast.info(`${discovered.length} new agent session${discovered.length === 1 ? "" : "s"} available in Sessions.`);
-      }
-      setStudio((current) => {
-        let changed = false;
-        const sessions = [...current.sessions];
-        for (const external of envelope.sessions) {
-          const index = sessions.findIndex((item) => item.id === external.id);
-          const locallyDirty = bridgeDirtyVersions.current.has(external.id)
-            || bridgeSyncing.current.has(external.id);
-          if (locallyDirty) continue;
-          const confirmedRevision = bridgeRevisions.current.get(external.id) ?? -1;
-          bridgeRevisions.current.set(external.id, external.agent.revision);
-          bridgeSnapshots.current.set(external.id, external);
-          if (index < 0) {
-            sessions.push(materializeAgentSession(external));
-            changed = true;
-          } else if (external.agent.revision > confirmedRevision) {
-            const incoming = materializeAgentSession(external);
-            sessions[index] = {
-              ...sessions[index],
-              ...incoming,
-              assets: preserveLocalAssetMetadata(incoming.assets, sessions[index].assets),
-            };
-            changed = true;
-          }
-        }
-        return changed
-          ? { ...current, sessions }
-          : current;
-      });
-      window.requestAnimationFrame(() => recordAgentTelemetry(
-        "desktop.projection_paint",
-        (performance.now() - projectionStarted) * 1_000,
-        { sessionCount: envelope.sessions.length },
-      ));
-    };
-    const syncLoop = async () => {
-      try {
-        let envelope = await readAgentBridge();
-        let recoveredUnpublished = false;
-        for (const local of studioRef.current.sessions.filter((item) => item.agentBridge)) {
-          if (envelope.sessions.some((external) => external.id === local.id)) continue;
-          if (!bridgeDirtyVersions.current.has(local.id)) {
-            bridgeDirtyVersions.current.set(local.id, 1);
-            recoveredUnpublished = true;
-          }
-        }
-        if (recoveredUnpublished) setBridgeSyncTick((current) => current + 1);
-        let eventCursor = envelope.revision;
-        while (active) {
-          applyEnvelope(envelope);
-          const batch = await waitForAgentBridgeEvents(eventCursor, 20_000);
-          eventCursor = batch.cursor;
-          if (batch.resetRequired) {
-            envelope = await readAgentBridge();
-            eventCursor = envelope.revision;
-            continue;
-          }
-          const sessionIds = [...new Set(batch.events.map((event) => event.sessionId))];
-          const sessions = [];
-          for (const sessionId of sessionIds) sessions.push(await readAgentBridgeSession(sessionId));
-          envelope = { schemaVersion: 4, revision: eventCursor, sessions };
-        }
-      } catch (error) {
-        if (active) console.warn("Agent bridge sync failed", error);
-        if (active) window.setTimeout(() => void syncLoop(), 1_000);
-      }
-    };
-    void syncLoop();
-    return () => { active = false; };
-  }, []);
-
-  useEffect(() => {
     localStorage.setItem(SESSION_SIDEBAR_OPEN_KEY, String(sessionSidebarOpen));
     localStorage.setItem(SESSION_SIDEBAR_WIDTH_KEY, String(Math.round(sessionSidebarWidth)));
   }, [sessionSidebarOpen, sessionSidebarWidth]);
@@ -764,26 +503,9 @@ export default function App() {
   }, [rightPanelOpen]);
 
   useEffect(() => {
-    if (!isTauriRuntime()) return;
-    const report = () => void invoke("report_desktop_runtime", {
-      activeSessionId: studioRef.current.activeSessionId,
-    }).catch((error) => console.warn("Could not report Fruit Truck runtime presence", error));
-    report();
-    const timer = window.setInterval(report, 3_000);
-    return () => window.clearInterval(timer);
-  }, []);
-
-  useEffect(() => {
     void getCredentialStatus().then((status) => {
       setCredential(status);
-      const agentCompleted = localStorage.getItem(AGENT_ONBOARDING_COMPLETE_KEY) === "true";
-      if (status.configured && !agentCompleted) {
-        setOnboardingInitialStep("agents");
-        setOnboardingOpen(true);
-      } else {
-        setOnboardingInitialStep("welcome");
-        setOnboardingOpen(!status.configured);
-      }
+      setOnboardingOpen(localStorage.getItem(ONBOARDING_COMPLETE_KEY) !== "true" || !status.configured);
     }).catch((error) => {
       setOnboardingOpen(false);
       toast.error(errorMessage(error));
@@ -870,7 +592,7 @@ export default function App() {
   }, [credential?.configured, imageEndpoints, mode, selectedId, t]);
 
   const activeVideoJobIds = studio.sessions.flatMap((item) =>
-    isTauriRuntime() && item.agentBridge ? [] : activeVideoJobsFromAttempts(item)
+    activeVideoJobsFromAttempts(item)
       .filter((job) => job.status === "pending" || job.status === "in_progress")
       .map((job) => `${item.id}:${job.jobId}`),
   ).sort().join("|");
@@ -886,7 +608,7 @@ export default function App() {
       if (polling.current) return;
       const nowMs = Date.now();
       const activeJobs = studioRef.current.sessions.flatMap((item) =>
-        isTauriRuntime() && item.agentBridge ? [] : activeVideoJobsFromAttempts(item)
+        activeVideoJobsFromAttempts(item)
           .filter((job) => job.status === "pending" || job.status === "in_progress")
           .filter((job) => hasVideoPollingTimedOut(job.submittedAt, nowMs) || (
             (videoPollNotBefore.current.get(`${item.id}:${job.jobId}`) ?? 0) <= nowMs
@@ -920,13 +642,6 @@ export default function App() {
                       attempts: item.attempts.map((attempt) => attempt.id === job.attemptId ? { ...attempt, status: "completed", assetIds: [existing.id], progress: 100, error: undefined, actualCostUsd: result.actualCostUsd ?? attempt.actualCostUsd, costRecordedAt: result.actualCostUsd != null ? attempt.costRecordedAt ?? polledAt : attempt.costRecordedAt, pollAttempts: (attempt.pollAttempts ?? 0) + 1, lastPolledAt: polledAt, nextPollAt: undefined, completedAt: polledAt, updatedAt: polledAt } : attempt),
                     } : item),
                   } : current.threads,
-                  agent: {
-                    ...current.agent,
-                    execution: {
-                      ...current.agent.execution,
-                      currentJobIds: current.agent.execution.currentJobIds.filter((id) => id !== job.jobId),
-                    },
-                  },
                 };
               });
               return;
@@ -952,85 +667,53 @@ export default function App() {
                     attempts: item.attempts.map((attempt) => attempt.id === job.attemptId ? { ...attempt, status: "completed", assetIds: [resolvedAsset.id], progress: 100, error: undefined, actualCostUsd: result.actualCostUsd ?? attempt.actualCostUsd, costRecordedAt: result.actualCostUsd != null ? attempt.costRecordedAt ?? polledAt : attempt.costRecordedAt, pollAttempts: (attempt.pollAttempts ?? 0) + 1, lastPolledAt: polledAt, nextPollAt: undefined, completedAt: polledAt, updatedAt: polledAt } : attempt),
                   } : item),
                 } : current.threads,
-                agent: existing ? {
-                  ...current.agent,
-                  execution: {
-                    ...current.agent.execution,
-                    currentJobIds: current.agent.execution.currentJobIds.filter((id) => id !== job.jobId),
-                  },
-                } : recordAgentActivity({
-                  ...current.agent,
-                  execution: {
-                    ...current.agent.execution,
-                    currentJobIds: current.agent.execution.currentJobIds.filter((id) => id !== job.jobId),
-                  },
-                  artifacts: [...current.agent.artifacts, {
-                    assetId: resolvedAsset.id,
-                    role: current.threads.video.find((item) => item.id === job.threadId)?.outputRole ?? "video_shot",
-                    parentAssetIds: job.inputAssetIds ?? [],
-                    prompt: typeof job.request.prompt === "string" ? job.request.prompt : undefined,
-                    modelId: job.model,
-                    threadId: job.threadId,
-                    attemptId: job.attemptId,
-                    approval: "unreviewed",
-                  }],
-                }, {
-                  actor: "runtime",
-                  kind: "generation",
-                  title: "Video generation completed",
-                  modelId: job.model,
-                  assetIds: [resolvedAsset.id],
-                }),
               };
             });
           } else if (result.status === "failed" || result.status === "cancelled" || result.status === "expired") {
             videoPollNotBefore.current.set(pollKey, Number.POSITIVE_INFINITY);
             const polledAt = new Date().toISOString();
             const canceled = result.status === "cancelled";
-            const message = result.error ?? (canceled
+            const rawMessage = result.error ?? (canceled
               ? t("videoGenerationCanceled")
               : result.status === "expired" ? t("videoGenerationExpired") : t("videoGenerationFailed"));
+            const explained = canceled ? null : explainGenerationError(rawMessage, { modelId: job.model, language });
+            const message = explained?.message ?? rawMessage;
             patchSession(sessionId, (current) => ({
               ...current,
               threads: job.threadId && job.attemptId ? {
                 ...current.threads,
                 video: current.threads.video.map((item) => item.id === job.threadId ? {
                   ...item,
-                  attempts: item.attempts.map((attempt) => attempt.id === job.attemptId ? { ...attempt, status: canceled ? "canceled" : "failed", error: message, pollAttempts: (attempt.pollAttempts ?? 0) + 1, lastPolledAt: polledAt, nextPollAt: undefined, completedAt: polledAt, updatedAt: polledAt } : attempt),
+                  attempts: item.attempts.map((attempt) => attempt.id === job.attemptId ? {
+                    ...attempt,
+                    status: canceled ? "canceled" : "failed",
+                    error: message,
+                    errorCode: explained?.code,
+                    errorAction: explained?.action,
+                    errorDetails: explained?.technical,
+                    pollAttempts: (attempt.pollAttempts ?? 0) + 1,
+                    lastPolledAt: polledAt,
+                    nextPollAt: undefined,
+                    completedAt: polledAt,
+                    updatedAt: polledAt,
+                  } : attempt),
                 } : item),
               } : current.threads,
-              agent: {
-                ...current.agent,
-                runStatus: current.agent.controlMode === "agent" ? "failed" : current.agent.runStatus,
-                execution: {
-                  ...current.agent.execution,
-                  currentJobIds: current.agent.execution.currentJobIds.filter((id) => id !== job.jobId),
-                  lastError: message,
-                },
-              },
             }));
           } else if (hasVideoPollingTimedOut(job.submittedAt)) {
             videoPollNotBefore.current.set(pollKey, Number.POSITIVE_INFINITY);
             const completedAt = new Date().toISOString();
-            const message = t("videoPollingTimedOut");
+            const explained = explainGenerationError(t("videoPollingTimedOut"), { modelId: job.model, language });
+            const message = explained.message;
             patchSession(sessionId, (current) => ({
               ...current,
               threads: job.threadId && job.attemptId ? {
                 ...current.threads,
                 video: current.threads.video.map((item) => item.id === job.threadId ? {
                   ...item,
-                  attempts: item.attempts.map((attempt) => attempt.id === job.attemptId ? { ...attempt, status: "failed", error: message, pollAttempts: (attempt.pollAttempts ?? 0) + 1, lastPolledAt: completedAt, nextPollAt: undefined, completedAt, updatedAt: completedAt } : attempt),
+                  attempts: item.attempts.map((attempt) => attempt.id === job.attemptId ? { ...attempt, status: "failed", error: message, errorCode: explained.code, errorAction: explained.action, errorDetails: explained.technical, pollAttempts: (attempt.pollAttempts ?? 0) + 1, lastPolledAt: completedAt, nextPollAt: undefined, completedAt, updatedAt: completedAt } : attempt),
                 } : item),
               } : current.threads,
-              agent: {
-                ...current.agent,
-                runStatus: current.agent.controlMode === "agent" && current.agent.runStatus === "working" ? "failed" : current.agent.runStatus,
-                execution: {
-                  ...current.agent.execution,
-                  currentJobIds: current.agent.execution.currentJobIds.filter((id) => id !== job.jobId),
-                  lastError: message,
-                },
-              },
             }));
           } else {
             const polledAt = new Date().toISOString();
@@ -1050,7 +733,8 @@ export default function App() {
         } catch (error) {
           const polledAt = new Date().toISOString();
           const timedOut = hasVideoPollingTimedOut(job.submittedAt, Date.parse(polledAt));
-          const message = timedOut ? t("videoPollingTimedOut") : errorMessage(error);
+          const explained = explainGenerationError(timedOut ? t("videoPollingTimedOut") : error, { modelId: job.model, language });
+          const message = explained.message;
           const pollKey = `${sessionId}:${job.jobId}`;
           const retryAtMs = timedOut ? undefined : Date.now() + videoPollRetryDelayMs(job.pollAttempts ?? 0);
           if (retryAtMs == null) videoPollNotBefore.current.set(pollKey, Number.POSITIVE_INFINITY);
@@ -1065,6 +749,9 @@ export default function App() {
                   ...attempt,
                   status: timedOut ? "failed" : "in_progress",
                   error: message,
+                  errorCode: explained.code,
+                  errorAction: explained.action,
+                  errorDetails: explained.technical,
                   pollAttempts: (attempt.pollAttempts ?? 0) + 1,
                   lastPolledAt: polledAt,
                   nextPollAt: retryAtMs == null ? undefined : new Date(retryAtMs).toISOString(),
@@ -1073,15 +760,6 @@ export default function App() {
                 } : attempt),
               } : item),
             } : current.threads,
-            agent: timedOut ? {
-              ...current.agent,
-              runStatus: current.agent.controlMode === "agent" && current.agent.runStatus === "working" ? "failed" : current.agent.runStatus,
-              execution: {
-                ...current.agent.execution,
-                currentJobIds: current.agent.execution.currentJobIds.filter((id) => id !== job.jobId),
-                lastError: message,
-              },
-            } : current.agent,
           }));
         }
         }));
@@ -1108,7 +786,7 @@ export default function App() {
       window.removeEventListener("focus", wake);
       document.removeEventListener("visibilitychange", wakeWhenVisible);
     };
-  }, [activeVideoJobIds, credential?.configured, patchSession, recordGenerationCost, t]);
+  }, [activeVideoJobIds, credential?.configured, language, patchSession, recordGenerationCost, t]);
 
   const commitImportedAssets = useCallback((candidates: SessionAsset[]): SessionAsset[] => {
     const imported: SessionAsset[] = [];
@@ -1131,23 +809,6 @@ export default function App() {
       patchSession(currentSession.id, (current) => ({
         ...current,
         assets: [...current.assets, ...imported],
-        agent: recordAgentActivity({
-          ...current.agent,
-          artifacts: [
-            ...current.agent.artifacts,
-            ...imported.map((asset) => ({
-              assetId: asset.id,
-              role: "uploaded_reference",
-              parentAssetIds: [],
-              approval: "unreviewed" as const,
-            })),
-          ],
-        }, {
-          actor: "user",
-          kind: "generation",
-          title: `Imported ${imported.length} reference asset${imported.length === 1 ? "" : "s"}`,
-          assetIds: imported.map((asset) => asset.id),
-        }),
       }));
       toast.success(t("assetsImported", { count: imported.length }));
     }
@@ -1171,7 +832,7 @@ export default function App() {
       return new Promise((resolve) => {
         const input = document.createElement("input");
         input.type = "file";
-        input.accept = "image/*,video/*";
+        input.accept = "image/*,video/*,audio/*";
         input.multiple = true;
         input.onchange = () => void importFiles(input.files ?? []).then(resolve);
         input.oncancel = () => resolve([]);
@@ -1192,7 +853,7 @@ export default function App() {
     const unlisteners: Array<() => void> = [];
     void import("@tauri-apps/api/event").then(async ({ listen }) => {
       const unlistenAssets = await listen<NativeManagedAsset[]>("managed-assets-imported", (event) => {
-        if (!disposed) commitImportedAssets(managedDroppedAssets(event.payload));
+        if (!disposed) void managedDroppedAssets(event.payload).then(commitImportedAssets).catch((error) => toast.error(errorMessage(error)));
       });
       const unlistenFailure = await listen<string>("managed-assets-import-failed", (event) => {
         if (!disposed) toast.error(event.payload);
@@ -1222,22 +883,16 @@ export default function App() {
     const targetDraft = effectiveThreadDraft(targetSession, targetThread);
     const targetModelId = effectiveThreadModelId(targetSession, targetThread);
     const targetModel = catalogs[targetThread.mode].find((item) => item.id === targetModelId) ?? null;
-    const targetRoles = allowedAssetRoles(targetThread.mode, targetModel);
     const targetReferenceLimit = targetThread.mode === "image"
       ? imageReferenceLimit(targetModel as ImageModel | null)
-      : Math.max(
-        targetRoles.length,
-        videoReferenceLimit(targetModel as VideoModel | null)
-        + ((targetModel as VideoModel | null)?.supported_frame_images?.length ?? 0),
-      );
+      : videoTotalInputLimit(targetModel as VideoModel | null);
     if (!targetAsset || targetDraft.references.some((reference) => reference.assetId === assetId)) return;
     if (targetDraft.references.length >= targetReferenceLimit) {
       toast.error(t("tooManyInputs", { count: targetReferenceLimit }));
       return;
     }
-    const validRole = targetAsset.kind === "video"
-      ? null
-      : targetRoles.includes("reference") ? "reference" : targetRoles[0] ?? null;
+    const validRoles = allowedAssetRolesForKind(targetThread.mode, targetModel, targetAsset.kind);
+    const validRole = validRoles.includes("reference") ? "reference" : validRoles[0] ?? null;
     if (!validRole) {
       toast.error(t("unsupportedAssetInput"));
       return;
@@ -1431,27 +1086,8 @@ export default function App() {
     patchActive((current) => {
       const targetId = current.activeThreadIds[targetMode];
       const createdAt = new Date().toISOString();
-      const agent = recordAgentActivity({
-        ...current.agent,
-        modelSelections: {
-          ...current.agent.modelSelections,
-          [targetMode]: {
-            status: "selected" as const,
-            modelId: id,
-            selectedBy: "user" as const,
-            selectedAt: createdAt,
-          },
-        },
-      }, {
-        actor: "user",
-        kind: "decision",
-        title: `Selected ${targetMode} model`,
-        detail: model?.name ?? id,
-        modelId: id,
-      });
       return {
         ...current,
-        agent,
         threads: {
           ...current.threads,
           [targetMode]: current.threads[targetMode].map((item) => item.id === targetId ? {
@@ -1540,22 +1176,69 @@ export default function App() {
   const editReference = imageEditReference;
   const editTargetAsset = editReference ? assetMap.get(editReference.assetId) ?? null : null;
 
-  const inputValidationError = useMemo(() => {
+  const inputConstraintMessage = useCallback((constraint: InputConstraint | null) => {
+    if (!constraint) return null;
+    switch (constraint.code) {
+      case "unsupported_reference": return t("unsupportedReference", { slot: constraint.slot ?? "?" });
+      case "too_many_inputs": return t("tooManyInputs", { count: constraint.limit ?? 0 });
+      case "mixed_input_styles": return t("mixedInputStyles");
+      case "frame_inputs_ignored": return t("frameInputsIgnored");
+      case "duplicate_first_frame": return t("duplicateFirstFrame");
+      case "duplicate_last_frame": return t("duplicateLastFrame");
+      case "frame_requires_image": return t("frameRequiresImage", { slot: constraint.slot ?? "?" });
+      case "audio_requires_visual": return t("audioRequiresVisual");
+      case "audio_requires_image": return t("audioRequiresImage");
+      case "media_too_large": return t("mediaTooLarge", { slot: constraint.slot ?? "?", size: Math.round((constraint.limit ?? 0) / 1024 / 1024) });
+      case "unsupported_media_format": return t("unsupportedMediaFormat", { slot: constraint.slot ?? "?", format: constraint.value ?? "" });
+      case "unsupported_media_codec": return t("unsupportedMediaCodec", { slot: constraint.slot ?? "?", codec: constraint.value ?? "" });
+      case "dimensions_too_small": return t("dimensionsTooSmall", { slot: constraint.slot ?? "?" });
+      case "dimensions_too_large": return t("dimensionsTooLarge", { slot: constraint.slot ?? "?" });
+      case "aspect_ratio_unsupported": return t("aspectRatioUnsupported", { slot: constraint.slot ?? "?" });
+      case "duration_too_short": return t("durationTooShort", { slot: constraint.slot ?? "?", seconds: constraint.limit ?? 0 });
+      case "duration_too_long": return t("durationTooLong", { slot: constraint.slot ?? "?", seconds: constraint.limit ?? 0 });
+      case "combined_duration_too_long": return t("combinedDurationTooLong", { seconds: constraint.limit ?? 0 });
+      case "fps_too_high": return t("fpsTooHigh", { slot: constraint.slot ?? "?", fps: constraint.limit ?? 0 });
+      case "resolution_with_references": return t("resolutionWithReferences", { resolution: constraint.value ?? "720p" });
+      case "frames_will_crop": return t("framesWillCrop", { slot: constraint.slot ?? "?" });
+      case "real_person_blocked": return t("realPersonBlocked", { slot: constraint.slot ?? "?" });
+      case "face_check_unavailable": return t("faceCheckUnavailable");
+    }
+  }, [t]);
+
+  const inputIssues = useMemo(() => {
     const unsupported = draft.references.find((reference) => {
       const asset = assetMap.get(reference.assetId);
-      if (!asset) return true;
-      if (asset.kind === "video") return true;
-      return !roles.includes(reference.role);
+      return !asset || !allowedAssetRolesForKind(mode, selectedModel, asset.kind).includes(reference.role);
     });
-    if (unsupported) return t("unsupportedReference", { slot: unsupported.slot });
-    if (draft.references.length > referenceLimit) return t("tooManyInputs", { count: referenceLimit });
-    if (mode === "video") {
-      const hasReference = draft.references.some((reference) => reference.role === "reference");
-      const hasFrame = draft.references.some((reference) => reference.role === "first_frame" || reference.role === "last_frame");
-      if (hasReference && hasFrame) return t("mixedInputStyles");
-    }
-    return null;
-  }, [assetMap, draft.references, mode, referenceLimit, roles, t]);
+    return [
+      ...(unsupported ? [{ code: "unsupported_reference" as const, severity: "error" as const, slot: unsupported.slot }] : []),
+      ...assessInputConstraints({
+      references: draft.references.map((reference) => {
+        const asset = assetMap.get(reference.assetId);
+        return {
+          ...reference,
+          kind: asset?.kind ?? "image",
+          byteSize: asset?.byteSize,
+          width: asset?.width,
+          height: asset?.height,
+          duration: asset?.duration,
+          fps: asset?.fps,
+          mimeType: asset?.mimeType,
+          codec: asset?.codec,
+          facePresence: asset?.facePresence,
+        };
+      }),
+      allowedRoles: roles,
+      limit: referenceLimit,
+      referenceLimit: mode === "video" ? videoReferenceLimit(selectedModel as VideoModel | null) : referenceLimit,
+      mode,
+      modelId: selectedModel?.id,
+      options: draft.options,
+      }),
+    ];
+  }, [assetMap, draft.options, draft.references, mode, referenceLimit, roles, selectedModel]);
+  const inputValidationError = inputConstraintMessage(inputIssues.find((issue) => issue.severity === "error") ?? null);
+  const inputWarnings = inputIssues.filter((issue) => issue.severity === "warning").map(inputConstraintMessage).filter(Boolean) as string[];
 
   const maskReferenceError = useMemo(() => {
     if (mode !== "image" || !draft.imageEditMode || !draft.maskStrokes.length) return null;
@@ -1578,7 +1261,7 @@ export default function App() {
     for (const reference of targetDraft.references.toSorted((left, right) => left.slot - right.slot)) {
       const asset = targetAssetMap.get(reference.assetId);
       if (!asset) throw new Error(t("missingReference", { slot: reference.slot }));
-      if (asset.kind === "video") continue;
+      if (asset.kind !== "image") continue;
 
       const isEditTarget = targetThread.mode === "image"
         && targetDraft.imageEditMode
@@ -1643,11 +1326,12 @@ export default function App() {
       }, (actualCostUsd) => {
         patchSession(targetSession.id, (current) => ({
           ...current,
-          agent: recordActualCost(current.agent, {
-            id: costEntryId,
-            category: "prompt_enhancement",
-            actualCostUsd,
-          }),
+          costLedger: recordSessionCost(current, {
+              id: costEntryId,
+              category: "prompt_enhancement",
+              actualCostUsd,
+              recordedAt: new Date().toISOString(),
+            }).costLedger,
         }));
       });
       patchSession(targetSession.id, (current) => ({
@@ -1727,15 +1411,24 @@ export default function App() {
     const unsupported = targetDraft.references.find((reference) => {
       const asset = targetAssets.get(reference.assetId);
       if (!asset) return true;
-      return asset.kind === "video" || !targetRoles.includes(reference.role);
+      return !allowedAssetRolesForKind(targetThread.mode, model, asset.kind).includes(reference.role);
     });
     if (unsupported) return t("unsupportedReference", { slot: unsupported.slot });
-    if (targetThread.mode === "video") {
-      const hasReference = targetDraft.references.some((reference) => reference.role === "reference");
-      const hasFrame = targetDraft.references.some((reference) => reference.role === "first_frame" || reference.role === "last_frame");
-      if (hasReference && hasFrame) return t("mixedInputStyles");
-    }
-    return null;
+    const targetLimit = targetThread.mode === "image"
+      ? imageReferenceLimit(model as ImageModel)
+      : videoTotalInputLimit(model as VideoModel);
+    return inputConstraintMessage(validateInputConstraints({
+      references: targetDraft.references.map((reference) => {
+        const asset = targetAssets.get(reference.assetId);
+        return { ...reference, kind: asset?.kind ?? "image", byteSize: asset?.byteSize, width: asset?.width, height: asset?.height, duration: asset?.duration, fps: asset?.fps, mimeType: asset?.mimeType, codec: asset?.codec, facePresence: asset?.facePresence };
+      }),
+      allowedRoles: targetRoles,
+      limit: targetLimit,
+      referenceLimit: targetThread.mode === "video" ? videoReferenceLimit(model as VideoModel) : targetLimit,
+      mode: targetThread.mode,
+      modelId: model.id,
+      options: targetDraft.options,
+    }));
   };
 
   const patchAttempt = (sessionId: string, mode: GenerationMode, threadId: string, attemptId: string, patch: Partial<GenerationAttempt>) => {
@@ -1756,14 +1449,10 @@ export default function App() {
     }));
   };
 
-  const runGenerationThread = async (threadId: string, requestKey?: string) => {
+  const runGenerationThread = async (threadId: string) => {
     const targetSession = studioRef.current.sessions.find((item) => item.id === studioRef.current.activeSessionId) ?? studioRef.current.sessions[0];
     const targetThread = [...targetSession.threads.image, ...targetSession.threads.video].find((item) => item.id === threadId);
     if (!targetThread) return;
-    if (targetSession.agent.controlMode === "agent") {
-      toast.info("The agent has control. Switch to Human control to run this request yourself.");
-      return;
-    }
     if (!credential?.configured) { setSettingsOpen(true); return; }
     const validationError = validateThreadForRun(targetSession, targetThread);
     if (validationError) throw new Error(validationError);
@@ -1776,11 +1465,8 @@ export default function App() {
     const shouldEnhancePrompt = targetDraft.enhancePrompt && hasRunnableInstructions(targetThread.mode, targetDraft);
     const attempt: GenerationAttempt = {
       id: attemptId,
-      requestKey,
       status: shouldEnhancePrompt ? "enhancing" : "submitting",
-      backend: "openrouter",
       draftRevision: targetThread.revision,
-      requestedBy: "human",
       createdAt,
       updatedAt: createdAt,
       modelId: targetModelId,
@@ -1792,7 +1478,6 @@ export default function App() {
       snapshot: {
         mode: targetThread.mode,
         modelId: targetModelId,
-        outputRole: targetThread.outputRole,
         prompt: targetDraft.prompt,
         enhancePrompt: targetDraft.enhancePrompt,
         enhancedPrompt: targetDraft.enhancedPrompt,
@@ -1879,7 +1564,6 @@ export default function App() {
           ),
         ));
         patchSession(targetSession.id, (current) => {
-          const parentAssetIds = targetDraft.references.map((reference) => reference.assetId);
           return {
             ...current,
             assets: [...current.assets, ...generated],
@@ -1898,39 +1582,15 @@ export default function App() {
                 } : entry),
               } : item),
             },
-            agent: recordAgentActivity({
-              ...current.agent,
-              execution: {
-                ...current.agent.execution,
-                generationCount: current.agent.execution.generationCount + 1,
-              },
-              artifacts: [
-                ...current.agent.artifacts,
-                ...generated.map((asset) => ({
-                  assetId: asset.id,
-                  role: targetThread.outputRole,
-                  parentAssetIds,
-                  prompt,
-                  modelId: targetModelId,
-                  threadId: targetThread.id,
-                  attemptId,
-                  approval: "unreviewed" as const,
-                })),
-              ],
-            }, {
-              actor: current.agent.controlMode === "agent" ? "agent" : "user",
-              kind: "generation",
-              title: `Generated ${generated.length} image candidate${generated.length === 1 ? "" : "s"}`,
-              prompt,
-              modelId: targetModelId,
-              assetIds: generated.map((asset) => asset.id),
-            }),
           };
         });
       } else {
         const result = await submitVideo(payload, (actualCostUsd) => {
           recordGenerationCost(targetSession.id, "video", targetThread.id, attemptId, actualCostUsd);
         });
+        if (result.status === "failed" || result.status === "expired" || result.status === "cancelled") {
+          throw new Error(result.error ?? `Video generation ${result.status}.`);
+        }
         patchSession(targetSession.id, (current) => ({
           ...current,
           threads: {
@@ -1950,29 +1610,18 @@ export default function App() {
               } : entry),
             } : item),
           },
-          agent: recordAgentActivity({
-            ...current.agent,
-            execution: {
-              ...current.agent.execution,
-              generationCount: current.agent.execution.generationCount + 1,
-              currentJobIds: [...current.agent.execution.currentJobIds, result.jobId],
-            },
-          }, {
-            actor: current.agent.controlMode === "agent" ? "agent" : "user",
-            kind: "generation",
-            title: `Submitted ${targetThread.name}`,
-            prompt,
-            modelId: targetModelId,
-            assetIds: targetDraft.references.map((reference) => reference.assetId),
-          }),
         }));
       }
     } catch (error) {
-      patchAttempt(targetSession.id, targetThread.mode, targetThread.id, attemptId, { status: "failed", error: errorMessage(error), completedAt: new Date().toISOString() });
-      patchSession(targetSession.id, (current) => ({
-        ...current,
-        agent: { ...current.agent, execution: { ...current.agent.execution, lastError: errorMessage(error) } },
-      }));
+      const explained = explainGenerationError(error, { modelId: targetModelId, language });
+      patchAttempt(targetSession.id, targetThread.mode, targetThread.id, attemptId, {
+        status: "failed",
+        error: explained.message,
+        errorCode: explained.code,
+        errorAction: explained.action,
+        errorDetails: explained.technical,
+        completedAt: new Date().toISOString(),
+      });
     } finally {
       setExecutingThreadIds((current) => {
         const next = new Set(current);
@@ -1990,10 +1639,9 @@ export default function App() {
 
   const createThread = useCallback(() => {
     patchActive((current) => {
-      if (current.agent.controlMode === "agent") return current;
       const active = current.threads[current.mode].find((item) => item.id === current.activeThreadIds[current.mode]);
       if (!active) return current;
-      const next = createSiblingGenerationThread(active, current.threads[current.mode].length + 1);
+      const next = createSiblingGenerationThread(active, current.threads[current.mode].length + 1, studioRef.current.defaultEnhancePrompt);
       return {
         ...current,
         threads: { ...current.threads, [current.mode]: [...current.threads[current.mode], next] },
@@ -2016,6 +1664,7 @@ export default function App() {
         archivedAt: undefined,
         revision: 0,
         attempts: [],
+        draft: { ...source.draft, enhancePrompt: studioRef.current.defaultEnhancePrompt },
       };
       return {
         ...current,
@@ -2046,7 +1695,6 @@ export default function App() {
 
   const archiveThread = useCallback((id: string) => {
     patchActive((current) => {
-      if (current.agent.controlMode === "agent") return current;
       const visible = current.threads[current.mode].filter((item) => !item.archivedAt);
       if (visible.length <= 1) return current;
       const target = visible.find((item) => item.id === id);
@@ -2107,24 +1755,6 @@ export default function App() {
       };
     });
   };
-
-  const cancelQueuedAttempts = (current: StudioSession) => ({
-    ...current,
-    threads: {
-      image: current.threads.image.map((item) => ({
-        ...item,
-        attempts: item.attempts.map((attempt) => ["queued", "enhancing", "awaiting_host"].includes(attempt.status)
-          ? { ...attempt, status: "canceled" as const, cancelRequestedAt: new Date().toISOString(), completedAt: new Date().toISOString(), updatedAt: new Date().toISOString() }
-          : attempt),
-      })),
-      video: current.threads.video.map((item) => ({
-        ...item,
-        attempts: item.attempts.map((attempt) => ["queued", "enhancing", "awaiting_host"].includes(attempt.status)
-          ? { ...attempt, status: "canceled" as const, cancelRequestedAt: new Date().toISOString(), completedAt: new Date().toISOString(), updatedAt: new Date().toISOString() }
-          : attempt),
-      })),
-    },
-  });
 
   const useModeDefaults = () => patchActive((current) => ({
     ...current,
@@ -2192,29 +1822,6 @@ export default function App() {
           attempts: item.attempts.map((attempt) => ({ ...attempt, inputAssetIds: attempt.inputAssetIds.filter((id) => !ids.includes(id)), assetIds: attempt.assetIds.filter((id) => !ids.includes(id)), snapshot: attempt.snapshot ? { ...attempt.snapshot, assetBindings: attempt.snapshot.assetBindings.filter((binding) => !ids.includes(binding.assetId)) } : undefined })),
         })),
       },
-      agent: {
-        ...current.agent,
-        artifacts: current.agent.artifacts
-          .filter((artifact) => !ids.includes(artifact.assetId))
-          .map((artifact) => ({
-            ...artifact,
-            parentAssetIds: artifact.parentAssetIds.filter((id) => !ids.includes(id)),
-          })),
-        decisions: current.agent.decisions.map((decision) => ({
-          ...decision,
-          relatedAssetIds: decision.relatedAssetIds.filter((id) => !ids.includes(id)),
-        })),
-        assembly: {
-          ...current.agent.assembly,
-          clips: current.agent.assembly.clips.filter((clip) => !ids.includes(clip.assetId)),
-          outputAssetId: current.agent.assembly.outputAssetId && ids.includes(current.agent.assembly.outputAssetId)
-            ? undefined
-            : current.agent.assembly.outputAssetId,
-          status: current.agent.assembly.clips.some((clip) => ids.includes(clip.assetId))
-            ? "draft"
-            : current.agent.assembly.status,
-        },
-      },
     }));
     setSelectedAssetIds(new Set());
   };
@@ -2231,10 +1838,29 @@ export default function App() {
     () => mentionedInputSlots(draft.prompt, draft.references.map((reference) => reference.slot)),
     [draft.prompt, draft.references],
   );
-  const agentModelConfirmed = session.agent.controlMode === "human"
-    || (session.agent.modelSelections[mode].status === "selected" && session.agent.modelSelections[mode].modelId === selectedId);
   const hasMask = mode === "image" && draft.imageEditMode && draft.maskStrokes.length > 0;
-  const canGenerate = Boolean(selectedModel && hasRunnableInstructions(mode, draft) && !providerError && !inputValidationError && !generationValidationError && credential?.configured && !generating && !enhancing && !activeAttempt && agentModelConfirmed && session.agent.controlMode === "human");
+  const canGenerate = Boolean(selectedModel && hasRunnableInstructions(mode, draft) && !providerError && !inputValidationError && !generationValidationError && credential?.configured && !generating && !enhancing && !activeAttempt);
+  const sessionSpendUsd = session.costLedger.reduce((total, entry) => total + entry.actualCostUsd, 0);
+  const latestAttempt = thread.attempts.at(-1);
+  const latestGenerationFailure = latestAttempt && (latestAttempt.status === "failed" || latestAttempt.status === "uncertain") && latestAttempt.error
+    ? latestAttempt
+    : null;
+  const policyTitle = (code: (typeof policyNotices)[number]["code"]) => t(({
+    seedance_real_person: "seedancePersonPolicyTitle",
+    veo_person_generation: "veoPersonPolicyTitle",
+    sora_person_policy: "soraPersonPolicyTitle",
+    sora_deprecation: "soraDeprecationTitle",
+    runway_moderation: "runwayModerationTitle",
+    video_retention: "videoRetentionTitle",
+  } satisfies Record<(typeof policyNotices)[number]["code"], MessageKey>)[code]);
+  const policyMessage = (code: (typeof policyNotices)[number]["code"]) => t(({
+    seedance_real_person: "seedancePersonPolicyMessage",
+    veo_person_generation: "veoPersonPolicyMessage",
+    sora_person_policy: "soraPersonPolicyMessage",
+    sora_deprecation: "soraDeprecationMessage",
+    runway_moderation: "runwayModerationMessage",
+    video_retention: "videoRetentionMessage",
+  } satisfies Record<(typeof policyNotices)[number]["code"], MessageKey>)[code]);
   const currentResult = resultQueue[0] ?? null;
   const currentResultSession = currentResult
     ? studio.sessions.find((item) => item.id === currentResult.sessionId) ?? null
@@ -2252,7 +1878,6 @@ export default function App() {
       if (action) {
         action();
       } else {
-        setRightPanelTab("assets");
         setHighlightedAssetIds(new Set(currentResult.assetIds));
         if (assetHighlightTimer.current) window.clearTimeout(assetHighlightTimer.current);
         assetHighlightTimer.current = window.setTimeout(() => setHighlightedAssetIds(new Set()), reduceMotion ? 20 : 1_400);
@@ -2266,7 +1891,6 @@ export default function App() {
     setSelectedAssetIds(new Set());
     setFocusedAssetId(null);
     setPreviewAssetId(null);
-    setDecisionOpen(false);
   };
   const createNewSession = () => {
     setStudio((current) => {
@@ -2274,7 +1898,7 @@ export default function App() {
         createSession(nextAvailableSessionName(
           current.sessions,
           (count) => t("newSessionName", { count }),
-        )),
+        ), current.defaultEnhancePrompt),
         catalogs,
       );
       return { ...current, activeSessionId: created.id, sessions: [...current.sessions, created] };
@@ -2295,28 +1919,6 @@ export default function App() {
     });
   })();
 
-  const toggleControlMode = () => {
-    const currentDraft = thread.draft;
-    if (
-      session.agent.controlMode === "human"
-      && session.agent.connection.status === "disconnected"
-      && !currentDraft.prompt.trim()
-    ) {
-      toast.error(t("enterIntentBeforeAgent"));
-      return;
-    }
-    patchActive((current) => {
-      if (current.agent.controlMode === "agent") return { ...current, agent: setControlMode(current.agent, "human") };
-      const currentMode = current.mode;
-      const currentThread = current.threads[currentMode].find((item) => item.id === current.activeThreadIds[currentMode]) ?? current.threads[currentMode][0];
-      const currentDraft = currentThread.draft;
-      const seeded = current.agent.connection.status === "disconnected"
-        ? exposeAgentSession(current.agent, currentDraft.prompt)
-        : setControlMode(current.agent, "agent");
-      return { ...current, agent: seeded, agentBridge: true };
-    });
-  };
-
   createNewSessionRef.current = createNewSession;
   duplicateThreadRef.current = duplicateThread;
   restoreThreadRef.current = restoreThread;
@@ -2326,7 +1928,7 @@ export default function App() {
   dismissGenerationResultRef.current = () => dismissGenerationResult();
 
   const modalOpen = onboardingOpen !== false || otherDialogOpen || resultDialogOpen || Boolean(confirmation)
-    || settingsOpen || shortcutHelpOpen || assemblyOpen || decisionOpen;
+    || settingsOpen || shortcutHelpOpen;
   const previewAsset = session.assets.find((asset) => asset.id === previewAssetId);
   const focusedAsset = previewAsset ?? session.assets.find((asset) => asset.id === focusedAssetId)
     ?? (selectedAssetIds.size === 1 ? session.assets.find((asset) => selectedAssetIds.has(asset.id)) : undefined);
@@ -2346,8 +1948,6 @@ export default function App() {
     }
     if (shortcutHelpOpen) { setShortcutHelpOpen(false); return true; }
     if (resultDialogOpen) { dismissGenerationResultRef.current(); return true; }
-    if (decisionOpen) { setDecisionOpen(false); return true; }
-    if (assemblyOpen) { setAssemblyOpen(false); return true; }
     if (settingsOpen) { setSettingsOpen(false); return true; }
     const dialogs = [...document.querySelectorAll<HTMLElement>('[role="dialog"], [role="alertdialog"]')];
     const dialog = dialogs.at(-1);
@@ -2356,7 +1956,7 @@ export default function App() {
     if (close) close.click();
     else dialog.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
     return true;
-  }, [assemblyOpen, closeConfirmation, confirmation, decisionOpen, resultDialogOpen, settingsOpen, shortcutHelpOpen]);
+  }, [closeConfirmation, confirmation, resultDialogOpen, settingsOpen, shortcutHelpOpen]);
 
   const cycleThread = useCallback((direction: -1 | 1) => {
     patchActive((current) => {
@@ -2375,17 +1975,6 @@ export default function App() {
     }
     if (id === "archiveThread" && modalOpen) return closeTopmostDialog();
     if (confirmation) return false;
-    if (id === "generate" && (decisionOpen || assemblyOpen)) {
-      const target = document.querySelector<HTMLElement>(decisionOpen ? ".decision-workspace" : ".assembly-dialog");
-      target?.dispatchEvent(new KeyboardEvent("keydown", {
-        key: "Enter",
-        metaKey: navigator.platform.toLowerCase().includes("mac"),
-        ctrlKey: !navigator.platform.toLowerCase().includes("mac"),
-        bubbles: true,
-        cancelable: true,
-      }));
-      return Boolean(target);
-    }
     if (modalOpen && id !== "settings" && id !== "shortcutHelp" && !(id === "exportAsset" && previewAsset)) return false;
     switch (id) {
       case "newSession":
@@ -2393,24 +1982,22 @@ export default function App() {
         focusPrompt();
         return true;
       case "newThread":
-        if (session.agent.controlMode === "agent") return false;
         createThread();
         focusPrompt();
         return true;
       case "duplicateThread":
-        if (session.agent.controlMode === "agent") return false;
         duplicateThreadRef.current(thread.id);
         focusPrompt();
         return true;
       case "archiveThread":
-        if (session.agent.controlMode === "agent" || hasActiveAttempt || modeThreads.length <= 1) return true;
+        if (hasActiveAttempt || modeThreads.length <= 1) return true;
         archiveThread(thread.id);
         return true;
       case "restoreThread": {
         const latest = session.threads[mode]
           .filter((candidate) => candidate.archivedAt)
           .toSorted((left, right) => (right.archivedAt ?? "").localeCompare(left.archivedAt ?? ""))[0];
-        if (!latest || session.agent.controlMode === "agent") return false;
+        if (!latest) return false;
         restoreThreadRef.current(latest.id);
         return true;
       }
@@ -2422,7 +2009,7 @@ export default function App() {
         return true;
       case "importAssets": void pickFilesRef.current(); return true;
       case "exportAsset": {
-        const hasAssetPanelContext = rightPanelOpen && rightPanelTab === "assets";
+        const hasAssetPanelContext = rightPanelOpen;
         if (!focusedAsset || (!previewAsset && !hasAssetPanelContext)) return false;
         void exportAssetToDownloads(focusedAsset)
           .then((path) => toast.success(t("downloadComplete", { name: focusedAsset.name, path })))
@@ -2433,8 +2020,7 @@ export default function App() {
       case "videoMode": switchModeRef.current("video"); return true;
       case "toggleSessionSidebar": setSessionSidebarOpen((open) => !open); return true;
       case "toggleInspector": setRightPanelOpen((open) => !open); return true;
-      case "showAgent": setRightPanelOpen(true); setRightPanelTab("agent"); return true;
-      case "showAssets": setRightPanelOpen(true); setRightPanelTab("assets"); return true;
+      case "showAssets": setRightPanelOpen(true); return true;
       case "focusPrompt": focusPrompt(); return true;
       case "generate":
         if (!canGenerate) return false;
@@ -2450,7 +2036,7 @@ export default function App() {
         return true;
       default: return false;
     }
-  }, [archiveThread, assemblyOpen, canGenerate, closeTopmostDialog, confirmation, createThread, cycleThread, decisionOpen, focusPrompt, focusedAsset, hasActiveAttempt, modalOpen, mode, modeThreads.length, previewAsset, requestAppQuit, rightPanelOpen, rightPanelTab, session.agent.controlMode, session.threads, settingsOpen, shortcutHelpOpen, t, thread.id]);
+  }, [archiveThread, canGenerate, closeTopmostDialog, confirmation, createThread, cycleThread, focusPrompt, focusedAsset, hasActiveAttempt, modalOpen, mode, modeThreads.length, previewAsset, requestAppQuit, rightPanelOpen, session.threads, settingsOpen, shortcutHelpOpen, t, thread.id]);
   dispatchCommandRef.current = dispatchAppCommand;
 
   useEffect(() => {
@@ -2470,7 +2056,6 @@ export default function App() {
       if (event.isComposing || event.repeat) return;
       const command = commandForKeyboardEvent(event);
       if (!command) return;
-      if (command.id === "generate" && (decisionOpen || assemblyOpen)) return;
       if (nativeMenuRef.current && NATIVE_MENU_COMMAND_IDS.has(command.id)) return;
       if (!dispatchCommandRef.current(command.id)) return;
       event.preventDefault();
@@ -2478,28 +2063,27 @@ export default function App() {
     };
     window.addEventListener("keydown", handleShortcut, true);
     return () => window.removeEventListener("keydown", handleShortcut, true);
-  }, [assemblyOpen, decisionOpen]);
+  }, []);
 
   const hasArchivedThread = session.threads[mode].some((candidate) => candidate.archivedAt);
   const nativeMenuState = useMemo<NativeMenuState>(() => ({
     enabled: {
       newSession: !modalOpen,
-      newThread: !modalOpen && session.agent.controlMode === "human",
-      duplicateThread: !modalOpen && session.agent.controlMode === "human",
-      archiveThread: modalOpen || (session.agent.controlMode === "human" && !hasActiveAttempt && modeThreads.length > 1),
-      restoreThread: !modalOpen && session.agent.controlMode === "human" && hasArchivedThread,
+      newThread: !modalOpen,
+      duplicateThread: !modalOpen,
+      archiveThread: modalOpen || (!hasActiveAttempt && modeThreads.length > 1),
+      restoreThread: !modalOpen && hasArchivedThread,
       nextThread: !modalOpen && modeThreads.length > 1,
       previousThread: !modalOpen && modeThreads.length > 1,
       findSessions: !modalOpen,
       importAssets: !modalOpen,
-      exportAsset: !confirmation && (Boolean(previewAsset) || (!modalOpen && rightPanelOpen && rightPanelTab === "assets" && Boolean(focusedAsset))),
+      exportAsset: !confirmation && (Boolean(previewAsset) || (!modalOpen && rightPanelOpen && Boolean(focusedAsset))),
       imageMode: !modalOpen,
       videoMode: !modalOpen,
       toggleSessionSidebar: !modalOpen,
       toggleInspector: !modalOpen,
-      showAgent: !modalOpen,
       showAssets: !modalOpen,
-      generate: !confirmation && ((!modalOpen && canGenerate) || decisionOpen || assemblyOpen),
+      generate: !confirmation && !modalOpen && canGenerate,
       settings: !modalOpen || settingsOpen,
       shortcutHelp: !modalOpen || shortcutHelpOpen,
       quit: true,
@@ -2509,10 +2093,9 @@ export default function App() {
       toggleInspector: rightPanelOpen,
       imageMode: mode === "image",
       videoMode: mode === "video",
-      showAgent: rightPanelOpen && rightPanelTab === "agent",
-      showAssets: rightPanelOpen && rightPanelTab === "assets",
+      showAssets: rightPanelOpen,
     },
-  }), [assemblyOpen, canGenerate, confirmation, decisionOpen, focusedAsset, hasActiveAttempt, hasArchivedThread, modalOpen, mode, modeThreads.length, previewAsset, rightPanelOpen, rightPanelTab, session.agent.controlMode, sessionSidebarOpen, settingsOpen, shortcutHelpOpen]);
+  }), [canGenerate, confirmation, focusedAsset, hasActiveAttempt, hasArchivedThread, modalOpen, mode, modeThreads.length, previewAsset, rightPanelOpen, sessionSidebarOpen, settingsOpen, shortcutHelpOpen]);
   nativeMenuStateRef.current = nativeMenuState;
 
   useEffect(() => {
@@ -2538,200 +2121,12 @@ export default function App() {
     void nativeMenuRef.current?.update(nativeMenuState).catch((error) => console.warn("Could not update app menu", error));
   }, [nativeMenuState]);
 
-  const resolveUiDecision = async (
-    selectedOptionIds: string[],
-    selectedAssetIdsForDecision: string[],
-    note?: string,
-  ) => {
-    const currentSession = studioRef.current.sessions.find((item) => item.id === studioRef.current.activeSessionId);
-    const decision = currentSession?.agent.decisions.find((item) => item.id === pendingUiDecision?.id);
-    if (!currentSession || !decision) throw new Error("This checkpoint is no longer pending.");
-    if (!isTauriRuntime()) {
-      const resolved = resolveAgentDecisionFromDesktop(
-        currentSession.agent,
-        decision.id,
-        selectedOptionIds,
-        selectedAssetIdsForDecision,
-        note,
-      );
-      const selectedModel = selectedOptionIds[0];
-      patchSession(currentSession.id, (current) => {
-        const selectedMode = decision.semanticKey === "model_selection_image" ? "image" : decision.semanticKey === "model_selection_video" ? "video" : undefined;
-        const related = decision.relatedThreadIds ?? [];
-        return {
-          ...current,
-          generationDefaults: selectedMode && selectedModel && !related.length ? {
-            ...current.generationDefaults,
-            modelIds: { ...current.generationDefaults.modelIds, [selectedMode]: selectedModel },
-          } : current.generationDefaults,
-          threads: selectedMode && selectedModel && related.length ? {
-            ...current.threads,
-            [selectedMode]: current.threads[selectedMode].map((item) => related.includes(item.id) ? { ...item, modelOverrideId: selectedModel } : item),
-          } : current.threads,
-          agent: resolved,
-        };
-      });
-      return;
-    }
-    const confirmedRevision = bridgeRevisions.current.get(currentSession.id);
-    if (confirmedRevision == null) throw new Error("This session is still being published to Core. Try again in a moment.");
-    const base = bridgeSnapshots.current.get(currentSession.id);
-    const localBeforeDecision = bridgeDirtyVersions.current.has(currentSession.id)
-      ? await serializeAgentSessionForBridge(currentSession)
-      : undefined;
-    const committed = await commitAgentOperationsWithConflictRetry(
-      currentSession.id,
-      confirmedRevision,
-      `desktop-decision:${decision.id}`,
-      [{
-        type: "resolve_ui_decision",
-        decisionId: decision.id,
-        selectedOptionIds,
-        selectedAssetIds: selectedAssetIdsForDecision,
-        note,
-      }],
-    );
-    bridgeRevisions.current.set(currentSession.id, committed.receipt.revision);
-    bridgeSnapshots.current.set(currentSession.id, committed.session);
-    const resolvedSession = localBeforeDecision && base
-      ? mergeBridgeSession(base, localBeforeDecision, committed.session)
-      : committed.session;
-    if (localBeforeDecision) {
-      bridgeDirtyVersions.current.set(
-        currentSession.id,
-        (bridgeDirtyVersions.current.get(currentSession.id) ?? 0) + 1,
-      );
-    }
-    const incoming = materializeAgentSession(resolvedSession);
-    setStudio((current) => ({
-      ...current,
-      sessions: current.sessions.map((candidate) => candidate.id === currentSession.id ? {
-        ...candidate,
-        ...incoming,
-        assets: preserveLocalAssetMetadata(incoming.assets, candidate.assets),
-      } : candidate),
-    }));
-  };
-
-  const assembleVideo = async (clips: VideoAssemblyClip[]) => {
-    try {
-      if (!isTauriRuntime()) throw new Error("Final rendering requires the Tauri desktop app.");
-      const assemblyDecision = session.agent.decisions.find((decision) =>
-        decision.status === "pending"
-        && decision.channel === "fruit_truck_ui"
-        && decision.presentation === "assembly_review"
-      );
-      if (session.agent.controlMode !== "human" && !assemblyDecision) {
-        throw new Error("Switch to Human control before starting a desktop render.");
-      }
-      const unapproved = clips.find((clip) =>
-        session.agent.artifacts.find((artifact) => artifact.assetId === clip.assetId)?.approval !== "approved",
-      );
-      if (unapproved) throw new Error("Approve every source clip before rendering.");
-      const duration = assemblyDurationSeconds(clips);
-      const durationError = validateAssemblyDuration(session.agent, duration);
-      if (durationError) throw new Error(durationError);
-      patchAgent((current) => ({
-        ...current,
-        assembly: { ...current.assembly, clips, status: "rendering", error: undefined },
-        runStatus: "paused",
-      }));
-      const hydrated = await Promise.all(clips.map(async (clip) => {
-        const asset = assetMap.get(clip.assetId);
-        if (!asset) throw new Error(`Assembly asset ${clip.assetId} is missing.`);
-        if (!asset.localPath) throw new Error(`${asset.name} must be migrated into managed storage before assembly.`);
-        return {
-          source: asset.localPath,
-          name: asset.name,
-          startSeconds: clip.startSeconds,
-          endSeconds: clip.endSeconds,
-        };
-      }));
-      const result = await invoke<{ path: string; duration: number }>("assemble_video", {
-        clips: hydrated,
-        expectedDuration: expectedVideoDurationSeconds(session.agent),
-      });
-      const finalAsset: SessionAsset = {
-        id: crypto.randomUUID(),
-        name: `final-${new Date().toISOString().replaceAll(":", "-")}.mp4`,
-        kind: "video",
-        mimeType: "video/mp4",
-        origin: "edited",
-        createdAt: new Date().toISOString(),
-        localPath: result.path,
-        duration: result.duration,
-      };
-      patchActive((current) => {
-        const withFinalArtifact: AgentSessionState = {
-          ...current.agent,
-          runStatus: "waiting",
-          assembly: { ...current.agent.assembly, clips, outputAssetId: finalAsset.id, status: "completed", error: undefined },
-          artifacts: [...current.agent.artifacts, {
-            assetId: finalAsset.id,
-            role: "final_video",
-            parentAssetIds: clips.map((clip) => clip.assetId),
-            approval: "unreviewed",
-          }],
-        };
-        const afterAssemblyDecision = assemblyDecision
-          ? resolveAgentDecisionFromDesktop(withFinalArtifact, assemblyDecision.id, ["rendered"], [], "Rendered in Fruit Truck")
-          : withFinalArtifact;
-        return {
-          ...current,
-          assets: [...current.assets, finalAsset],
-          agent: recordAgentActivity({
-          ...afterAssemblyDecision,
-          runStatus: "waiting",
-          decisions: [...afterAssemblyDecision.decisions, {
-            id: crypto.randomUUID(),
-            semanticKey: "final_approval",
-            title: "Final video approval",
-            prompt: "Review the assembled result. Approve it as final or leave revision feedback.",
-            kind: "approval",
-            channel: "fruit_truck_ui",
-            presentation: "media_grid",
-            selectionMode: "single",
-            minSelections: 1,
-            maxSelections: 1,
-            allowNote: true,
-            status: "pending",
-            blocking: true,
-            relatedAssetIds: [finalAsset.id],
-            options: [
-              { id: "approve", label: "Approve final", recommended: true },
-              { id: "revise", label: "Request revision" },
-            ],
-            createdAt: new Date().toISOString(),
-          }],
-        }, {
-          actor: "runtime",
-          kind: "assembly",
-          title: "Rendered final video",
-          detail: `${clips.length} clips · ${result.duration.toFixed(1)} seconds`,
-          assetIds: [finalAsset.id],
-        }),
-        };
-      });
-    } catch (error) {
-      const message = errorMessage(error);
-      patchAgent((current) => ({
-        ...current,
-        runStatus: "failed",
-        assembly: { ...current.assembly, status: "failed", error: message },
-      }));
-      throw new Error(message);
-    }
-  };
-
   return (
     <Tooltip.Provider>
     <div className="app-shell" aria-hidden={onboardingOpen !== false} inert={onboardingOpen !== false ? true : undefined}>
       <header className="topbar" data-tauri-drag-region>
-        <div className="brand" data-tauri-drag-region><span className="brand-mark"><FruitTruckMark /></span><strong>Fruit Truck</strong><button type="button" className={`brand-badge ${session.agent.controlMode}`} onClick={() => {
-          setRightPanelOpen(true);
-          setRightPanelTab("agent");
-        }}>{session.agent.controlMode === "agent" ? t("agent") : t("humanDriven")}</button></div>
-        <ModelSelector mode={mode} models={models} selectedId={selectedId} loading={catalogLoading} disabled={session.agent.controlMode === "agent"} onSelect={selectModel} inherited={!thread.modelOverrideId} onUseDefault={useModeDefaults} onSetDefault={setCurrentAsModeDefault} />
+        <div className="brand" data-tauri-drag-region><span className="brand-mark"><FruitTruckMark /></span><strong>Fruit Truck</strong></div>
+        <ModelSelector mode={mode} models={models} selectedId={selectedId} loading={catalogLoading} onSelect={selectModel} inherited={!thread.modelOverrideId} onUseDefault={useModeDefaults} onSetDefault={setCurrentAsModeDefault} />
         <ToggleGroup className="mode-switcher" aria-label={t("generationMode")} value={[mode]} onValueChange={(value) => {
           const next = value[0];
           if (next === "image" || next === "video") switchMode(next);
@@ -2744,11 +2139,11 @@ export default function App() {
             className="session-spend"
             role="status"
             aria-live="polite"
-            aria-label={`${t("sessionSpend")}: ${formatUsd(session.agent.execution.spentUsd)}`}
+            aria-label={`${t("sessionSpend")}: ${formatUsd(sessionSpendUsd)}`}
             data-tauri-drag-region
           >
             <small>{t("sessionSpend")}</small>
-            <strong>{formatUsd(session.agent.execution.spentUsd)}</strong>
+            <strong>{formatUsd(sessionSpendUsd)}</strong>
           </div>
           <div className="connection-pill" role="status"><i className={credential?.configured ? "online" : ""} />{credential?.configured ? credential.maskedKey : t("addApiKey")}</div>
           <Button type="button" variant="ghost" size="icon" aria-label={t("settings")} aria-keyshortcuts="Meta+," onClick={() => setSettingsOpen(true)}><Settings /></Button>
@@ -2799,7 +2194,6 @@ export default function App() {
           <GenerationThreadRail
             threads={session.threads[mode]}
             activeId={thread.id}
-            disabled={session.agent.controlMode === "agent"}
             onActivate={activateThread}
             onCreate={createThread}
             onDuplicate={duplicateThread}
@@ -2822,6 +2216,34 @@ export default function App() {
               </div>
             </div>
           </header>
+          {policyNotices.length || latestGenerationFailure ? <div className="generation-guidance-stack">
+            {policyNotices.map((notice) => (
+              <section className="model-policy-notice" data-policy={notice.code} key={notice.code} aria-label={t("modelPolicyNotice")}>
+                <CircleAlert />
+                <div>
+                  <strong>{policyTitle(notice.code)}</strong>
+                  <p>{policyMessage(notice.code)}</p>
+                  <small>{notice.sources.map((source, index) => <span key={source.url}>{index ? " · " : ""}<a href={source.url} target="_blank" rel="noreferrer">{source.label}</a> · {t("reviewedDate", { date: source.reviewedAt })}</span>)}</small>
+                </div>
+              </section>
+            ))}
+            {latestGenerationFailure ? (
+              <section className="generation-failure-guidance" role="alert" data-error-code={latestGenerationFailure.errorCode}>
+                <CircleAlert />
+                <div>
+                  <strong>{t("generationNeedsAttention")}</strong>
+                  <p>{latestGenerationFailure.error}</p>
+                  {latestGenerationFailure.errorAction ? <b>{latestGenerationFailure.errorAction}</b> : null}
+                  {latestGenerationFailure.errorDetails && latestGenerationFailure.errorDetails !== latestGenerationFailure.error ? (
+                    <details>
+                      <summary>{t("technicalDetails")}</summary>
+                      <code>{latestGenerationFailure.errorDetails}</code>
+                    </details>
+                  ) : null}
+                </div>
+              </section>
+            ) : null}
+          </div> : null}
           <div className="composer-form">
             {mode === "image" ? (
               <Field.Root className="edit-mode-row">
@@ -2851,7 +2273,7 @@ export default function App() {
                 {editTargetError ? <div className="field-error edit-canvas-error">{editTargetError}</div> : null}
               </>
             ) : null}
-            <InputTray references={draft.references} assets={session.assets} roles={roles} limit={referenceLimit} error={inputValidationError} onChange={(references) => {
+            <InputTray references={draft.references} assets={session.assets} roles={roles} roleOptions={roleOptions} limit={referenceLimit} error={inputValidationError} onChange={(references) => {
               const targetStillAttached = references.some((reference) => `@${reference.slot}` === draft.imageEditTarget);
               patchDraft({
                 references,
@@ -2862,6 +2284,9 @@ export default function App() {
                 enhancedPromptDirty: false,
               });
             }} onImport={importFiles} onPick={pickFiles} />
+            {inputWarnings.length ? <div className="input-advisories" role="status">
+              {inputWarnings.map((message) => <p key={message}><CircleAlert />{message}</p>)}
+            </div> : null}
             <Field.Root className="prompt-field">
               <Field.Label className="section-label-row"><span className="section-label">{t("prompt")}{hasMask ? <> <em>{t("optional")}</em></> : null}</span><small>{t("characters", { count: draft.prompt.length.toLocaleString(language === "ko" ? "ko-KR" : "en-US") })}</small></Field.Label>
               <div className={`prompt-input-wrap ${draft.prompt ? "has-value" : ""}`}>
@@ -2930,8 +2355,8 @@ export default function App() {
 
             <OptionsFields key={`${mode}:${selectedModel?.id ?? ""}`} mode={mode} model={selectedModel} options={draft.options} providerJson={draft.providerJson} providerError={providerError} onOptionsChange={(options) => patchDraft({ options })} onProviderJsonChange={(providerJson) => patchDraft({ providerJson })} />
             {selectedModel ? <div className="thread-default-controls">
-              <Button type="button" size="xs" variant="ghost" disabled={session.agent.controlMode === "agent" || !thread.modelOverrideId && !Object.keys(thread.optionOverrides).length && thread.providerJsonOverride == null} onClick={useModeDefaults}>{t("useModeDefault")}</Button>
-              <Button type="button" size="xs" variant="ghost" disabled={session.agent.controlMode === "agent"} onClick={setCurrentAsModeDefault}>{t("setModeDefault")}</Button>
+              <Button type="button" size="xs" variant="ghost" disabled={!thread.modelOverrideId && !Object.keys(thread.optionOverrides).length && thread.providerJsonOverride == null} onClick={useModeDefaults}>{t("useModeDefault")}</Button>
+              <Button type="button" size="xs" variant="ghost" onClick={setCurrentAsModeDefault}>{t("setModeDefault")}</Button>
             </div> : null}
           </div>
           <footer className="generate-bar">
@@ -2952,39 +2377,9 @@ export default function App() {
           </ScrollArea>
         </section>
 
-        {rightPanelOpen ? <RightPanel
-          tab={rightPanelTab}
-          onTabChange={setRightPanelTab}
-          agent={(
-            <AgentPanel
-              state={session.agent}
-              threads={session.threads}
-              currentMode={mode}
-              batchSummary={persistedBatchSummary}
-              onOpenThread={(targetMode, threadId) => {
-                patchActive((current) => ({ ...current, mode: targetMode, activeThreadIds: { ...current.activeThreadIds, [targetMode]: threadId } }));
-              }}
-              onToggleControl={toggleControlMode}
-              onOpenAgentConnections={() => setSettingsOpen(true)}
-              onPauseResume={() => patchActive((current) => {
-                const next = current.agent.runStatus === "paused" ? current : cancelQueuedAttempts(current);
-                return { ...next, agent: {
-                  ...next.agent,
-                  runStatus: next.agent.runStatus === "paused" ? "working" : "paused",
-                  pausedReason: next.agent.runStatus === "paused" ? undefined : "Paused by user.",
-                } };
-              })}
-              onStop={() => patchActive((current) => {
-                const next = cancelQueuedAttempts(current);
-                return { ...next, agent: { ...next.agent, runStatus: "idle", pausedReason: "Stopped by user." } };
-              })}
-              onOpenDecision={() => setDecisionOpen(true)}
-            />
-          )}
-          assets={(
-            <AssetLibrary assets={session.assets} jobs={sessionVideoJobs} artifacts={session.agent.artifacts} approvedVideoCount={approvedVideoCount} onOpenAssembly={() => setAssemblyOpen(true)} selectedIds={selectedAssetIds} onSelectedIdsChange={setSelectedAssetIds} highlightedIds={highlightedAssetIds} onFocusedAssetChange={setFocusedAssetId} onPreviewAssetChange={setPreviewAssetId} onImport={async (files) => { await importFiles(files); }} onPick={async () => { await pickFiles(); }} onUse={addAssetAsReference} onDelete={(ids) => void deleteAssets(ids)} />
-          )}
-        /> : null}
+        {rightPanelOpen ? <RightPanel assets={(
+          <AssetLibrary assets={session.assets} jobs={sessionVideoJobs} selectedIds={selectedAssetIds} onSelectedIdsChange={setSelectedAssetIds} highlightedIds={highlightedAssetIds} onFocusedAssetChange={setFocusedAssetId} onPreviewAssetChange={setPreviewAssetId} onImport={async (files) => { await importFiles(files); }} onPick={async () => { await pickFiles(); }} onUse={addAssetAsReference} onDelete={(ids) => void deleteAssets(ids)} />
+        )} /> : null}
       </main>
 
       <GenerationResultDialog
@@ -3005,29 +2400,12 @@ export default function App() {
         open={settingsOpen}
         status={credential}
         promptModel={studio.promptModel}
-        activeCustomSkillNames={session.agent.appliedSkills
-          .filter((skill) => skill.source === "custom")
-          .map((skill) => skill.name)}
+        defaultEnhancePrompt={studio.defaultEnhancePrompt}
         onPromptModelChange={(promptModel) => setStudio((current) => ({ ...current, promptModel }))}
+        onDefaultEnhancePromptChange={(enabled) => setStudio((current) => applyDefaultEnhancePrompt(current, enabled))}
         onClose={() => setSettingsOpen(false)}
         onSave={async (apiKey) => { const status = await saveApiKey(apiKey); setCredential(status); toast.success(t("keySaved")); }}
         onRemove={async () => { const status = await removeApiKey(); setCredential(status); setCatalogs({ image: [], video: [] }); toast.success(t("keyRemoved")); }}
-      />
-      <AssemblyDialog
-        open={assemblyOpen}
-        state={session.agent}
-        assets={session.assets}
-        onClose={() => setAssemblyOpen(false)}
-        onRender={assembleVideo}
-      />
-      <DecisionWorkspace
-        open={decisionOpen && Boolean(pendingUiDecision)}
-        decision={pendingUiDecision}
-        assets={session.assets}
-        onClose={() => setDecisionOpen(false)}
-        onPick={pickFiles}
-        onOpenAssembly={() => setAssemblyOpen(true)}
-        onResolve={resolveUiDecision}
       />
       </Suspense>
       <ConfirmDialog confirmation={confirmation} onClose={closeConfirmation} />
@@ -3036,7 +2414,6 @@ export default function App() {
     {onboardingOpen !== false ? (
       <Onboarding
         ready={onboardingOpen === true}
-        initialStep={onboardingInitialStep}
         onSave={async (apiKey) => {
           const status = await saveApiKey(apiKey);
           if (!status.configured) throw new Error(t("onboardingKeySaveFailed"));
@@ -3045,7 +2422,6 @@ export default function App() {
         }}
         onComplete={() => {
           localStorage.setItem(ONBOARDING_COMPLETE_KEY, "true");
-          localStorage.setItem(AGENT_ONBOARDING_COMPLETE_KEY, "true");
           setOnboardingOpen(false);
         }}
       />
