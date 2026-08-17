@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { Collapsible } from "@base-ui/react/collapsible";
 import { Field } from "@base-ui/react/field";
 import { Toggle } from "@base-ui/react/toggle";
@@ -248,6 +248,20 @@ export default function App() {
   const modeThreads = session.threads[mode].filter((item) => !item.archivedAt);
   const thread = modeThreads.find((item) => item.id === session.activeThreadIds[mode]) ?? modeThreads[0];
   const draft = effectiveThreadDraft(session, thread);
+  const syncPromptHighlightScroll = useCallback(() => {
+    const textarea = promptRef.current;
+    const highlight = promptHighlightRef.current;
+    if (!textarea || !highlight) return;
+    highlight.scrollTop = textarea.scrollTop;
+    highlight.scrollLeft = textarea.scrollLeft;
+  }, []);
+
+  useLayoutEffect(() => {
+    syncPromptHighlightScroll();
+    const frame = requestAnimationFrame(syncPromptHighlightScroll);
+    return () => cancelAnimationFrame(frame);
+  }, [draft.prompt, syncPromptHighlightScroll]);
+
   const models = catalogs[mode];
   const selectedId = effectiveThreadModelId(session, thread);
   const selectedModel = models.find((model) => model.id === selectedId) ?? null;
@@ -2305,11 +2319,7 @@ export default function App() {
                     enhancedPrompt: "",
                     enhancedPromptDirty: false,
                   })}
-                  onScroll={(event) => {
-                    if (!promptHighlightRef.current) return;
-                    promptHighlightRef.current.scrollTop = event.currentTarget.scrollTop;
-                    promptHighlightRef.current.scrollLeft = event.currentTarget.scrollLeft;
-                  }}
+                  onScroll={syncPromptHighlightScroll}
                 />
                 {mentionSuggestions.length ? (
                   <div className="mention-menu" role="listbox" aria-label={t("numberedInputs")}>

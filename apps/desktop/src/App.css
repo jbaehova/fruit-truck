@@ -1039,6 +1039,7 @@ button, input, textarea { font-family: inherit; }
 .prompt-field textarea {
   position: relative;
   z-index: 1;
+  display: block;
   min-height: 146px;
   padding: 13px 14px;
   border-color: var(--line-strong);
@@ -1939,7 +1940,7 @@ button, input, textarea { font-family: inherit; }
   min-width: 0;
   min-height: 0;
   display: grid;
-  grid-template-rows: 43px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   border-left: 1px solid var(--line);
   background: var(--surface-subtle);
 }
