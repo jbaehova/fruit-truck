@@ -5,10 +5,8 @@ set -Eeuo pipefail
 RELEASE_TAG="${1:?A v-prefixed release tag is required.}"
 REPOSITORY="${2:-${GITHUB_REPOSITORY:-jbaehova/fruit-truck}}"
 SOURCE_ROOT="${3:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd)}"
-# shellcheck source=ffmpeg-version.env
-source "${SOURCE_ROOT}/apps/desktop/scripts/ffmpeg-version.env"
 
-for command_name in base64 gh jq shasum; do
+for command_name in base64 gh jq; do
   command -v "${command_name}" >/dev/null 2>&1 || {
     printf 'Missing release verification tool: %s\n' "${command_name}" >&2
     exit 1
@@ -28,14 +26,9 @@ release_json="$(gh release view "${RELEASE_TAG}" --repo "${REPOSITORY}" --json t
 asset_names="$(jq -r '.assets[].name' <<<"${release_json}")"
 required_assets=(
   "Fruit-Truck-macOS-universal.dmg"
-  "Fruit-Truck-macOS-universal.dmg.sha256"
   "Fruit-Truck-macOS-universal.app.tar.gz"
   "Fruit-Truck-macOS-universal.app.tar.gz.sig"
   "latest.json"
-  "ffmpeg-${FFMPEG_VERSION}.tar.xz"
-  "build-config-arm64.txt"
-  "ffmpeg-${FFMPEG_VERSION}-assets.sha256"
-  "THIRD_PARTY_NOTICES.md"
 )
 for asset_name in "${required_assets[@]}"; do
   grep -Fxq "${asset_name}" <<<"${asset_names}" || {
@@ -43,6 +36,10 @@ for asset_name in "${required_assets[@]}"; do
     exit 1
   }
 done
+[[ "$(wc -l <<<"${asset_names}" | tr -d ' ')" == "${#required_assets[@]}" ]] || {
+  printf 'Release %s contains unexpected assets:\n%s\n' "${RELEASE_TAG}" "${asset_names}" >&2
+  exit 1
+}
 
 command -v minisign >/dev/null 2>&1 || {
   printf 'Missing release verification tool: minisign\n' >&2
@@ -58,11 +55,7 @@ trap cleanup EXIT
 for pattern in \
   latest.json \
   'Fruit-Truck-macOS-universal.app.tar.gz' \
-  'Fruit-Truck-macOS-universal.app.tar.gz.sig' \
-  'Fruit-Truck-macOS-universal.dmg.sha256' \
-  "ffmpeg-${FFMPEG_VERSION}.tar.xz" \
-  'build-config-arm64.txt' \
-  "ffmpeg-${FFMPEG_VERSION}-assets.sha256"; do
+  'Fruit-Truck-macOS-universal.app.tar.gz.sig'; do
   asset_url="$(jq -r --arg name "${pattern}" '.assets[] | select(.name == $name) | .apiUrl' <<<"${release_json}")"
   [[ -n "${asset_url}" && "${asset_url}" != "null" ]]
   gh api "${asset_url}" \
@@ -106,18 +99,9 @@ minisign -Vm "${verification_dir}/Fruit-Truck-macOS-universal.app.tar.gz" \
   -x "${verification_dir}/updater-signature.minisig"
 
 dmg_digest="$(jq -r '.assets[] | select(.name == "Fruit-Truck-macOS-universal.dmg") | .digest' <<<"${release_json}")"
-dmg_checksum="$(awk 'NR == 1 { print $1 }' "${verification_dir}/Fruit-Truck-macOS-universal.dmg.sha256")"
-[[ "${dmg_digest}" == "sha256:${dmg_checksum}" ]] || {
-  printf 'Published DMG checksum does not match the GitHub asset digest.\n' >&2
+[[ "${dmg_digest}" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+  printf 'Published DMG is missing its GitHub SHA-256 digest.\n' >&2
   exit 1
 }
-grep -Eq '^[0-9a-f]{64}[[:space:]]+Fruit-Truck-macOS-universal\.dmg$' \
-  "${verification_dir}/Fruit-Truck-macOS-universal.dmg.sha256"
 
-(
-  cd "${verification_dir}"
-  shasum -a 256 --check "ffmpeg-${FFMPEG_VERSION}-assets.sha256"
-  printf '%s  %s\n' "${FFMPEG_SHA256}" "ffmpeg-${FFMPEG_VERSION}.tar.xz" | shasum -a 256 --check
-)
-
-printf 'GitHub Release %s contains a complete Apple Silicon updater, notarized DMG metadata, and FFmpeg compliance set.\n' "${RELEASE_TAG}"
+printf 'GitHub Release %s contains only the notarized DMG and three required Apple Silicon updater assets.\n' "${RELEASE_TAG}"

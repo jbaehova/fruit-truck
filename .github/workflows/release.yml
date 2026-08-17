@@ -242,27 +242,14 @@ jobs:
           spctl --assess --type execute --verbose=2 "$APP_PATH"
           spctl --assess --type open --context context:primary-signature --verbose=2 "$DMG_PATH"
 
-      - name: Upload notarized DMG and FFmpeg compliance files
+      - name: Replace the release DMG with the notarized build
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          source apps/desktop/scripts/ffmpeg-version.env
           DMG_PATH=$(find apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg -name 'Fruit Truck_*_aarch64.dmg' -print -quit)
           cp "$DMG_PATH" Fruit-Truck-macOS-universal.dmg
-          shasum -a 256 Fruit-Truck-macOS-universal.dmg > Fruit-Truck-macOS-universal.dmg.sha256
-          cp "$RUNNER_TEMP/ffmpeg-$FFMPEG_VERSION.tar.xz" .
-          cp apps/desktop/src-tauri/target/bundled-tools/licenses/ffmpeg/build-config-arm64.txt .
-          shasum -a 256 \
-            "ffmpeg-$FFMPEG_VERSION.tar.xz" \
-            build-config-arm64.txt \
-            > "ffmpeg-$FFMPEG_VERSION-assets.sha256"
           gh release upload "$RELEASE_TAG" \
             Fruit-Truck-macOS-universal.dmg \
-            Fruit-Truck-macOS-universal.dmg.sha256 \
-            "ffmpeg-$FFMPEG_VERSION.tar.xz" \
-            build-config-arm64.txt \
-            "ffmpeg-$FFMPEG_VERSION-assets.sha256" \
-            THIRD_PARTY_NOTICES.md \
             --clobber
 
       - name: Verify release assets and updater
