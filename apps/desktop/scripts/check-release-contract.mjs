@@ -22,8 +22,6 @@ const releaseConfig = readJson("apps/desktop/src-tauri/tauri.release.conf.json")
 const cargoToml = readText("apps/desktop/src-tauri/Cargo.toml");
 const ffmpegEnvironment = readText("apps/desktop/scripts/ffmpeg-version.env");
 const mediaBuildScript = readText("apps/desktop/scripts/build-ffmpeg-macos.sh");
-const landingSource = readText("apps/landing/src/main.ts");
-const landingHtml = readText("apps/landing/index.html");
 const releaseWorkflow = readText(".github/workflows/release.yml");
 const checkWorkflow = readText(".github/workflows/check.yml");
 
@@ -134,8 +132,15 @@ assert.equal(
 assert.match(mediaBuildScript, /--disable-ffmpeg/, "The release media build still enables the removed FFmpeg program.");
 assert.ok(!mediaBuildScript.includes('INSTALL_DIR}/bin/ffmpeg"'), "The release media build still copies the removed FFmpeg program.");
 
-const downloadUrl = "https://github.com/jbaehova/fruit-truck/releases/latest/download/Fruit-Truck-macOS-universal.dmg";
-assert.ok(landingSource.includes(`const DOWNLOAD_URL = "${downloadUrl}"`), "Landing-page runtime download URL changed.");
-assert.ok(landingHtml.includes(`href="${downloadUrl}"`), "Landing-page fallback download URL changed.");
+assert.match(
+  releaseWorkflow,
+  /releaseAssetNamePattern: Fruit-Truck-macOS-universal\[ext\]/,
+  "The stable GitHub Release asset name changed.",
+);
+assert.match(
+  releaseWorkflow,
+  /releases\/latest\/download\/Fruit-Truck-macOS-universal\.dmg/,
+  "The permanent GitHub Release DMG URL changed.",
+);
 
 console.log(`Release contract is valid for Fruit Truck v${tauriConfig.version} and FFmpeg ${ffmpegValues.FFMPEG_VERSION}.`);

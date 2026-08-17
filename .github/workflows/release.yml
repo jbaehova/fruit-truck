@@ -184,7 +184,7 @@ jobs:
           }
           printf 'id=%s\n' "$release_id" >> "$GITHUB_OUTPUT"
 
-      # Keep the legacy public asset name so the permanent landing-page URL keeps working.
+      # Keep a stable public asset name for the GitHub Releases latest-download URL.
       - name: Build and upload Apple Silicon app, DMG, and updater
         uses: tauri-apps/tauri-action@v1
         env:

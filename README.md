@@ -30,13 +30,14 @@ Playwright runs headless with a 1920×1080 viewport, matching the app's default 
 
 `npm run bundle:mac` builds the pinned FFmpeg project source and packages only its `ffprobe` executable. The app bundle does not include the `ffmpeg` executable. FFmpeg licensing notices and build configuration remain in the bundle because FFprobe is an FFmpeg project output.
 
+Download the latest Apple Silicon installer from [GitHub Releases](https://github.com/jbaehova/fruit-truck/releases/latest) or use the [permanent DMG link](https://github.com/jbaehova/fruit-truck/releases/latest/download/Fruit-Truck-macOS-universal.dmg).
+
 See [docs/RELEASING.md](docs/RELEASING.md) for signing, notarization, and release automation.
 
 ## Repository
 
 ```text
 apps/desktop/   React + Tauri desktop app
-apps/landing/   Download landing page
 docs/i18n/      Translated project guides
 ```
 
