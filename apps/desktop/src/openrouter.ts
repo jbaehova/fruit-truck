@@ -1,4 +1,20 @@
 import { applyKnownVideoCapabilities, videoInputPolicy, type InputMediaKind } from "./modelPolicies.ts";
+import {
+  PROMPT_PLAN_RESPONSE_FORMAT,
+  compilePromptPlan,
+  parsePromptPlan,
+  plannerConstitutionInstruction,
+  profileInstruction,
+  promptProfileForModel,
+  referenceCatalogInstruction,
+  validateCompiledPrompt,
+  type PromptEnhancementArtifact,
+  type PromptPlanReference,
+  type PromptReferenceInput,
+  type PromptTarget,
+  type PromptWorkflow,
+  type ReferencePurpose,
+} from "./prompting/index.ts";
 
 export type GenerationMode = "image" | "video";
 export type ReferenceRole = "reference" | "first_frame" | "last_frame";
@@ -300,6 +316,7 @@ export type ReferenceAsset = {
   mediaType: string;
   dataUrl: string;
   role: ReferenceRole;
+  purpose: ReferencePurpose;
   slot: number;
 };
 
@@ -312,23 +329,40 @@ export type GenerationDraft = {
   assets: ReferenceAsset[];
   options: DraftOptions;
   providerJson: string;
+  editTargetSlot?: number;
+  negativePrompt?: string;
+};
+
+export type ReferenceCoverage = {
+  slot: number;
+  purpose: ReferencePurpose;
+  priority: PromptPlanReference["priority"];
+  sent: boolean;
+  transportRoleValid: boolean;
+  boundInPrompt: boolean;
+  nativeControl?: "input_references" | "frame_images.first_frame" | "frame_images.last_frame";
+  providerLabel?: string;
+  severity: "ok" | "warning" | "error";
 };
 
 export type PromptEnhancementInput = {
   promptModel: string;
   mode: GenerationMode;
+  target: PromptTarget;
+  workflow: PromptWorkflow;
+  signature: string;
   editMode?: boolean;
   editTarget?: string;
   prompt: string;
   maskInstructions?: string;
   hasMask?: boolean;
-  references: Array<{ slot: number; name: string; mediaType: string; role: ReferenceRole }>;
+  references: PromptReferenceInput[];
   visuals: PromptEnhancementVisual[];
 };
 
 export type PromptEnhancementVisual = {
   id: string;
-  kind: "reference" | "edit_target" | "mask_guide";
+  kind: "reference" | "edit_target" | "mask_guide" | "video_frame";
   source: string;
   slot: number;
   name: string;
@@ -558,7 +592,7 @@ export function allowedAssetRoles(
   const video = model as VideoModel | null;
   const types = videoReferenceTypes(video);
   const roles: ReferenceRole[] = [];
-  if (types.includes("image")) roles.push("reference");
+  if (types.length) roles.push("reference");
   if (video?.supported_frame_images?.includes("first_frame")) roles.push("first_frame");
   if (video?.supported_frame_images?.includes("last_frame")) roles.push("last_frame");
   return roles;
@@ -590,6 +624,7 @@ export function defaultOptions(mode: GenerationMode, model: GenerationModel | nu
     const output: DraftOptions = {};
     for (const [key, descriptor] of Object.entries((model as ImageModel).supported_parameters)) {
       if (key === "input_references" || key === "stream") continue;
+      if (model.id === "openai/gpt-image-2" && key === "input_fidelity") continue;
       if (descriptor.type === "enum") output[key] = first(descriptor.values);
       if (descriptor.type === "range") output[key] = descriptor.min ?? 0;
       if (descriptor.type === "boolean" && key !== "seed") output[key] = false;
@@ -614,15 +649,198 @@ function parseProviderJson(raw: string): Record<string, unknown> | undefined {
   return value as Record<string, unknown>;
 }
 
-function asReference(asset: ReferenceAsset) {
-  const kind: InputMediaKind = asset.mediaType.startsWith("video/") ? "video"
+function validateProviderPassthrough(provider: Record<string, unknown> | undefined, model: GenerationModel) {
+  const options = provider?.options;
+  if (options == null) return;
+  if (!options || Array.isArray(options) || typeof options !== "object") {
+    throw new Error("Provider options must be an object keyed by provider slug.");
+  }
+  for (const [providerSlug, rawConfig] of Object.entries(options as Record<string, unknown>)) {
+    if (!rawConfig || Array.isArray(rawConfig) || typeof rawConfig !== "object") {
+      throw new Error(`Provider configuration for ${providerSlug} must be an object.`);
+    }
+    const parameters = (rawConfig as Record<string, unknown>).parameters;
+    if (parameters == null) continue;
+    if (!parameters || Array.isArray(parameters) || typeof parameters !== "object") {
+      throw new Error(`Passthrough parameters for ${providerSlug} must be an object.`);
+    }
+    const allowed = "supported_parameters" in model
+      ? model.endpoint_details?.find((endpoint) => endpoint.provider_slug === providerSlug)?.allowed_passthrough_parameters
+      : model.allowed_passthrough_parameters;
+    for (const name of Object.keys(parameters as Record<string, unknown>)) {
+      if (!allowed?.includes(name)) {
+        throw new Error(`Provider passthrough parameter ${providerSlug}.${name} is not declared by the selected endpoint.`);
+      }
+    }
+  }
+}
+
+export function validateProviderConfiguration(raw: string, model: GenerationModel): void {
+  validateProviderPassthrough(parseProviderJson(raw), model);
+}
+
+function assetMediaKind(asset: Pick<ReferenceAsset, "mediaType">): InputMediaKind {
+  return asset.mediaType.startsWith("video/") ? "video"
     : asset.mediaType.startsWith("audio/") ? "audio" : "image";
+}
+
+function asReference(asset: ReferenceAsset) {
+  const kind = assetMediaKind(asset);
   const type = `${kind}_url`;
   return { type, [type]: { url: asset.dataUrl } };
 }
 
+function providerReferenceLabels(mode: GenerationMode, assets: ReferenceAsset[], runwaySyntax: boolean) {
+  const counts: Record<InputMediaKind, number> = { image: 0, video: 0, audio: 0 };
+  return new Map(assets.map((asset) => {
+    if (asset.role === "first_frame") return [asset.slot, "the first-frame image"];
+    if (asset.role === "last_frame") return [asset.slot, "the last-frame image"];
+    const kind = assetMediaKind(asset);
+    counts[kind] += 1;
+    const label = mode === "image"
+      ? `Image ${counts.image}`
+      : `${kind[0].toUpperCase()}${kind.slice(1)} ${counts[kind]}`;
+    return [asset.slot, runwaySyntax && kind === "image" ? `@[${label}]` : label];
+  }));
+}
+
+function referencePurposeBinding(label: string, asset: ReferenceAsset) {
+  switch (asset.purpose) {
+    case "subject_identity": return `Use ${label} for the subject's defining identity and proportions; the requested prompt controls incidental background, pose, and lighting.`;
+    case "product_identity": return `Use ${label} for the product's shape, materials, colors, hardware, and logo placement; the requested prompt controls the surrounding scene.`;
+    case "character": return `Use ${label} as the character reference and keep the character's defining appearance continuous.`;
+    case "wardrobe": return `Use ${label} only for the assigned wardrobe and accessories, fitted naturally to the requested subject.`;
+    case "style": return `Use ${label} only for visual style, palette, lighting, texture, and finish; follow the requested prompt for subjects and layout.`;
+    case "composition": return `Use ${label} for composition, framing, and spatial relationships; follow the requested prompt for identity and style.`;
+    case "pose": return `Use ${label} for pose and gesture; follow the requested prompt for identity, wardrobe, and setting.`;
+    case "motion": return `Use ${label} for motion, timing, camera rhythm, and physical dynamics rather than unrelated source appearance.`;
+    case "audio": return `Use ${label} for the assigned dialogue, music, ambience, rhythm, or sound effects.`;
+    case "edit_target": return `Treat ${label} as the edit canvas and preserve every unrequested region and attribute.`;
+    case "context": return `Use ${label} as supporting context only where it agrees with the requested result.`;
+    case "first_frame": return `${label} is the exact opening-frame anchor; animate forward from it with continuous identity and geometry.`;
+    case "last_frame": return `${label} is the exact closing-frame anchor; arrive at it through a plausible continuous transition.`;
+  }
+}
+
+function bindPromptReferences(
+  prompt: string,
+  mode: GenerationMode,
+  modelId: string,
+  sentAssets: ReferenceAsset[],
+) {
+  const profile = promptProfileForModel(mode, modelId);
+  const labels = providerReferenceLabels(mode, sentAssets, profile.referenceSyntax === "runway_image_number");
+  const sentSlots = new Set(sentAssets.map((asset) => asset.slot));
+  const mentioned = new Set<number>();
+  const rewritten = prompt.replace(/@(\d+)/g, (_match, rawSlot: string) => {
+    const slot = Number(rawSlot);
+    const label = labels.get(slot);
+    if (!label) throw new Error(`Prompt references unavailable or unsent input @${slot}.`);
+    mentioned.add(slot);
+    return label;
+  });
+  for (const slot of mentioned) {
+    if (!sentSlots.has(slot)) throw new Error(`Prompt references unsent input @${slot}.`);
+  }
+  const missingBindings = sentAssets
+    .filter((asset) => !mentioned.has(asset.slot))
+    .map((asset) => referencePurposeBinding(labels.get(asset.slot)!, asset));
+  return missingBindings.length ? `${missingBindings.join("\n")}\n\n${rewritten.trim()}` : rewritten.trim();
+}
+
+function requestAssetOrder(draft: GenerationDraft, model: GenerationModel): ReferenceAsset[] {
+  if (draft.mode === "image") {
+    let images = draft.assets.filter((asset) => assetMediaKind(asset) === "image");
+    if (draft.editTargetSlot && /^openai\/(?:gpt-image|chatgpt-image)/.test(draft.model)) {
+      const target = images.find((asset) => asset.slot === draft.editTargetSlot);
+      if (target) images = [target, ...images.filter((asset) => asset.slot !== draft.editTargetSlot)];
+    }
+    return images;
+  }
+  const video = model as VideoModel;
+  const referenceTypes = videoReferenceTypes(video);
+  const references = draft.assets.filter((asset) =>
+    asset.role === "reference" && referenceTypes.includes(assetMediaKind(asset))
+  );
+  const frames = draft.assets.filter((asset) =>
+    (asset.role === "first_frame" || asset.role === "last_frame")
+    && assetMediaKind(asset) === "image"
+    && video.supported_frame_images?.includes(asset.role)
+  );
+  return [...references, ...frames];
+}
+
+export function referenceCoverageReport(
+  draft: GenerationDraft,
+  model: GenerationModel | null,
+  payload?: Record<string, unknown>,
+  referencePriorities?: Record<number, PromptPlanReference["priority"]>,
+): ReferenceCoverage[] {
+  if (!model) {
+    return draft.assets.map((asset) => {
+      const priority = referencePriorities?.[asset.slot] ?? "required";
+      return {
+        slot: asset.slot,
+        purpose: asset.purpose,
+        priority,
+        sent: false,
+        transportRoleValid: false,
+        boundInPrompt: false,
+        severity: priority === "required" ? "error" : "warning",
+      };
+    });
+  }
+  const request = payload ?? buildRequest(draft, model);
+  const sentAssets = requestAssetOrder(draft, model);
+  const sentSlots = new Set(sentAssets.map((asset) => asset.slot));
+  const labels = providerReferenceLabels(
+    draft.mode,
+    sentAssets,
+    promptProfileForModel(draft.mode, draft.model).referenceSyntax === "runway_image_number",
+  );
+  const requestPrompt = String(request.prompt ?? "");
+  return draft.assets.map((asset) => {
+    const priority = referencePriorities?.[asset.slot] ?? "required";
+    const sent = sentSlots.has(asset.slot);
+    const transportRoleValid = allowedAssetRolesForKind(draft.mode, model, assetMediaKind(asset)).includes(asset.role);
+    const providerLabel = labels.get(asset.slot);
+    const boundInPrompt = Boolean(providerLabel && requestPrompt.includes(providerLabel));
+    return {
+      slot: asset.slot,
+      purpose: asset.purpose,
+      priority,
+      sent,
+      transportRoleValid,
+      boundInPrompt,
+      nativeControl: asset.role === "first_frame"
+        ? "frame_images.first_frame"
+        : asset.role === "last_frame"
+          ? "frame_images.last_frame"
+          : "input_references",
+      providerLabel,
+      severity: sent && transportRoleValid && boundInPrompt
+        ? "ok"
+        : priority === "required" ? "error" : "warning",
+    };
+  });
+}
+
+export function validateReferenceCoverage(coverage: ReferenceCoverage[]): string | null {
+  const failed = coverage.find((entry) => entry.severity === "error");
+  if (!failed) return null;
+  if (!failed.transportRoleValid) return `Reference @${failed.slot} has an unsupported transport role.`;
+  if (!failed.sent) return `Required reference @${failed.slot} was not serialized into the request.`;
+  return `Required reference @${failed.slot} was not bound in the provider prompt.`;
+}
+
 export function buildRequest(draft: GenerationDraft, model: GenerationModel | null): Record<string, unknown> {
   if (!model) return {};
+  const slots = new Set<number>();
+  for (const asset of draft.assets) {
+    if (!Number.isInteger(asset.slot) || asset.slot < 1) throw new Error("Every reference slot must be a positive integer.");
+    if (slots.has(asset.slot)) throw new Error(`Reference slot @${asset.slot} is duplicated.`);
+    slots.add(asset.slot);
+  }
   const sentAssets: ReferenceAsset[] = [];
   const payload: Record<string, unknown> = {
     model: draft.model,
@@ -630,15 +848,26 @@ export function buildRequest(draft: GenerationDraft, model: GenerationModel | nu
   };
   if (draft.mode === "image") {
     const imageModel = model as ImageModel;
+    const unsupportedAssets = draft.assets.filter((asset) => assetMediaKind(asset) !== "image");
+    if (unsupportedAssets.length) {
+      throw new Error(`This image model does not accept ${assetMediaKind(unsupportedAssets[0])} reference @${unsupportedAssets[0].slot}.`);
+    }
     for (const [key, value] of Object.entries(draft.options)) {
+      if (draft.model === "openai/gpt-image-2" && key === "input_fidelity") continue;
       if (imageModel.supported_parameters[key] && value !== undefined && value !== "") payload[key] = value;
     }
     const limit = imageReferenceLimit(imageModel);
-    const images = draft.assets.filter((asset) => asset.mediaType.startsWith("image/"));
-    if (limit > 0 && images.length) {
-      const selected = images.slice(0, limit);
-      sentAssets.push(...selected);
-      payload.input_references = selected.map(asReference);
+    let images = draft.assets.filter((asset) => asset.mediaType.startsWith("image/"));
+    if (images.length > limit) throw new Error(`This image model accepts at most ${limit} reference inputs; received ${images.length}.`);
+    if (images.length && limit === 0) throw new Error("This image model does not accept reference inputs.");
+    if (draft.editTargetSlot && /^openai\/(?:gpt-image|chatgpt-image)/.test(draft.model)) {
+      const target = images.find((asset) => asset.slot === draft.editTargetSlot);
+      if (!target) throw new Error(`The edit target @${draft.editTargetSlot} is not attached.`);
+      images = [target, ...images.filter((asset) => asset.slot !== draft.editTargetSlot)];
+    }
+    if (images.length) {
+      sentAssets.push(...images);
+      payload.input_references = images.map(asReference);
     }
   } else {
     const videoModel = model as VideoModel;
@@ -654,24 +883,34 @@ export function buildRequest(draft: GenerationDraft, model: GenerationModel | nu
     }
     const referenceTypes = videoReferenceTypes(videoModel);
     const references = draft.assets.filter((asset) => {
-      const kind: InputMediaKind = asset.mediaType.startsWith("video/") ? "video"
-        : asset.mediaType.startsWith("audio/") ? "audio" : "image";
+      const kind = assetMediaKind(asset);
       return asset.role === "reference" && referenceTypes.includes(kind);
     });
+    const unsupportedReferences = draft.assets.filter((asset) =>
+      asset.role === "reference" && !referenceTypes.includes(assetMediaKind(asset))
+    );
+    if (unsupportedReferences.length) {
+      throw new Error(`This video model does not accept ${assetMediaKind(unsupportedReferences[0])} reference @${unsupportedReferences[0].slot}.`);
+    }
     const frames = draft.assets.filter((asset) =>
       (asset.role === "first_frame" || asset.role === "last_frame")
+      && assetMediaKind(asset) === "image"
       && videoModel.supported_frame_images?.includes(asset.role),
     );
+    const counts: Record<InputMediaKind, number> = { image: 0, video: 0, audio: 0 };
+    for (const asset of references) counts[assetMediaKind(asset)] += 1;
+    for (const kind of ["image", "video", "audio"] as const) {
+      const limit = videoReferenceLimit(videoModel, kind);
+      if (counts[kind] > limit) throw new Error(`This video model accepts at most ${limit} ${kind} references; received ${counts[kind]}.`);
+    }
+    const unsupportedFrames = draft.assets.filter((asset) =>
+      (asset.role === "first_frame" || asset.role === "last_frame")
+      && (assetMediaKind(asset) !== "image" || !videoModel.supported_frame_images?.includes(asset.role))
+    );
+    if (unsupportedFrames.length) throw new Error(`This video model does not accept ${unsupportedFrames[0].role.replaceAll("_", " ")} inputs.`);
     if (references.length) {
-      const counts: Record<InputMediaKind, number> = { image: 0, video: 0, audio: 0 };
-      const selected = references.filter((asset) => {
-        const kind: InputMediaKind = asset.mediaType.startsWith("video/") ? "video"
-          : asset.mediaType.startsWith("audio/") ? "audio" : "image";
-        counts[kind] += 1;
-        return counts[kind] <= videoReferenceLimit(videoModel, kind);
-      });
-      sentAssets.push(...selected);
-      payload.input_references = selected.map(asReference);
+      sentAssets.push(...references);
+      payload.input_references = references.map(asReference);
     }
     if (frames.length) {
       sentAssets.push(...frames);
@@ -682,18 +921,26 @@ export function buildRequest(draft: GenerationDraft, model: GenerationModel | nu
     }
   }
   const provider = parseProviderJson(draft.providerJson);
-  if (provider) payload.provider = provider;
-  if (sentAssets.length) {
-    const mapping = sentAssets
-      .toSorted((a, b) => a.slot - b.slot)
-      .map((asset) => `@${asset.slot} = ${asset.name} (${asset.role})`)
-      .join("; ");
-    payload.prompt = `Attached input mapping: ${mapping}. Preserve these identities exactly.\n\n${draft.prompt.trim()}`;
+  validateProviderPassthrough(provider, model);
+  payload.provider = { ...(provider ?? {}), require_parameters: true };
+  if (draft.negativePrompt?.trim()) {
+    if (draft.mode === "image" && (model as ImageModel).supported_parameters.negative_prompt) {
+      payload.negative_prompt = draft.negativePrompt.trim();
+    } else if (draft.mode === "video" && (model as VideoModel).allowed_passthrough_parameters?.includes("negative_prompt")) {
+      payload.negative_prompt = draft.negativePrompt.trim();
+    } else {
+      payload.prompt = `${draft.prompt.trim()}\nConstraints: ${draft.negativePrompt.trim()}`;
+    }
+  }
+  const promptTokens = [...String(payload.prompt).matchAll(/@(\d+)/g)];
+  if (sentAssets.length || promptTokens.length) {
+    payload.prompt = bindPromptReferences(String(payload.prompt), draft.mode, draft.model, sentAssets);
   }
   return payload;
 }
 
 export function productSystemInstruction(input: Omit<PromptEnhancementInput, "promptModel" | "prompt">): string {
+  const profile = promptProfileForModel(input.mode, input.target.id);
   const task = input.mode === "image"
     ? input.editMode ? "image editing" : "image generation"
     : "video generation";
@@ -703,7 +950,14 @@ export function productSystemInstruction(input: Omit<PromptEnhancementInput, "pr
   const hasMaskGuide = input.visuals.some((visual) => visual.kind === "mask_guide");
   return [
     `The active Fruit Truck task is ${task}.`,
-    "Numbered references are immutable input identities.",
+    `The selected generation model is ${input.target.name} (${input.target.id}).`,
+    `Active generation options: ${JSON.stringify(input.target.options)}.`,
+    `Declared target capabilities: ${JSON.stringify(input.target.capabilities ?? {})}.`,
+    input.target.providerJson.trim()
+      ? `Active provider routing and passthrough configuration: ${input.target.providerJson.trim()}.`
+      : "No provider override is active.",
+    profileInstruction(profile, input.workflow),
+    "Numbered references are immutable input slots with authoritative semantic purposes.",
     "Do not invent inputs or options outside the selected model's declared capabilities.",
     editRule,
     input.hasMask && hasMaskGuide
@@ -717,25 +971,15 @@ export function productSystemInstruction(input: Omit<PromptEnhancementInput, "pr
 export function promptEnhancerInstruction(visualKinds: PromptEnhancementVisual["kind"][] = []): string {
   const hasVisuals = visualKinds.length > 0;
   return [
-    "You are Fruit Truck's prompt enhancer.",
-    "Rewrite the user's request into one production-ready media prompt.",
-    "Infer the best structure for this request instead of forcing a fixed schema.",
-    "Preserve intent, names, constraints, ambiguity that should remain creative, and every attached @number reference.",
-    "Preserve the user's language and every negative or forbidden condition.",
+    plannerConstitutionInstruction(),
     hasVisuals ? "Inspect every supplied visual before adding detail, and use only facts that are actually visible." : "",
-    "For edits, identify the existing subject and requested attribute precisely while preserving all unrequested identity, anatomy, geometry, texture, lighting, depth, composition, and continuity.",
+    visualKinds.includes("video_frame") ? "Images labeled as a video storyboard are ordered samples from one source video. Infer only visible temporal change, camera movement, and continuity supported across those samples; do not treat any sample as an independent reference." : "",
+    "For edits, identify the existing subject and requested delta precisely, and preserve every compatible unrequested identity, anatomy, geometry, texture, lighting, depth, composition, and continuity invariant.",
     visualKinds.includes("mask_guide") ? "For a mask guide, infer the intended semantic part from the original image and explicitly prevent generation of the painted brush-stroke silhouette as a new object. Keep simple color, material, or attribute changes attribute-only: do not add pose changes, gestures, finger placement, grasp angles, contact geometry, or limb restyling. Preserve exact overlaps and occlusions around the selected subject, and limit any boundary blending to that subject's own edge." : "",
-    "Add useful visual, temporal, camera, material, lighting, composition, and continuity detail only when relevant.",
-    "Return only the enhanced prompt. Do not add headings, analysis, JSON, or markdown.",
   ].filter(Boolean).join(" ");
 }
 
 export function promptEnhancementUserContent(input: PromptEnhancementInput): PromptEnhancementContentPart[] {
-  const referenceCatalog = input.references.length
-    ? ["", "Available numbered references:", ...input.references.map((reference) =>
-      `@${reference.slot}: ${reference.name} (${reference.mediaType}, ${reference.role})`,
-    )]
-    : [];
   const visualCatalog = input.visuals.length
     ? ["", "Visual inputs, in the same order as the attached images:", ...input.visuals.map((visual, index) => {
       return `Visual ${index + 1}: @${visual.slot} ${visual.name} (${visual.kind}, ${visual.role})`;
@@ -744,8 +988,9 @@ export function promptEnhancementUserContent(input: PromptEnhancementInput): Pro
   const text = [
     "User prompt:",
     input.prompt.trim() || "(none)",
+    "",
+    referenceCatalogInstruction(input.references),
     ...(input.hasMask ? ["", "Mask instructions:", input.maskInstructions?.trim() || "Apply the user prompt to the semantically selected subject or part."] : []),
-    ...referenceCatalog,
     ...visualCatalog,
   ].join("\n");
   return [
@@ -762,57 +1007,96 @@ export function validateEnhancedPrompt(
   enhanced: string,
   editTarget?: string,
   validSlots?: Iterable<number>,
+  requiredSlots?: Iterable<number>,
 ): string | null {
   if (!enhanced.trim()) return "The enhanced prompt is empty.";
   const available = validSlots ? new Set(validSlots) : null;
-  const tokens = (value: string) => [...value.matchAll(/@(\d+)/g)]
-    .map((match) => Number(match[1]))
-    .filter((slot) => !available || available.has(slot));
+  const tokens = (value: string) => [...value.matchAll(/@(\d+)/g)].map((match) => Number(match[1]));
   const originalTokens = new Set(tokens(`${original} ${editTarget ?? ""}`));
   const enhancedTokens = new Set(tokens(enhanced));
   for (const token of originalTokens) {
     if (!enhancedTokens.has(token)) return `Prompt enhancement removed @${token}.`;
   }
   for (const token of enhancedTokens) {
-    if (!originalTokens.has(token)) return `Prompt enhancement invented @${token}.`;
+    if (available ? !available.has(token) : !originalTokens.has(token)) return `Prompt enhancement invented @${token}.`;
+  }
+  for (const token of requiredSlots ?? []) {
+    if (!enhancedTokens.has(token)) return `Prompt enhancement did not bind required reference @${token}.`;
   }
   return null;
 }
 
-export async function enhancePrompt(input: PromptEnhancementInput, onActualCost?: ActualCostHandler): Promise<string> {
-  const response = await request<{
-    choices?: Array<{ message?: { content?: string | Array<{ type?: string; text?: string }> } }>;
-    usage?: { cost?: number };
-  }>("POST", "/chat/completions", {
-    model: input.promptModel,
-    reasoning: { effort: input.promptModel.endsWith("luna") ? "xhigh" : "high" },
-    messages: [
+export async function enhancePrompt(input: PromptEnhancementInput, onActualCost?: ActualCostHandler): Promise<PromptEnhancementArtifact> {
+  const profile = promptProfileForModel(input.mode, input.target.id);
+  const baseMessages = [
+    { role: "system", content: productSystemInstruction(input) },
+    { role: "system", content: promptEnhancerInstruction(input.visuals.map((visual) => visual.kind)) },
+    { role: "user", content: promptEnhancementUserContent(input) },
+  ];
+  let totalCost = 0;
+  let previousText = "";
+  let previousError = "";
+  for (let repairAttempts = 0; repairAttempts < 2; repairAttempts += 1) {
+    const messages = repairAttempts === 0 ? baseMessages : [
+      ...baseMessages,
+      { role: "assistant", content: previousText },
       {
-        role: "system",
-        content: productSystemInstruction(input),
+        role: "user",
+        content: `Repair the previous JSON so it exactly matches the supplied schema and reference contract. Validation error: ${previousError}. Return only the repaired JSON object.`,
       },
-      { role: "system", content: promptEnhancerInstruction(input.visuals.map((visual) => visual.kind)) },
-      { role: "user", content: promptEnhancementUserContent(input) },
-    ],
-  });
-  reportActualCost(response, onActualCost);
-  const content = response.choices?.[0]?.message?.content;
-  const text = typeof content === "string"
-    ? content
-    : content?.map((part) => part.text ?? "").join("");
-  if (!text?.trim()) throw new Error("The prompt model returned no enhanced prompt.");
-  const originalIntent = [
-    input.prompt.trim(),
-    input.hasMask ? input.maskInstructions?.trim() ?? "" : "",
-  ].filter(Boolean).join("\n");
-  const validationError = validateEnhancedPrompt(
-    originalIntent,
-    text,
-    input.editTarget,
-    input.references.map((reference) => reference.slot),
-  );
-  if (validationError) throw new Error(validationError);
-  return text.trim();
+    ];
+    let response: {
+      choices?: Array<{ message?: { content?: string | Array<{ type?: string; text?: string }> } }>;
+      usage?: { cost?: number };
+    };
+    try {
+      response = await request("POST", "/chat/completions", {
+        model: input.promptModel,
+        reasoning: { effort: input.promptModel.endsWith("luna") ? "xhigh" : "high" },
+        response_format: PROMPT_PLAN_RESPONSE_FORMAT,
+        provider: { require_parameters: true },
+        messages,
+      });
+    } catch (error) {
+      if (totalCost > 0) onActualCost?.(totalCost);
+      throw error;
+    }
+    totalCost += responseCost(response) ?? 0;
+    const content = response.choices?.[0]?.message?.content;
+    const text = typeof content === "string"
+      ? content
+      : content?.map((part) => part.text ?? "").join("");
+    try {
+      if (!text?.trim()) throw new Error("The prompt model returned no structured prompt plan.");
+      const plan = parsePromptPlan(text);
+      if (plan.mode !== input.mode || plan.workflow !== input.workflow) {
+        throw new Error(`The prompt planner returned ${plan.mode}/${plan.workflow} for the required ${input.mode}/${input.workflow} workflow.`);
+      }
+      const compiled = compilePromptPlan({ plan, profile, workflow: input.workflow, references: input.references });
+      const validationError = validateCompiledPrompt(compiled, input.references);
+      if (validationError) throw new Error(validationError);
+      if (totalCost > 0) onActualCost?.(totalCost);
+      return {
+        schemaVersion: 1,
+        ...compiled,
+        signature: input.signature,
+        plannerModel: input.promptModel,
+        target: input.target,
+        profileSources: profile.sources,
+        repairAttempts,
+        createdAt: new Date().toISOString(),
+        plan,
+      };
+    } catch (error) {
+      previousText = text ?? "";
+      previousError = error instanceof Error ? error.message : String(error);
+      if (repairAttempts === 1) {
+        if (totalCost > 0) onActualCost?.(totalCost);
+        throw error;
+      }
+    }
+  }
+  throw new Error("Prompt enhancement repair failed.");
 }
 
 type ActualCostHandler = (actualCostUsd: number) => void;

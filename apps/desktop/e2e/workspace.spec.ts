@@ -1,5 +1,46 @@
 import { expect, test, type Page } from "@playwright/test";
 
+function plannerPlan(mode: "image" | "video", workflow: string, hasReference = false) {
+  return {
+    version: 1,
+    mode,
+    workflow,
+    language: "en",
+    deliverable: mode === "image" ? "a polished image" : "a polished short video",
+    intent: "preserve the user's request",
+    scene: ["a fruit truck"],
+    subjects: ["the fruit truck"],
+    action: mode === "video" ? ["moves through the scene"] : [],
+    composition: ["clear composition"],
+    camera: [],
+    lighting: ["restrained lighting"],
+    color: [],
+    style: ["polished"],
+    materials: [],
+    exactText: [],
+    temporalBeats: mode === "video" ? ["the truck moves steadily"] : [],
+    subjectMotion: mode === "video" ? ["steady forward movement"] : [],
+    cameraMotion: mode === "video" ? ["a tracking shot"] : [],
+    audio: [],
+    editChanges: [],
+    preserve: [],
+    ambiguities: [],
+    constraints: mode === "image"
+      ? [{ requirement: "avoid watermark", desiredState: "the image has a clean unmarked finish" }]
+      : [],
+    references: hasReference ? [{
+      slot: 1,
+      target: "the final visual finish",
+      purpose: "style",
+      priority: "optional",
+      evidence: "user",
+      copy: ["surface treatment"],
+      preserve: [],
+      ignore: ["unrelated source content"],
+    }] : [],
+  };
+}
+
 async function mockWorkspaceApi(page: Page) {
   await page.route("https://openrouter.ai/api/v1/**", async (route) => {
     const request = route.request();
@@ -7,11 +48,18 @@ async function mockWorkspaceApi(page: Page) {
     if (path === "/api/v1/images/models") {
       await route.fulfill({
         contentType: "application/json",
-        body: JSON.stringify({ data: [{ id: "test/image", name: "Test image model", supported_parameters: {} }] }),
+        body: JSON.stringify({ data: [{
+          id: "google/gemini-2.5-flash-image",
+          name: "Test image model",
+          supported_parameters: {
+            input_references: { type: "range", min: 0, max: 4 },
+            negative_prompt: { type: "boolean" },
+          },
+        }] }),
       });
       return;
     }
-    if (path === "/api/v1/images/models/test/image/endpoints") {
+    if (path === "/api/v1/images/models/google/gemini-2.5-flash-image/endpoints") {
       await route.fulfill({ contentType: "application/json", body: JSON.stringify({ endpoints: [] }) });
       return;
     }
@@ -29,9 +77,14 @@ async function mockWorkspaceApi(page: Page) {
       return;
     }
     if (path === "/api/v1/chat/completions") {
+      const body = request.postDataJSON() as { messages?: Array<{ content?: unknown }> };
+      const system = body.messages?.map((message) => typeof message.content === "string" ? message.content : "").join(" ") ?? "";
+      const serializedMessages = JSON.stringify(body.messages ?? []);
+      const mode = system.includes("video generation") ? "video" : "image";
+      const workflow = system.match(/Resolved workflow: ([a-z_]+)\./)?.[1] ?? (mode === "video" ? "text_to_video" : "text_to_image");
       await route.fulfill({
         contentType: "application/json",
-        body: JSON.stringify({ choices: [{ message: { content: "A polished studio prompt with restrained lighting." } }], usage: { cost: 0.01 } }),
+        body: JSON.stringify({ choices: [{ message: { content: JSON.stringify(plannerPlan(mode, workflow, serializedMessages.includes("@1:"))) } }], usage: { cost: 0.01 } }),
       });
       return;
     }
@@ -138,4 +191,48 @@ test("video generation completes in the same workspace and records session cost"
   await expect(page.getByText("Generation complete")).toBeVisible({ timeout: 8_000 });
   await expect(page.getByText("Saved to Asset library")).toBeVisible();
   await expect(page.getByRole("status", { name: /Session spend: \$0\.28/ })).toBeVisible();
+});
+
+test("reference purpose, coverage mapping, and separate exclusions stay visible in the request", async ({ page }) => {
+  const fileChooserPromise = page.waitForEvent("filechooser");
+  await page.getByRole("button", { name: /Drop assets here or choose files/ }).click();
+  const fileChooser = await fileChooserPromise;
+  await fileChooser.setFiles({
+    name: "style-reference.png",
+    mimeType: "image/png",
+    buffer: Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64"),
+  });
+
+  await expect(page.locator(".reference-row strong", { hasText: "style-reference.png" })).toBeVisible();
+  await page.getByRole("combobox", { name: "Reference purpose for style-reference.png" }).click();
+  await page.getByRole("option", { name: "Style", exact: true }).click();
+  await page.getByRole("textbox", { name: /^Prompt/ }).fill("Optionally use @1 for a restrained editorial finish.");
+  await page.locator(".enhance-row").getByRole("button", { name: "Preview", exact: true }).click();
+
+  await page.getByText("Enhanced prompt · inspect or edit").click();
+  const exclusions = page.getByRole("textbox", { name: "Exclusions sent separately" });
+  await expect(exclusions).toHaveValue("avoid watermark");
+  await exclusions.fill("watermark; extra logo");
+
+  await page.getByRole("button", { name: "Request", exact: true }).click();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  const mapping = page.locator(".request-mapping");
+  await expect(mapping).toContainText("Style");
+  await expect(mapping).toContainText("mapped");
+  await expect(page.locator(".request-dialog-body pre")).toContainText('"negative_prompt": "watermark; extra logo"');
+  await expect(page.locator(".request-dialog-body pre")).toContainText("Image 1");
+});
+
+test("invalid provider passthrough is blocked and explained before submission", async ({ page }) => {
+  await page.getByRole("textbox", { name: /^Prompt/ }).fill("A clean studio product image.");
+  await page.getByText("Advanced", { exact: true }).click();
+  await page.getByRole("textbox", { name: "Provider routing & options" }).fill(JSON.stringify({
+    options: { google: { parameters: { undocumented: true } } },
+  }));
+
+  await expect(page.locator(".provider-options-field .field-error")).toContainText("not declared by the selected endpoint");
+  await expect(page.getByRole("button", { name: "Generate Image" })).toBeDisabled();
+  await page.getByRole("button", { name: "Request", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("Request cannot be sent");
+  await expect(page.getByRole("alert")).toContainText("not declared by the selected endpoint");
 });

@@ -2,10 +2,16 @@ import type {
   DraftOptions,
   GenerationModel,
   GenerationMode,
+  ReferenceCoverage,
   ReferenceRole,
   VideoResult,
 } from "./openrouter.ts";
 import { defaultOptions, isTauriRuntime } from "./openrouter.ts";
+import {
+  defaultReferencePurpose,
+  type PromptEnhancementArtifact,
+  type ReferencePurpose,
+} from "./prompting/index.ts";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 
 export type AssetKind = "image" | "video" | "audio";
@@ -40,6 +46,8 @@ export type DraftReference = {
   assetId: string;
   slot: number;
   role: ReferenceRole;
+  purpose: ReferencePurpose;
+  purposeBeforeEdit?: ReferencePurpose;
 };
 
 export type MaskPoint = {
@@ -62,6 +70,7 @@ export type GenerationDraftState = {
   enhancedPrompt: string;
   enhancedPromptDirty: boolean;
   enhancedVisualCount: number;
+  enhancementArtifact?: PromptEnhancementArtifact;
   imageEditMode: boolean;
   imageEditTarget: string;
   maskInstructions: string;
@@ -95,6 +104,7 @@ export type GenerationAttemptSnapshot = {
   prompt: string;
   enhancePrompt: boolean;
   enhancedPrompt: string;
+  enhancementArtifact?: PromptEnhancementArtifact;
   options: DraftOptions;
   providerJson: string;
   assetBindings: DraftReference[];
@@ -102,6 +112,7 @@ export type GenerationAttemptSnapshot = {
   imageEditTarget: string;
   maskInstructions: string;
   maskStrokes: MaskStroke[];
+  referenceCoverage?: ReferenceCoverage[];
 };
 
 export type GenerationAttempt = {
@@ -250,6 +261,7 @@ export function emptyDraft(enhancePrompt = true): GenerationDraftState {
     enhancedPrompt: "",
     enhancedPromptDirty: false,
     enhancedVisualCount: 0,
+    enhancementArtifact: undefined,
     imageEditMode: false,
     imageEditTarget: "",
     maskInstructions: "",
@@ -257,10 +269,39 @@ export function emptyDraft(enhancePrompt = true): GenerationDraftState {
   };
 }
 
+export function markReferenceAsEditTarget(reference: DraftReference): DraftReference {
+  return {
+    ...reference,
+    purposeBeforeEdit: reference.purpose === "edit_target"
+      ? reference.purposeBeforeEdit
+      : reference.purpose,
+    purpose: "edit_target",
+  };
+}
+
+export function restoreReferenceAfterEditTarget(
+  reference: DraftReference,
+  kind: AssetKind,
+): DraftReference {
+  if (reference.purpose !== "edit_target") return reference;
+  const { purposeBeforeEdit, ...rest } = reference;
+  return {
+    ...rest,
+    purpose: purposeBeforeEdit && purposeBeforeEdit !== "edit_target"
+      ? purposeBeforeEdit
+      : defaultReferencePurpose(kind, reference.role),
+  };
+}
+
 export function beginGeneratedImageEdit(draft: GenerationDraftState, assetId: string): GenerationDraftState {
   return {
     ...draft,
-    references: [{ assetId, slot: 1, role: "reference" }],
+    references: [markReferenceAsEditTarget({
+      assetId,
+      slot: 1,
+      role: "reference",
+      purpose: defaultReferencePurpose("image", "reference"),
+    })],
     imageEditMode: true,
     imageEditTarget: "@1",
     maskInstructions: "",
@@ -268,6 +309,7 @@ export function beginGeneratedImageEdit(draft: GenerationDraftState, assetId: st
     enhancedPrompt: "",
     enhancedPromptDirty: false,
     enhancedVisualCount: 0,
+    enhancementArtifact: undefined,
   };
 }
 
@@ -392,8 +434,8 @@ export function initializeSessionCatalogDefaults(
   session: StudioSession,
   catalogs: Record<GenerationMode, GenerationModel[]>,
 ) {
-  const imageModel = catalogs.image[0] ?? null;
-  const videoModel = catalogs.video[0] ?? null;
+  const imageModel = preferredCatalogModel("image", catalogs.image);
+  const videoModel = preferredCatalogModel("video", catalogs.video);
   return {
     ...session,
     generationDefaults: {
@@ -408,6 +450,13 @@ export function initializeSessionCatalogDefaults(
       providerJson: { image: "", video: "" },
     },
   };
+}
+
+export function preferredCatalogModel(mode: GenerationMode, models: GenerationModel[]): GenerationModel | null {
+  if (mode === "video") {
+    return models.find((model) => !/^openai\/sora-2(?:$|-)/.test(model.id)) ?? models[0] ?? null;
+  }
+  return models[0] ?? null;
 }
 
 function createInitialStudioState(): StudioState {
@@ -432,6 +481,7 @@ function validCurrentState(value: unknown): value is StudioState {
 }
 
 function normalizeCurrentSession(session: StudioSession, defaultEnhancePrompt: boolean): StudioSession {
+  const assetKinds = new Map(session.assets?.map((asset) => [asset.id, asset.kind]) ?? []);
   const normalizeThread = (thread: GenerationThread): GenerationThread => ({
     ...thread,
     draft: {
@@ -440,7 +490,25 @@ function normalizeCurrentSession(session: StudioSession, defaultEnhancePrompt: b
       enhancePrompt: typeof thread.draft?.enhancePrompt === "boolean"
         ? thread.draft.enhancePrompt
         : defaultEnhancePrompt,
-      references: Array.isArray(thread.draft?.references) ? thread.draft.references : [],
+      references: Array.isArray(thread.draft?.references) ? thread.draft.references.map((reference) => {
+        const isEditTarget = thread.mode === "image"
+          && thread.draft?.imageEditMode
+          && `@${reference.slot}` === thread.draft.imageEditTarget;
+        const normalized: DraftReference = {
+          ...reference,
+          purpose: reference.role === "first_frame"
+              ? "first_frame"
+              : reference.role === "last_frame"
+                ? "last_frame"
+                : reference.purpose ?? defaultReferencePurpose(
+                  assetKinds.get(reference.assetId) ?? "image",
+                  reference.role,
+                ),
+        };
+        return isEditTarget
+          ? markReferenceAsEditTarget(normalized)
+          : restoreReferenceAfterEditTarget(normalized, assetKinds.get(reference.assetId) ?? "image");
+      }) : [],
       maskStrokes: Array.isArray(thread.draft?.maskStrokes) ? thread.draft.maskStrokes : [],
     },
     attempts: Array.isArray(thread.attempts) ? thread.attempts : [],

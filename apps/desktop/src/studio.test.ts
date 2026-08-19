@@ -4,6 +4,8 @@ import {
   activeGenerationAttempt,
   applyDefaultEnhancePrompt,
   beginGeneratedImageEdit,
+  markReferenceAsEditTarget,
+  restoreReferenceAfterEditTarget,
   createSession,
   createSiblingGenerationThread,
   effectiveThreadDraft,
@@ -13,11 +15,52 @@ import {
   mediaMimeFromSource,
   mediaNameForMime,
   nextAvailableSessionName,
+  preferredCatalogModel,
   recordSessionCost,
   requestedImageDimensions,
   saveStudioState,
+  type GenerationDraftState,
   type StudioState,
 } from "./studio.ts";
+
+function enhancementArtifactFixture() {
+  return {
+    schemaVersion: 1,
+    signature: "enhancement-signature",
+    plannerModel: "test-planner",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    prompt: "a bright red truck",
+    negativePrompt: "blur",
+    profileId: "image-default",
+    profileVersion: "1",
+    workflow: "text_to_image",
+    coveredSlots: [1],
+    warnings: [],
+    plan: {
+      language: "en",
+      deliverable: "image",
+      intent: "create a truck",
+      scene: [],
+      subjects: [],
+      action: [],
+      composition: [],
+      camera: [],
+      lighting: [],
+      color: [],
+      style: [],
+      materials: [],
+      exactText: [],
+      temporalBeats: [],
+      subjectMotion: [],
+      cameraMotion: [],
+      audio: [],
+      editChanges: [],
+      preserve: [],
+      constraints: [],
+      references: [],
+    },
+  } as unknown as NonNullable<GenerationDraftState["enhancementArtifact"]>;
+}
 
 function withLocalStorage(run: (writes: Map<string, string>) => void) {
   const writes = new Map<string, string>();
@@ -131,6 +174,75 @@ test("current v6 metadata preserves its global enhancement preference", () => {
   });
 });
 
+test("current metadata preserves reference purposes and enhancement artifacts", () => {
+  withLocalStorage(() => {
+    const session = createSession("Semantic metadata");
+    const thread = session.threads.image[0];
+    const artifact = enhancementArtifactFixture();
+    thread.draft.references = [{
+      assetId: "style-reference",
+      slot: 1,
+      role: "reference",
+      purpose: "style",
+    }];
+    thread.draft.enhancementArtifact = artifact;
+    const state: StudioState = {
+      schemaVersion: 6,
+      activeSessionId: session.id,
+      promptModel: "openai/gpt-5.6-luna",
+      defaultEnhancePrompt: true,
+      sessions: [session],
+    };
+
+    saveStudioState(state);
+
+    const loadedThread = loadStudioState().sessions[0].threads.image[0];
+    assert.deepEqual(loadedThread.draft.references, thread.draft.references);
+    assert.deepEqual(loadedThread.draft.enhancementArtifact, artifact);
+  });
+});
+
+test("load supplies semantic purposes for saved references from before purpose persistence", () => {
+  withLocalStorage((writes) => {
+    const session = createSession("Legacy references");
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    session.assets.push(
+      { id: "legacy-image", name: "legacy.png", kind: "image", mimeType: "image/png", origin: "upload", createdAt },
+      { id: "legacy-video", name: "legacy.mp4", kind: "video", mimeType: "video/mp4", origin: "upload", createdAt },
+      { id: "legacy-audio", name: "legacy.mp3", kind: "audio", mimeType: "audio/mpeg", origin: "upload", createdAt },
+    );
+    const state: StudioState = {
+      schemaVersion: 6,
+      activeSessionId: session.id,
+      promptModel: "openai/gpt-5.6-luna",
+      defaultEnhancePrompt: true,
+      sessions: [session],
+    };
+    const persisted = JSON.parse(JSON.stringify(state)) as {
+      sessions: Array<{
+        threads: {
+          image: Array<{ draft: { references: Array<Record<string, unknown>> } }>;
+        };
+      }>;
+    };
+    persisted.sessions[0].threads.image[0].draft.references = [
+      { assetId: "legacy-image", slot: 1, role: "reference" },
+      { assetId: "legacy-video", slot: 2, role: "reference" },
+      { assetId: "legacy-audio", slot: 3, role: "reference" },
+      { assetId: "legacy-image", slot: 4, role: "first_frame" },
+    ];
+    writes.set("fruit-truck.studio.v1", JSON.stringify(persisted));
+
+    const references = loadStudioState().sessions[0].threads.image[0].draft.references;
+    assert.deepEqual(references, [
+      { assetId: "legacy-image", slot: 1, role: "reference", purpose: "subject_identity" },
+      { assetId: "legacy-video", slot: 2, role: "reference", purpose: "motion" },
+      { assetId: "legacy-audio", slot: 3, role: "reference", purpose: "audio" },
+      { assetId: "legacy-image", slot: 4, role: "first_frame", purpose: "first_frame" },
+    ]);
+  });
+});
+
 test("thread defaults and active attempt helpers remain functional", () => {
   const session = createSession("Workspace");
   const thread = session.threads.image[0];
@@ -154,12 +266,36 @@ test("thread defaults and active attempt helpers remain functional", () => {
 test("generated-result editing starts with only that image as input one", () => {
   const session = createSession("Edit");
   const draft = session.threads.image[0].draft;
-  draft.references = [{ assetId: "old", role: "reference", slot: 1 }];
+  draft.references = [{ assetId: "old", role: "reference", purpose: "context", slot: 1 }];
   draft.maskInstructions = "old mask";
+  draft.enhancementArtifact = enhancementArtifactFixture();
   const edit = beginGeneratedImageEdit(draft, "generated-result");
-  assert.deepEqual(edit.references, [{ assetId: "generated-result", role: "reference", slot: 1 }]);
+  assert.deepEqual(edit.references, [{
+    assetId: "generated-result",
+    role: "reference",
+    slot: 1,
+    purpose: "edit_target",
+    purposeBeforeEdit: "subject_identity",
+  }]);
   assert.equal(edit.imageEditTarget, "@1");
   assert.equal(edit.maskInstructions, "");
+  assert.equal(edit.enhancementArtifact, undefined);
+});
+
+test("edit targets restore their prior semantic purpose", () => {
+  const styleReference = { assetId: "style", role: "reference" as const, slot: 3, purpose: "style" as const };
+  const target = markReferenceAsEditTarget(styleReference);
+  assert.equal(target.purpose, "edit_target");
+  assert.equal(target.purposeBeforeEdit, "style");
+  assert.deepEqual(restoreReferenceAfterEditTarget(target, "image"), styleReference);
+});
+
+test("deprecated Sora 2 is not selected as an automatic video default", () => {
+  const selected = preferredCatalogModel("video", [
+    { id: "openai/sora-2-pro", name: "Sora 2 Pro" },
+    { id: "google/veo-3.1", name: "Veo 3.1" },
+  ]);
+  assert.equal(selected?.id, "google/veo-3.1");
 });
 
 test("browser imports reject empty and oversized media before storage", async () => {

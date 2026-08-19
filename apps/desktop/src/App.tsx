@@ -69,10 +69,13 @@ import {
   loadImageModelEndpoints,
   pollVideo,
   prettyRequest,
+  referenceCoverageReport,
   removeApiKey,
   saveApiKey,
   submitVideo,
   validateEnhancedPrompt,
+  validateProviderConfiguration,
+  validateReferenceCoverage,
   videoReferenceLimit,
   videoTotalInputLimit,
   type CredentialStatus,
@@ -84,6 +87,16 @@ import {
   type ReferenceAsset,
   type VideoModel,
 } from "@/openrouter";
+import {
+  PROMPT_PLANNER_VERSION,
+  defaultReferencePurpose,
+  promptProfileForModel,
+  promptEnhancementSignature,
+  resolvePromptWorkflow,
+  type PromptEnhancementArtifact,
+  type PromptReferenceInput,
+  type PromptTarget,
+} from "@/prompting";
 import {
   createSession,
   createSiblingGenerationThread,
@@ -105,11 +118,14 @@ import {
   saveStudioState,
   activeGenerationAttempt,
   beginGeneratedImageEdit,
+  markReferenceAsEditTarget,
+  restoreReferenceAfterEditTarget,
   activeVideoJobsFromAttempts,
   effectiveThreadDraft,
   effectiveThreadModelId,
   exportAssetToDownloads,
   optionOverridesFromDefaults,
+  preferredCatalogModel,
   applyDefaultEnhancePrompt,
   recordSessionCost,
   type NativeManagedAsset,
@@ -179,6 +195,126 @@ function hasRunnableInstructions(mode: GenerationMode, draft: GenerationDraftSta
 function enhancementOriginalIntent(mode: GenerationMode, draft: GenerationDraftState) {
   const hasMask = mode === "image" && draft.imageEditMode && draft.maskStrokes.length > 0;
   return [draft.prompt.trim(), hasMask ? draft.maskInstructions.trim() : ""].filter(Boolean).join("\n");
+}
+
+function promptReferenceInputs(session: StudioSession, draft: GenerationDraftState): PromptReferenceInput[] {
+  const assets = new Map(session.assets.map((asset) => [asset.id, asset]));
+  return draft.references.flatMap((reference) => {
+    const asset = assets.get(reference.assetId);
+    return asset ? [{
+      slot: reference.slot,
+      name: asset.name,
+      mediaType: asset.mimeType,
+      role: reference.role,
+      purpose: reference.purpose,
+      fingerprint: asset.fingerprint,
+      durationSeconds: asset.duration,
+    }] : [];
+  });
+}
+
+function waitForMediaEvent(media: HTMLMediaElement, event: "loadedmetadata" | "loadeddata" | "seeked", timeoutMs = 12_000) {
+  return new Promise<void>((resolve, reject) => {
+    const timeout = window.setTimeout(() => finish(new Error(`Timed out waiting for video ${event}.`)), timeoutMs);
+    const finish = (error?: Error) => {
+      window.clearTimeout(timeout);
+      media.removeEventListener(event, onReady);
+      media.removeEventListener("error", onError);
+      if (error) reject(error); else resolve();
+    };
+    const onReady = () => finish();
+    const onError = () => finish(new Error("The video reference could not be decoded for storyboard analysis."));
+    media.addEventListener(event, onReady, { once: true });
+    media.addEventListener("error", onError, { once: true });
+  });
+}
+
+async function sampleVideoStoryboard(source: string): Promise<string[]> {
+  const video = document.createElement("video");
+  video.muted = true;
+  video.preload = "auto";
+  video.playsInline = true;
+  const ready = Promise.all([
+    waitForMediaEvent(video, "loadedmetadata"),
+    waitForMediaEvent(video, "loadeddata"),
+  ]);
+  video.src = source;
+  video.load();
+  try {
+    await ready;
+    if (!Number.isFinite(video.duration) || video.duration <= 0 || !video.videoWidth || !video.videoHeight) return [];
+    const width = Math.min(768, video.videoWidth);
+    const height = Math.max(1, Math.round(width * video.videoHeight / video.videoWidth));
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d");
+    if (!context) return [];
+    const frames: string[] = [];
+    for (const ratio of [0.1, 0.5, 0.9]) {
+      const seeked = waitForMediaEvent(video, "seeked");
+      video.currentTime = Math.min(Math.max(0, video.duration * ratio), Math.max(0, video.duration - 0.01));
+      await seeked;
+      context.drawImage(video, 0, 0, width, height);
+      frames.push(canvas.toDataURL("image/jpeg", 0.82));
+    }
+    return frames;
+  } finally {
+    video.removeAttribute("src");
+    video.load();
+  }
+}
+
+function enhancementContext(
+  session: StudioSession,
+  thread: GenerationThread,
+  draft: GenerationDraftState,
+  targetModel: GenerationModel,
+  plannerModel: string,
+) {
+  const target: PromptTarget = {
+    id: targetModel.id,
+    name: targetModel.name,
+    options: draft.options,
+    providerJson: draft.providerJson,
+    capabilities: thread.mode === "image"
+      ? {
+        inputModalities: targetModel.architecture?.input_modalities,
+        supportedParameters: (targetModel as ImageModel).supported_parameters,
+      }
+      : {
+        inputModalities: targetModel.architecture?.input_modalities,
+        referenceTypes: (targetModel as VideoModel).input_reference_types,
+        maxInputReferences: (targetModel as VideoModel).max_input_references,
+        frameImages: (targetModel as VideoModel).supported_frame_images,
+        durations: (targetModel as VideoModel).supported_durations,
+        resolutions: (targetModel as VideoModel).supported_resolutions,
+        aspectRatios: (targetModel as VideoModel).supported_aspect_ratios,
+        generateAudio: (targetModel as VideoModel).generate_audio,
+      },
+  };
+  const profile = promptProfileForModel(thread.mode, targetModel.id);
+  const references = promptReferenceInputs(session, draft);
+  const hasMask = thread.mode === "image" && draft.imageEditMode && draft.maskStrokes.length > 0;
+  const workflow = resolvePromptWorkflow({
+    mode: thread.mode,
+    editMode: draft.imageEditMode,
+    hasMask,
+    references,
+  });
+  const signature = promptEnhancementSignature({
+    plannerModel,
+    promptVersion: PROMPT_PLANNER_VERSION,
+    promptProfile: { id: profile.id, version: profile.version },
+    target,
+    workflow,
+    prompt: draft.prompt,
+    maskInstructions: hasMask ? draft.maskInstructions : undefined,
+    editTarget: draft.imageEditMode ? draft.imageEditTarget : undefined,
+    maskState: hasMask ? draft.maskStrokes : undefined,
+    references,
+  });
+  return { references, hasMask, workflow, signature, target };
 }
 
 export default function App() {
@@ -275,6 +411,9 @@ export default function App() {
     ? imageReferenceLimit(selectedModel as ImageModel | null)
     : videoTotalInputLimit(selectedModel as VideoModel | null);
   const assetMap = useMemo(() => new Map(session.assets.map((asset) => [asset.id, asset])), [session.assets]);
+  const currentEnhancementContext = useMemo(() => selectedModel
+    ? enhancementContext(session, thread, draft, selectedModel, studio.promptModel)
+    : null, [draft, selectedModel, session, studio.promptModel, thread]);
   const policyNotices = useMemo(() => modelPolicyNotices(mode, selectedModel), [mode, selectedModel]);
   const sessionVideoJobs = activeVideoJobsFromAttempts(session);
   const activeAttempt = activeGenerationAttempt(thread);
@@ -406,7 +545,7 @@ export default function App() {
               : item.providerJsonOverride;
             const { options: _options, providerJson: _providerJson, ...draftPatch } = patch;
             const normalizedDraftPatch = draftPatch.enhancedPrompt === ""
-              ? { ...draftPatch, enhancedVisualCount: 0 }
+              ? { ...draftPatch, enhancedVisualCount: 0, enhancementArtifact: undefined }
               : draftPatch;
             return {
               ...item,
@@ -533,15 +672,17 @@ export default function App() {
     setCatalogError(null);
     try {
       const [images, videos] = await Promise.all([loadModels("image"), loadModels("video")]);
+      const defaultImage = preferredCatalogModel("image", images);
+      const defaultVideo = preferredCatalogModel("video", videos);
       setCatalogs({ image: images, video: videos });
       setImageEndpoints({});
       setStudio((current) => ({
         ...current,
         sessions: current.sessions.map((item) => {
           const imageId = images.some((model) => model.id === item.generationDefaults.modelIds.image)
-            ? item.generationDefaults.modelIds.image : images[0]?.id ?? "";
+            ? item.generationDefaults.modelIds.image : defaultImage?.id ?? "";
           const videoId = videos.some((model) => model.id === item.generationDefaults.modelIds.video)
-            ? item.generationDefaults.modelIds.video : videos[0]?.id ?? "";
+            ? item.generationDefaults.modelIds.video : defaultVideo?.id ?? "";
           const repairThreadModel = (thread: GenerationThread, candidates: GenerationModel[], defaultId: string) => {
             const compatible = new Set(candidates.map((model) => model.id));
             const effectiveId = thread.modelOverrideId ?? defaultId;
@@ -559,8 +700,8 @@ export default function App() {
               ...item.generationDefaults,
               modelIds: { image: imageId, video: videoId },
               options: {
-                image: Object.keys(item.generationDefaults.options.image).length ? item.generationDefaults.options.image : defaultOptions("image", images[0] ?? null),
-                video: Object.keys(item.generationDefaults.options.video).length ? item.generationDefaults.options.video : defaultOptions("video", videos[0] ?? null),
+                image: Object.keys(item.generationDefaults.options.image).length ? item.generationDefaults.options.image : defaultOptions("image", defaultImage),
+                video: Object.keys(item.generationDefaults.options.video).length ? item.generationDefaults.options.video : defaultOptions("video", defaultVideo),
               },
             },
             threads: {
@@ -912,7 +1053,16 @@ export default function App() {
       return;
     }
     if (!notice) {
-      patchDraft({ references: [...targetDraft.references, { assetId, role: validRole, slot: nextReferenceSlot(targetDraft.references) }], enhancedPrompt: "", enhancedPromptDirty: false });
+      patchDraft({
+        references: [...targetDraft.references, {
+          assetId,
+          role: validRole,
+          purpose: defaultReferencePurpose(targetAsset.kind, validRole),
+          slot: nextReferenceSlot(targetDraft.references),
+        }],
+        enhancedPrompt: "",
+        enhancedPromptDirty: false,
+      });
       return;
     }
     patchSession(notice.sessionId, (current) => ({
@@ -927,9 +1077,16 @@ export default function App() {
           updatedAt: new Date().toISOString(),
           draft: {
             ...item.draft,
-            references: [...item.draft.references, { assetId, role: validRole, slot: nextReferenceSlot(item.draft.references) }],
+            references: [...item.draft.references, {
+              assetId,
+              role: validRole,
+              purpose: defaultReferencePurpose(targetAsset.kind, validRole),
+              slot: nextReferenceSlot(item.draft.references),
+            }],
             enhancedPrompt: "",
             enhancedPromptDirty: false,
+            enhancedVisualCount: 0,
+            enhancementArtifact: undefined,
           },
         } : item),
       },
@@ -982,7 +1139,20 @@ export default function App() {
               maskInstructions: previousTarget?.assetId === assetId ? imageDraft.maskInstructions : "",
               enhancedPrompt: "",
               enhancedPromptDirty: false,
-              references: existing ? imageDraft.references : [...imageDraft.references, { assetId, slot, role: "reference" }],
+              enhancedVisualCount: 0,
+              enhancementArtifact: undefined,
+              references: existing
+                ? imageDraft.references.map((reference) => reference.assetId === assetId
+                  ? markReferenceAsEditTarget(reference)
+                  : reference.purpose === "edit_target"
+                    ? restoreReferenceAfterEditTarget(reference, "image")
+                    : reference)
+                : [
+                  ...imageDraft.references.map((reference) => reference.purpose === "edit_target"
+                    ? restoreReferenceAfterEditTarget(reference, "image")
+                    : reference),
+                  markReferenceAsEditTarget({ assetId, slot, role: "reference", purpose: defaultReferencePurpose("image", "reference") }),
+                ],
             },
           } : item),
         },
@@ -1005,9 +1175,15 @@ export default function App() {
       const previousTarget = currentDraft.references.find((reference) => `@${reference.slot}` === currentDraft.imageEditTarget);
       const existing = currentDraft.references.find((reference) => reference.assetId === assetId);
       const slot = existing?.slot ?? nextReferenceSlot(currentDraft.references);
-      const references = currentDraft.references
-        .map((reference) => reference.assetId === assetId ? { ...reference, role } : reference);
-      if (!references.some((reference) => reference.assetId === assetId)) references.push({ assetId, slot, role });
+      const currentAssets = new Map(current.assets.map((candidate) => [candidate.id, candidate]));
+      const references = currentDraft.references.map((reference) => {
+        if (reference.assetId === assetId) return markReferenceAsEditTarget({ ...reference, role });
+        if (reference.purpose !== "edit_target") return reference;
+        return restoreReferenceAfterEditTarget(reference, currentAssets.get(reference.assetId)?.kind ?? "image");
+      });
+      if (!references.some((reference) => reference.assetId === assetId)) {
+        references.push(markReferenceAsEditTarget({ assetId, slot, role, purpose: defaultReferencePurpose("image", role) }));
+      }
       return {
         ...current,
         threads: {
@@ -1024,6 +1200,8 @@ export default function App() {
               maskInstructions: previousTarget?.assetId === assetId ? currentDraft.maskInstructions : "",
               enhancedPrompt: "",
               enhancedPromptDirty: false,
+              enhancedVisualCount: 0,
+              enhancementArtifact: undefined,
             },
           } : item),
         },
@@ -1048,9 +1226,9 @@ export default function App() {
     const videoId = effectiveThreadModelId(targetSession, targetThread);
     const videoModel = catalogs.video.find((model) => model.id === videoId) ?? null;
     const videoRoles = allowedAssetRoles("video", videoModel);
-    const role = videoRoles.includes("reference")
-      ? "reference"
-      : videoRoles.includes("first_frame") ? "first_frame" : null;
+    const role = videoRoles.includes("first_frame")
+      ? "first_frame"
+      : videoRoles.includes("reference") ? "reference" : null;
     if (!role) {
       toast.error(t("chooseVideoImageInput"));
       if (notice) {
@@ -1084,9 +1262,12 @@ export default function App() {
                 assetId,
                 slot: nextReferenceSlot(videoDraft.references),
                 role,
+                purpose: defaultReferencePurpose("image", role),
               }],
               enhancedPrompt: "",
               enhancedPromptDirty: false,
+              enhancedVisualCount: 0,
+              enhancementArtifact: undefined,
             },
           } : item),
         },
@@ -1123,13 +1304,22 @@ export default function App() {
 
   const providerError = useMemo(() => {
     if (!draft.providerJson.trim()) return null;
+    let value: unknown;
     try {
-      const value = JSON.parse(draft.providerJson) as unknown;
-      return !value || Array.isArray(value) || typeof value !== "object" ? t("jsonObjectRequired") : null;
+      value = JSON.parse(draft.providerJson) as unknown;
     } catch {
       return t("invalidJson");
     }
-  }, [draft.providerJson, t]);
+    if (!value || Array.isArray(value) || typeof value !== "object") return t("jsonObjectRequired");
+    if (selectedModel) {
+      try {
+        validateProviderConfiguration(draft.providerJson, selectedModel);
+      } catch (error) {
+        return errorMessage(error);
+      }
+    }
+    return null;
+  }, [draft.providerJson, selectedModel, t]);
 
   const previewReferences = useMemo<ReferenceAsset[]>(() => draft.references.flatMap((reference) => {
     const asset = assetMap.get(reference.assetId);
@@ -1143,11 +1333,17 @@ export default function App() {
       mediaType: masked ? "image/png" : asset.mimeType,
       dataUrl: `local-asset://#${reference.slot}/${asset.name}`,
       role: reference.role,
+      purpose: reference.purpose,
       slot: reference.slot,
     }] : [];
   }), [assetMap, draft.imageEditMode, draft.imageEditTarget, draft.maskStrokes.length, draft.references, mode]);
 
-  const effectivePrompt = draft.enhancePrompt && draft.enhancedPrompt.trim()
+  const hasCurrentEnhancement = Boolean(
+    currentEnhancementContext
+    && draft.enhancementArtifact?.signature === currentEnhancementContext.signature,
+  );
+  const displayedEnhancedPrompt = hasCurrentEnhancement ? draft.enhancedPrompt : "";
+  const effectivePrompt = draft.enhancePrompt && hasCurrentEnhancement && draft.enhancedPrompt.trim()
     ? draft.enhancedPrompt
     : draft.prompt;
   const prepareGenerationPrompt = (prompt: string) => {
@@ -1160,20 +1356,41 @@ export default function App() {
     });
   };
   const preparedPrompt = prepareGenerationPrompt(effectivePrompt);
-  const requestPayload = useMemo(() => {
+  const requestBuild = useMemo(() => {
     try {
-      return buildRequest({
+      return { payload: buildRequest({
         mode,
         model: selectedId,
         prompt: preparedPrompt,
         assets: previewReferences,
         options: draft.options,
         providerJson: draft.providerJson,
-      }, selectedModel);
-    } catch {
-      return {};
+        editTargetSlot: draft.imageEditMode
+          ? Number(draft.imageEditTarget.match(/^@(\d+)$/)?.[1] ?? 0) || undefined
+          : undefined,
+        negativePrompt: hasCurrentEnhancement ? draft.enhancementArtifact?.negativePrompt : undefined,
+      }, selectedModel), error: null as string | null };
+    } catch (error) {
+      return { payload: {}, error: errorMessage(error) };
     }
-  }, [draft.options, draft.providerJson, mode, preparedPrompt, previewReferences, selectedId, selectedModel]);
+  }, [draft.enhancementArtifact?.negativePrompt, draft.imageEditMode, draft.imageEditTarget, draft.options, draft.providerJson, hasCurrentEnhancement, mode, preparedPrompt, previewReferences, selectedId, selectedModel]);
+  const requestPayload = requestBuild.payload;
+  const requestBuildError = requestBuild.error;
+  const previewReferencePriorities = hasCurrentEnhancement
+    ? draft.enhancementArtifact?.referencePriorities
+    : undefined;
+  const previewCoverage = useMemo(() => referenceCoverageReport({
+    mode,
+    model: selectedId,
+    prompt: preparedPrompt,
+    assets: previewReferences,
+    options: draft.options,
+    providerJson: draft.providerJson,
+    editTargetSlot: draft.imageEditMode
+      ? Number(draft.imageEditTarget.match(/^@(\d+)$/)?.[1] ?? 0) || undefined
+      : undefined,
+    negativePrompt: hasCurrentEnhancement ? draft.enhancementArtifact?.negativePrompt : undefined,
+  }, requestBuildError ? null : selectedModel, requestPayload, previewReferencePriorities), [draft.enhancementArtifact?.negativePrompt, draft.imageEditMode, draft.imageEditTarget, draft.options, draft.providerJson, hasCurrentEnhancement, mode, preparedPrompt, previewReferencePriorities, previewReferences, requestBuildError, requestPayload, selectedId, selectedModel]);
 
   const editTargetError = useMemo(() => {
     if (mode !== "image" || !draft.imageEditMode) return null;
@@ -1275,6 +1492,22 @@ export default function App() {
     for (const reference of targetDraft.references.toSorted((left, right) => left.slot - right.slot)) {
       const asset = targetAssetMap.get(reference.assetId);
       if (!asset) throw new Error(t("missingReference", { slot: reference.slot }));
+      if (asset.kind === "video") {
+        try {
+          const storyboard = await sampleVideoStoryboard(await assetRequestUrl(asset));
+          storyboard.forEach((source, index) => visuals.push({
+            id: `${asset.id}:storyboard:${index + 1}`,
+            kind: "video_frame",
+            source,
+            slot: reference.slot,
+            name: `${asset.name} storyboard ${index + 1}/${storyboard.length}`,
+            role: reference.role,
+          }));
+        } catch {
+          // The authoritative duration, role, and purpose remain available in the text catalog.
+        }
+        continue;
+      }
       if (asset.kind !== "image") continue;
 
       const isEditTarget = targetThread.mode === "image"
@@ -1312,7 +1545,7 @@ export default function App() {
     targetSession: StudioSession,
     targetThread: GenerationThread,
     costEntryId = `prompt-enhancement:${crypto.randomUUID()}`,
-  ) => {
+  ): Promise<PromptEnhancementArtifact> => {
     const targetDraft = effectiveThreadDraft(targetSession, targetThread);
     if (!hasRunnableInstructions(targetThread.mode, targetDraft)) {
       throw new Error(targetThread.mode === "image" && targetDraft.imageEditMode && targetDraft.maskStrokes.length
@@ -1321,21 +1554,24 @@ export default function App() {
     }
     setEnhancingThreadIds((current) => new Set(current).add(targetThread.id));
     try {
-      const targetAssetMap = new Map(targetSession.assets.map((asset) => [asset.id, asset]));
-      const hasMask = targetThread.mode === "image" && targetDraft.imageEditMode && targetDraft.maskStrokes.length > 0;
+      const targetModelId = effectiveThreadModelId(targetSession, targetThread);
+      const targetModel = catalogs[targetThread.mode].find((candidate) => candidate.id === targetModelId) ?? null;
+      if (!targetModel) throw new Error("Choose a compatible model before enhancing the prompt.");
+      const plannerModel = studioRef.current.promptModel;
+      const context = enhancementContext(targetSession, targetThread, targetDraft, targetModel, plannerModel);
       const visuals = await hydratePromptEnhancementVisuals(targetSession, targetThread, targetDraft);
-      const text = await enhancePrompt({
-        promptModel: studioRef.current.promptModel,
+      const artifact = await enhancePrompt({
+        promptModel: plannerModel,
         mode: targetThread.mode,
+        target: context.target,
+        workflow: context.workflow,
+        signature: context.signature,
         editMode: targetDraft.imageEditMode,
         editTarget: targetDraft.imageEditTarget,
         prompt: targetDraft.prompt,
         maskInstructions: targetDraft.maskInstructions,
-        hasMask,
-        references: targetDraft.references.flatMap((reference) => {
-          const asset = targetAssetMap.get(reference.assetId);
-          return asset ? [{ slot: reference.slot, name: asset.name, mediaType: asset.mimeType, role: reference.role }] : [];
-        }),
+        hasMask: context.hasMask,
+        references: context.references,
         visuals,
       }, (actualCostUsd) => {
         patchSession(targetSession.id, (current) => ({
@@ -1354,12 +1590,18 @@ export default function App() {
           ...current.threads,
           [targetThread.mode]: current.threads[targetThread.mode].map((item) => item.id === targetThread.id && item.revision === targetThread.revision ? {
             ...item,
-            draft: { ...item.draft, enhancedPrompt: text, enhancedPromptDirty: false, enhancedVisualCount: visuals.length },
+            draft: {
+              ...item.draft,
+              enhancedPrompt: artifact.prompt,
+              enhancedPromptDirty: false,
+              enhancedVisualCount: visuals.length,
+              enhancementArtifact: artifact,
+            },
             updatedAt: new Date().toISOString(),
           } : item),
         },
       }));
-      return text;
+      return artifact;
     } finally {
       setEnhancingThreadIds((current) => {
         const next = new Set(current);
@@ -1368,8 +1610,6 @@ export default function App() {
       });
     }
   };
-
-  const runEnhancement = () => enhanceThreadPrompt(session, thread);
 
   const hydrateThreadReferences = async (targetSession: StudioSession, targetThread: GenerationThread, targetDraft: GenerationDraftState): Promise<ReferenceAsset[]> => Promise.all(targetDraft.references.map(async (reference) => {
     const targetAssetMap = new Map(targetSession.assets.map((asset) => [asset.id, asset]));
@@ -1398,6 +1638,7 @@ export default function App() {
       mediaType: masked ? "image/png" : asset.mimeType,
       dataUrl: source,
       role: reference.role,
+      purpose: reference.purpose,
       slot: reference.slot,
     };
   }));
@@ -1418,7 +1659,11 @@ export default function App() {
       try {
         const value = JSON.parse(targetDraft.providerJson) as unknown;
         if (!value || Array.isArray(value) || typeof value !== "object") return t("jsonObjectRequired");
-      } catch { return t("invalidJson"); }
+        validateProviderConfiguration(targetDraft.providerJson, model);
+      } catch (error) {
+        try { JSON.parse(targetDraft.providerJson); } catch { return t("invalidJson"); }
+        return errorMessage(error);
+      }
     }
     const targetRoles = allowedAssetRoles(targetThread.mode, model);
     const targetAssets = new Map(targetSession.assets.map((asset) => [asset.id, asset]));
@@ -1443,6 +1688,12 @@ export default function App() {
       modelId: model.id,
       options: targetDraft.options,
     }));
+  };
+
+  const runEnhancement = async () => {
+    const validationError = validateThreadForRun(session, thread);
+    if (validationError) throw new Error(validationError);
+    return enhanceThreadPrompt(session, thread);
   };
 
   const patchAttempt = (sessionId: string, mode: GenerationMode, threadId: string, attemptId: string, patch: Partial<GenerationAttempt>) => {
@@ -1474,6 +1725,16 @@ export default function App() {
     const targetModelId = effectiveThreadModelId(targetSession, targetThread);
     const targetModel = catalogs[targetThread.mode].find((item) => item.id === targetModelId) ?? null;
     if (!targetModel) throw new Error("Choose a compatible model.");
+    const targetEnhancementContext = enhancementContext(
+      targetSession,
+      targetThread,
+      targetDraft,
+      targetModel,
+      studioRef.current.promptModel,
+    );
+    const cachedEnhancement = targetDraft.enhancementArtifact?.signature === targetEnhancementContext.signature
+      ? targetDraft.enhancementArtifact
+      : undefined;
     const attemptId = crypto.randomUUID();
     const createdAt = new Date().toISOString();
     const shouldEnhancePrompt = targetDraft.enhancePrompt && hasRunnableInstructions(targetThread.mode, targetDraft);
@@ -1495,6 +1756,7 @@ export default function App() {
         prompt: targetDraft.prompt,
         enhancePrompt: targetDraft.enhancePrompt,
         enhancedPrompt: targetDraft.enhancedPrompt,
+        enhancementArtifact: cachedEnhancement,
         options: structuredClone(targetDraft.options),
         providerJson: targetDraft.providerJson,
         assetBindings: targetDraft.references.map((reference) => ({ ...reference })),
@@ -1516,23 +1778,29 @@ export default function App() {
     setExecutingThreadIds((current) => new Set(current).add(targetThread.id));
     try {
       let prompt = targetDraft.prompt.trim();
+      let usedEnhancement: PromptEnhancementArtifact | undefined;
       if (shouldEnhancePrompt) {
-        if (targetDraft.enhancedPromptDirty && targetDraft.enhancedPrompt.trim()) {
-          prompt = targetDraft.enhancedPrompt.trim();
+        if (cachedEnhancement) {
+          usedEnhancement = cachedEnhancement;
+          prompt = targetDraft.enhancedPromptDirty
+            ? targetDraft.enhancedPrompt.trim()
+            : cachedEnhancement.prompt;
           const enhancedError = validateEnhancedPrompt(
             enhancementOriginalIntent(targetThread.mode, targetDraft),
             prompt,
             targetDraft.imageEditMode ? targetDraft.imageEditTarget : undefined,
             targetDraft.references.map((reference) => reference.slot),
+            targetDraft.references.map((reference) => reference.slot),
           );
           if (enhancedError) throw new Error(enhancedError);
         } else {
           try {
-            prompt = targetDraft.enhancedPrompt.trim() || await enhanceThreadPrompt(
+            usedEnhancement = await enhanceThreadPrompt(
               targetSession,
               targetThread,
               `prompt-enhancement:${attemptId}`,
             );
+            prompt = usedEnhancement.prompt;
           } catch (error) {
             const continueWithOriginal = await confirmAction(
               t("enhancementFailed"),
@@ -1540,9 +1808,11 @@ export default function App() {
               t("useOriginal"),
             );
             if (!continueWithOriginal) throw error;
+            usedEnhancement = undefined;
           }
         }
       }
+      const enhancedPrompt = prompt;
       prompt = targetThread.mode === "image" && targetDraft.imageEditMode
         ? composeEditPrompt({ prompt, target: targetDraft.imageEditTarget.trim(), hasMask: targetDraft.maskStrokes.length > 0, maskInstructions: targetDraft.maskInstructions })
         : prompt;
@@ -1551,16 +1821,47 @@ export default function App() {
         .find((item) => item.id === targetThread.id)?.attempts
         .find((item) => item.id === attemptId)?.status;
       if (currentAttemptStatus === "canceled") return;
-      patchAttempt(targetSession.id, targetThread.mode, targetThread.id, attemptId, { status: "submitting" });
-      const payload = buildRequest({
+      patchAttempt(targetSession.id, targetThread.mode, targetThread.id, attemptId, {
+        status: "submitting",
+        enhancedPrompt: usedEnhancement ? enhancedPrompt : undefined,
+        snapshot: attempt.snapshot ? {
+          ...attempt.snapshot,
+          enhancedPrompt: usedEnhancement ? enhancedPrompt : "",
+          enhancementArtifact: usedEnhancement,
+        } : undefined,
+      });
+      const hydratedReferences = await hydrateThreadReferences(targetSession, targetThread, targetDraft);
+      const generationDraft = {
         mode: targetThread.mode,
         model: targetModelId,
         prompt,
-        assets: await hydrateThreadReferences(targetSession, targetThread, targetDraft),
+        assets: hydratedReferences,
         options: targetDraft.options,
         providerJson: targetDraft.providerJson,
-      }, targetModel);
-      patchAttempt(targetSession.id, targetThread.mode, targetThread.id, attemptId, { request: JSON.parse(prettyRequest(payload)) as Record<string, unknown>, submittedAt: new Date().toISOString() });
+        editTargetSlot: targetDraft.imageEditMode
+          ? Number(targetDraft.imageEditTarget.match(/^@(\d+)$/)?.[1] ?? 0) || undefined
+          : undefined,
+        negativePrompt: usedEnhancement?.negativePrompt,
+      };
+      const payload = buildRequest(generationDraft, targetModel);
+      const referenceCoverage = referenceCoverageReport(
+        generationDraft,
+        targetModel,
+        payload,
+        usedEnhancement?.referencePriorities,
+      );
+      const coverageError = validateReferenceCoverage(referenceCoverage);
+      if (coverageError) throw new Error(coverageError);
+      patchAttempt(targetSession.id, targetThread.mode, targetThread.id, attemptId, {
+        request: JSON.parse(prettyRequest(payload)) as Record<string, unknown>,
+        submittedAt: new Date().toISOString(),
+        snapshot: attempt.snapshot ? {
+          ...attempt.snapshot,
+          enhancedPrompt: usedEnhancement ? enhancedPrompt : "",
+          enhancementArtifact: usedEnhancement,
+          referenceCoverage,
+        } : undefined,
+      });
       if (targetThread.mode === "image") {
         const result = await generateImage(payload, (actualCostUsd) => {
           recordGenerationCost(targetSession.id, "image", targetThread.id, attemptId, actualCostUsd);
@@ -1853,7 +2154,7 @@ export default function App() {
     [draft.prompt, draft.references],
   );
   const hasMask = mode === "image" && draft.imageEditMode && draft.maskStrokes.length > 0;
-  const canGenerate = Boolean(selectedModel && hasRunnableInstructions(mode, draft) && !providerError && !inputValidationError && !generationValidationError && credential?.configured && !generating && !enhancing && !activeAttempt);
+  const canGenerate = Boolean(selectedModel && hasRunnableInstructions(mode, draft) && !providerError && !requestBuildError && !inputValidationError && !generationValidationError && credential?.configured && !generating && !enhancing && !activeAttempt);
   const sessionSpendUsd = session.costLedger.reduce((total, entry) => total + entry.actualCostUsd, 0);
   const latestAttempt = thread.attempts.at(-1);
   const latestGenerationFailure = latestAttempt && (latestAttempt.status === "failed" || latestAttempt.status === "uncertain") && latestAttempt.error
@@ -2262,7 +2563,20 @@ export default function App() {
             {mode === "image" ? (
               <Field.Root className="edit-mode-row">
                 <Field.Label className="edit-mode-label" nativeLabel={false} render={<div />}><span><strong>{t("editMode")}</strong><small>{t("editModeHint")}</small></span></Field.Label>
-                <Switch checked={draft.imageEditMode} onCheckedChange={(value) => patchDraft({ imageEditMode: value })} />
+                <Switch checked={draft.imageEditMode} onCheckedChange={(value) => {
+                  const references = draft.references.map((reference) => {
+                    const isTarget = value && `@${reference.slot}` === draft.imageEditTarget;
+                    if (isTarget) return markReferenceAsEditTarget(reference);
+                    if (reference.purpose !== "edit_target") return reference;
+                    return restoreReferenceAfterEditTarget(reference, assetMap.get(reference.assetId)?.kind ?? "image");
+                  });
+                  patchDraft({
+                    imageEditMode: value,
+                    references,
+                    enhancedPrompt: "",
+                    enhancedPromptDirty: false,
+                  });
+                }} />
               </Field.Root>
             ) : null}
             {mode === "image" && draft.imageEditMode ? (
@@ -2287,10 +2601,27 @@ export default function App() {
                 {editTargetError ? <div className="field-error edit-canvas-error">{editTargetError}</div> : null}
               </>
             ) : null}
-            <InputTray references={draft.references} assets={session.assets} roles={roles} roleOptions={roleOptions} limit={referenceLimit} error={inputValidationError} onChange={(references) => {
-              const targetStillAttached = references.some((reference) => `@${reference.slot}` === draft.imageEditTarget);
+            <InputTray
+              references={draft.references}
+              assets={session.assets}
+              roles={roles}
+              roleOptions={roleOptions}
+              lockedPurposes={mode === "image" && draft.imageEditMode
+                ? Object.fromEntries(draft.references
+                  .filter((reference) => `@${reference.slot}` === draft.imageEditTarget)
+                  .map((reference) => [reference.slot, "edit_target" as const]))
+                : undefined}
+              limit={referenceLimit}
+              error={inputValidationError}
+              onChange={(references) => {
+              const normalizedReferences = mode === "image" && draft.imageEditMode
+                ? references.map((reference) => `@${reference.slot}` === draft.imageEditTarget
+                  ? markReferenceAsEditTarget(reference)
+                  : reference)
+                : references;
+              const targetStillAttached = normalizedReferences.some((reference) => `@${reference.slot}` === draft.imageEditTarget);
               patchDraft({
-                references,
+                references: normalizedReferences,
                 imageEditTarget: mode === "image" && draft.imageEditMode && !targetStillAttached ? "" : draft.imageEditTarget,
                 maskStrokes: mode === "image" && draft.imageEditMode && !targetStillAttached ? [] : draft.maskStrokes,
                 maskInstructions: mode === "image" && draft.imageEditMode && !targetStillAttached ? "" : draft.maskInstructions,
@@ -2350,20 +2681,37 @@ export default function App() {
             </Field.Root>
 
             <Field.Root className="enhance-row">
-              <Field.Label className="enhance-label" nativeLabel={false} render={<div />}><span><Sparkles /><span><strong>{t("promptEnhancement")}</strong><small>{studio.promptModel.endsWith("luna") ? "GPT-5.6 Luna · xhigh" : "GPT-5.6 Terra · high"}{draft.enhancedPrompt && draft.enhancedVisualCount > 0 ? ` · ${t("visualContextIncluded")}` : ""}</small></span></span></Field.Label>
-              <div><Button size="xs" variant="ghost" disabled={enhancing || !hasRunnableInstructions(mode, draft)} onClick={() => void runEnhancement().catch((error) => toast.error(errorMessage(error)))}>{enhancing ? <LoaderCircle className="spin" /> : <RefreshCw />} {draft.enhancedPrompt ? t("reEnhance") : t("preview")}</Button><Switch checked={draft.enhancePrompt && hasRunnableInstructions(mode, draft)} disabled={!hasRunnableInstructions(mode, draft)} onCheckedChange={(value) => patchDraft({ enhancePrompt: value })} /></div>
+              <Field.Label className="enhance-label" nativeLabel={false} render={<div />}><span><Sparkles /><span><strong>{t("promptEnhancement")}</strong><small>{studio.promptModel.endsWith("luna") ? "GPT-5.6 Luna · xhigh" : "GPT-5.6 Terra · high"}{displayedEnhancedPrompt && draft.enhancedVisualCount > 0 ? ` · ${t("visualContextIncluded")}` : ""}</small></span></span></Field.Label>
+              <div><Button size="xs" variant="ghost" disabled={enhancing || !hasRunnableInstructions(mode, draft)} onClick={() => void runEnhancement().catch((error) => toast.error(errorMessage(error)))}>{enhancing ? <LoaderCircle className="spin" /> : <RefreshCw />} {displayedEnhancedPrompt ? t("reEnhance") : t("preview")}</Button><Switch checked={draft.enhancePrompt && hasRunnableInstructions(mode, draft)} disabled={!hasRunnableInstructions(mode, draft)} onCheckedChange={(value) => patchDraft({ enhancePrompt: value })} /></div>
             </Field.Root>
-            {draft.enhancedPrompt ? (
+            {displayedEnhancedPrompt ? (
               <Collapsible.Root className="enhanced-prompt">
                 <Collapsible.Trigger>{t("enhancedPrompt")} <ChevronRight /></Collapsible.Trigger>
                 <Collapsible.Panel>
-                  <Textarea value={draft.enhancedPrompt} rows={6} onChange={(event) => patchDraft({ enhancedPrompt: event.target.value, enhancedPromptDirty: true })} />
+                  <Textarea value={displayedEnhancedPrompt} rows={6} onChange={(event) => patchDraft({ enhancedPrompt: event.target.value, enhancedPromptDirty: true })} />
                   <small>{t("enhancedPromptHint")}</small>
+                  {draft.enhancementArtifact?.negativePrompt != null ? (
+                    <Field.Root className="enhanced-negative-prompt">
+                      <Field.Label>{t("enhancedNegativePrompt")}</Field.Label>
+                      <Textarea
+                        value={draft.enhancementArtifact.negativePrompt}
+                        rows={3}
+                        onChange={(event) => patchDraft({
+                          enhancementArtifact: draft.enhancementArtifact
+                            ? { ...draft.enhancementArtifact, negativePrompt: event.target.value }
+                            : undefined,
+                          enhancedPromptDirty: true,
+                        })}
+                      />
+                      <small>{t("enhancedNegativePromptHint")}</small>
+                    </Field.Root>
+                  ) : null}
                 </Collapsible.Panel>
               </Collapsible.Root>
             ) : null}
 
             <OptionsFields key={`${mode}:${selectedModel?.id ?? ""}`} mode={mode} model={selectedModel} options={draft.options} providerJson={draft.providerJson} providerError={providerError} onOptionsChange={(options) => patchDraft({ options })} onProviderJsonChange={(providerJson) => patchDraft({ providerJson })} />
+            {requestBuildError && !providerError ? <div className="field-error request-build-error">{requestBuildError}</div> : null}
             {selectedModel ? <div className="thread-default-controls">
               <Button type="button" size="xs" variant="ghost" disabled={!thread.modelOverrideId && !Object.keys(thread.optionOverrides).length && thread.providerJsonOverride == null} onClick={useModeDefaults}>{t("useModeDefault")}</Button>
               <Button type="button" size="xs" variant="ghost" onClick={setCurrentAsModeDefault}>{t("setModeDefault")}</Button>
@@ -2372,7 +2720,7 @@ export default function App() {
           <footer className="generate-bar">
             <div className="generate-meta">
               <div><span>{selectedModel ? t("requestFields", { count: Object.keys(requestPayload).length }) : t("noModelSelected")}</span><small>{mode === "video" ? t("backgroundJobs", { count: sessionVideoJobs.length }) : t("commandGenerate")}</small></div>
-              <RequestPreviewDialog mode={mode} request={prettyRequest(requestPayload)} references={previewReferences} />
+              <RequestPreviewDialog mode={mode} request={prettyRequest(requestPayload)} references={previewReferences} coverage={previewCoverage} error={requestBuildError} />
             </div>
             <Button size="lg" className="generate-button" aria-keyshortcuts="Meta+Enter" disabled={!canGenerate} onClick={() => void runGeneration()}>
               {generating || enhancing ? <LoaderCircle className="spin" /> : mode === "image" ? <Sparkles /> : <Play />}

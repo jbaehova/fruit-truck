@@ -4,6 +4,7 @@ import {
   allowedAssetRoles,
   buildRequest,
   defaultOptions,
+  enhancePrompt,
   estimateGenerationCost,
   formatUsd,
   modelPriceLabel,
@@ -11,22 +12,62 @@ import {
   promptEnhancementUserContent,
   promptEnhancerInstruction,
   validateEnhancedPrompt,
+  validateProviderConfiguration,
   modelInputSignature,
   normalizeVideoStatus,
   prettyRequest,
+  referenceCoverageReport,
   retryDelayMs,
+  validateReferenceCoverage,
   type ImageModel,
+  type PromptEnhancementInput,
   type ReferenceAsset,
   type VideoModel,
 } from "./openrouter.ts";
+import { PROMPT_PLAN_RESPONSE_FORMAT } from "./prompting/index.ts";
 
-const asset = (role: ReferenceAsset["role"], name: string = role, mediaType = "image/png", slot = 1): ReferenceAsset => ({
+const asset = (
+  role: ReferenceAsset["role"],
+  name: string = role,
+  mediaType = "image/png",
+  slot = 1,
+  purpose: ReferenceAsset["purpose"] = role === "first_frame"
+    ? "first_frame"
+    : role === "last_frame"
+      ? "last_frame"
+      : mediaType.startsWith("video/")
+        ? "motion"
+        : mediaType.startsWith("audio/")
+          ? "audio"
+          : "subject_identity",
+): ReferenceAsset => ({
   id: name,
   name: `${name}.${mediaType.startsWith("video/") ? "mp4" : "png"}`,
   mediaType,
   dataUrl: `data:${mediaType};base64,${name}`,
   role,
+  purpose,
   slot,
+});
+
+const promptTarget = (overrides: Partial<PromptEnhancementInput["target"]> = {}): PromptEnhancementInput["target"] => ({
+  id: "example/image",
+  name: "Example Image",
+  options: {},
+  providerJson: "",
+  ...overrides,
+});
+
+const enhancementInput = (overrides: Partial<PromptEnhancementInput> = {}): PromptEnhancementInput => ({
+  promptModel: "openai/gpt-5.6",
+  mode: "image",
+  target: promptTarget(),
+  workflow: "text_to_image",
+  signature: "test-signature",
+  prompt: "Create a polished image.",
+  references: [],
+  visuals: [],
+  ...overrides,
 });
 
 test("image request includes only discovered capabilities", () => {
@@ -36,25 +77,54 @@ test("image request includes only discovered capabilities", () => {
     supported_parameters: {
       resolution: { type: "enum", values: ["1K", "2K"] },
       n: { type: "range", min: 1, max: 2 },
-      input_references: { type: "range", min: 0, max: 1 },
+      input_references: { type: "range", min: 0, max: 2 },
     },
   };
   const request = buildRequest({
     mode: "image",
     model: model.id,
     prompt: "  hello  ",
-    assets: [asset("reference", "one"), asset("reference", "two", "image/png", 2)],
+    assets: [
+      asset("reference", "one", "image/png", 1, "product_identity"),
+      asset("reference", "two", "image/png", 2, "style"),
+    ],
     options: { resolution: "2K", n: 1, quality: "high" },
     providerJson: "",
   }, model);
 
   assert.deepEqual(request, {
     model: model.id,
-    prompt: "Attached input mapping: @1 = one.png (reference). Preserve these identities exactly.\n\nhello",
+    prompt: "Use Image 1 for the product's shape, materials, colors, hardware, and logo placement; the requested prompt controls the surrounding scene.\nUse Image 2 only for visual style, palette, lighting, texture, and finish; follow the requested prompt for subjects and layout.\n\nhello",
     resolution: "2K",
     n: 1,
-    input_references: [{ type: "image_url", image_url: { url: "data:image/png;base64,one" } }],
+    input_references: [
+      { type: "image_url", image_url: { url: "data:image/png;base64,one" } },
+      { type: "image_url", image_url: { url: "data:image/png;base64,two" } },
+    ],
+    provider: { require_parameters: true },
   });
+});
+
+test("image request rejects references over the discovered limit", () => {
+  const model: ImageModel = {
+    id: "example/limited-image",
+    name: "Limited image",
+    supported_parameters: {
+      input_references: { type: "range", min: 0, max: 1 },
+    },
+  };
+
+  assert.throws(() => buildRequest({
+    mode: "image",
+    model: model.id,
+    prompt: "hello",
+    assets: [
+      asset("reference", "one", "image/png", 1, "product_identity"),
+      asset("reference", "two", "image/png", 2, "style"),
+    ],
+    options: {},
+    providerJson: "",
+  }, model), /at most 1 reference inputs; received 2/);
 });
 
 test("video request separates references from first and last frames", () => {
@@ -75,18 +145,18 @@ test("video request separates references from first and last frames", () => {
     mode: "video",
     model: model.id,
     prompt: "move forward",
-    assets: [asset("reference"), asset("first_frame"), asset("last_frame")],
+    assets: [asset("reference", "reference", "image/png", 1), asset("first_frame", "first", "image/png", 2), asset("last_frame", "last", "image/png", 3)],
     options: { duration: 8, resolution: "720p", aspect_ratio: "16:9", size: "854x480", generate_audio: false, seed: 42, quality: "high" },
     providerJson: "{\"order\":[\"Alibaba\"]}",
   }, model);
 
   assert.equal((request.input_references as unknown[]).length, 1);
-  assert.match(String(request.prompt), /@1 = reference.png/);
+  assert.match(String(request.prompt), /Use Image 1 for the subject's defining identity and proportions/);
   assert.deepEqual((request.frame_images as Array<{ frame_type: string }>).map((item) => item.frame_type), ["first_frame", "last_frame"]);
   assert.equal(request.quality, undefined);
   assert.equal(request.size, undefined);
   assert.equal(request.seed, 42);
-  assert.deepEqual(request.provider, { order: ["Alibaba"] });
+  assert.deepEqual(request.provider, { order: ["Alibaba"], require_parameters: true });
 });
 
 test("video generation serializes declared image and video reference inputs", () => {
@@ -116,6 +186,217 @@ test("video generation serializes declared image and video reference inputs", ()
     providerJson: "",
   }, declared);
   assert.deepEqual(request.input_references, [{ type: "video_url", video_url: { url: "data:video/mp4;base64,source" } }]);
+
+  const videoOnly = { ...declared, id: "example/video-only", input_reference_types: ["video" as const] };
+  assert.deepEqual(allowedAssetRoles("video", videoOnly), ["reference"]);
+});
+
+test("video frame inputs must be images", () => {
+  const model: VideoModel = {
+    id: "example/frames",
+    name: "Frames",
+    supported_frame_images: ["first_frame"],
+  };
+  assert.throws(() => buildRequest({
+    mode: "video",
+    model: model.id,
+    prompt: "animate",
+    assets: [asset("first_frame", "clip", "video/mp4", 1, "first_frame")],
+    options: {},
+    providerJson: "",
+  }, model), /does not accept first frame inputs/);
+});
+
+test("request prompt translates @slots to the selected provider's reference labels", () => {
+  const model: VideoModel = {
+    id: "runway/gen-4.5",
+    name: "Runway Gen-4.5",
+    input_reference_types: ["image"],
+    max_input_references: 2,
+  };
+  const request = buildRequest({
+    mode: "video",
+    model: model.id,
+    prompt: "Animate @1 while preserving the palette from @2.",
+    assets: [
+      asset("reference", "hero", "image/png", 1, "character"),
+      asset("reference", "palette", "image/png", 2, "style"),
+    ],
+    options: {},
+    providerJson: "",
+  }, model);
+
+  assert.match(String(request.prompt), /Animate @\[Image 1\] while preserving the palette from @\[Image 2\]\./);
+  assert.doesNotMatch(String(request.prompt), /@1|@2/);
+});
+
+test("OpenAI image edit requests put the explicit target first and preserve slot labels", () => {
+  const model: ImageModel = {
+    id: "openai/gpt-image-1",
+    name: "GPT Image 1",
+    supported_parameters: {
+      input_references: { type: "range", min: 0, max: 2 },
+    },
+  };
+  const request = buildRequest({
+    mode: "image",
+    model: model.id,
+    prompt: "Edit @2 using @1 as context.",
+    assets: [
+      asset("reference", "context", "image/png", 1, "composition"),
+      asset("reference", "target", "image/png", 2, "edit_target"),
+    ],
+    editTargetSlot: 2,
+    options: {},
+    providerJson: "",
+  }, model);
+
+  assert.deepEqual(request.input_references, [
+    { type: "image_url", image_url: { url: "data:image/png;base64,target" } },
+    { type: "image_url", image_url: { url: "data:image/png;base64,context" } },
+  ]);
+  assert.equal(request.prompt, "Edit Image 1 using Image 2 as context.");
+
+  const coverage = referenceCoverageReport({
+    mode: "image",
+    model: model.id,
+    prompt: "Edit @2 using @1 as context.",
+    assets: [
+      asset("reference", "context", "image/png", 1, "composition"),
+      asset("reference", "target", "image/png", 2, "edit_target"),
+    ],
+    editTargetSlot: 2,
+    options: {},
+    providerJson: "",
+  }, model, request);
+  assert.deepEqual(coverage.map((entry) => [entry.slot, entry.providerLabel, entry.severity]), [
+    [1, "Image 2", "ok"],
+    [2, "Image 1", "ok"],
+  ]);
+  assert.equal(validateReferenceCoverage(coverage), null);
+});
+
+test("GPT Image 2 omits the immutable input_fidelity parameter", () => {
+  const model: ImageModel = {
+    id: "openai/gpt-image-2",
+    name: "GPT Image 2",
+    supported_parameters: {
+      input_fidelity: { type: "enum", values: ["low", "high"] },
+    },
+  };
+  assert.equal(defaultOptions("image", model).input_fidelity, undefined);
+  const request = buildRequest({
+    mode: "image",
+    model: model.id,
+    prompt: "a product photo",
+    assets: [],
+    options: { input_fidelity: "high" },
+    providerJson: "",
+  }, model);
+  assert.equal(request.input_fidelity, undefined);
+});
+
+test("negative prompts use a native image field when supported and inline constraints otherwise", () => {
+  const nativeModel: ImageModel = {
+    id: "openai/gpt-image-1",
+    name: "GPT Image 1",
+    supported_parameters: {
+      negative_prompt: { type: "boolean" },
+    },
+  };
+  const native = buildRequest({
+    mode: "image",
+    model: nativeModel.id,
+    prompt: "a red apple",
+    negativePrompt: "extra logos",
+    assets: [],
+    options: {},
+    providerJson: "",
+  }, nativeModel);
+  assert.equal(native.prompt, "a red apple");
+  assert.equal(native.negative_prompt, "extra logos");
+
+  const inlineModel: ImageModel = {
+    id: "example/inline-negative",
+    name: "Inline negative image",
+    supported_parameters: {},
+  };
+  const inline = buildRequest({
+    mode: "image",
+    model: inlineModel.id,
+    prompt: "a red apple",
+    negativePrompt: "extra logos",
+    assets: [],
+    options: {},
+    providerJson: "",
+  }, inlineModel);
+  assert.equal(inline.prompt, "a red apple\nConstraints: extra logos");
+  assert.equal(inline.negative_prompt, undefined);
+
+  const videoModel: VideoModel = {
+    id: "google/veo-example",
+    name: "Veo",
+    allowed_passthrough_parameters: ["negative_prompt"],
+  };
+  const video = buildRequest({
+    mode: "video",
+    model: videoModel.id,
+    prompt: "a calm tracking shot",
+    negativePrompt: "flicker",
+    assets: [],
+    options: {},
+    providerJson: "",
+  }, videoModel);
+  assert.equal(video.prompt, "a calm tracking shot");
+  assert.equal(video.negative_prompt, "flicker");
+});
+
+test("provider passthrough parameters require an endpoint allowlist", () => {
+  const model: VideoModel = {
+    id: "example/video",
+    name: "Video",
+    allowed_passthrough_parameters: ["personGeneration"],
+  };
+  assert.throws(() => buildRequest({
+    mode: "video",
+    model: model.id,
+    prompt: "a portrait",
+    assets: [],
+    options: {},
+    providerJson: JSON.stringify({ options: { provider: { parameters: { undocumented: true } } } }),
+  }, model), /not declared by the selected endpoint/);
+  assert.throws(() => validateProviderConfiguration(
+    JSON.stringify({ options: { provider: { parameters: { undocumented: true } } } }),
+    model,
+  ), /not declared by the selected endpoint/);
+});
+
+test("optional reference coverage warns without blocking required inputs", () => {
+  const model: ImageModel = {
+    id: "example/image",
+    name: "Example Image",
+    supported_parameters: { input_references: { type: "range", min: 0, max: 2 } },
+  };
+  const draft = {
+    mode: "image" as const,
+    model: model.id,
+    prompt: "Use @1 and optionally @2.",
+    assets: [
+      asset("reference", "required", "image/png", 1, "product_identity"),
+      asset("reference", "optional", "image/png", 2, "style"),
+    ],
+    options: {},
+    providerJson: "",
+  };
+  const coverage = referenceCoverageReport(draft, model, { prompt: "Image 1" }, {
+    1: "required",
+    2: "optional",
+  });
+  assert.deepEqual(coverage.map((entry) => [entry.slot, entry.priority, entry.severity]), [
+    [1, "required", "ok"],
+    [2, "optional", "warning"],
+  ]);
+  assert.equal(validateReferenceCoverage(coverage), null);
 });
 
 test("video statuses preserve every OpenRouter terminal state and fail safely", () => {
@@ -128,31 +409,36 @@ test("video statuses preserve every OpenRouter terminal state and fail safely", 
 });
 
 test("image edit enhancement distinguishes the target from context references", () => {
-  const instruction = productSystemInstruction({
+  const instruction = productSystemInstruction(enhancementInput({
     mode: "image",
     editMode: true,
     editTarget: "@2",
     hasMask: false,
+    target: promptTarget({ id: "openai/gpt-image-1", name: "GPT Image 1" }),
+    workflow: "image_edit",
     references: [],
     visuals: [],
-  });
+  }));
   assert.match(instruction, /explicit edit target is "@2"/);
   assert.match(instruction, /other numbered images are context only/);
   assert.doesNotMatch(instruction, /Rewrite the user's request/);
-  assert.match(promptEnhancerInstruction(), /instead of forcing a fixed schema/);
+  assert.match(promptEnhancerInstruction(), /Return only the requested JSON object/);
   assert.equal(validateEnhancedPrompt("Keep @1, copy @2", "Keep @1 and copy @2"), null);
   assert.match(validateEnhancedPrompt("Keep @1", "Keep @1 and use @3") ?? "", /invented @3/);
-  assert.equal(validateEnhancedPrompt("Keep @1; @4 is plain text", "Keep @1", undefined, [1]), null);
+  assert.match(validateEnhancedPrompt("Keep @1; @4 is plain text", "Keep @1", undefined, [1]) ?? "", /removed @4/);
 });
 
 test("prompt enhancement sends text first and labels image visual inputs", () => {
-  const content = promptEnhancementUserContent({
+  const content = promptEnhancementUserContent(enhancementInput({
     promptModel: "openai/gpt-5.6-luna",
     mode: "video",
+    target: promptTarget({ id: "runway/gen-4.5", name: "Runway Gen-4.5" }),
+    workflow: "image_to_video",
+    signature: "video-signature",
     prompt: "Use @1 to generate a rainy night.",
     maskInstructions: "",
     hasMask: false,
-    references: [{ slot: 1, name: "source.png", mediaType: "image/png", role: "reference" }],
+    references: [{ slot: 1, name: "source.png", mediaType: "image/png", role: "reference", purpose: "subject_identity" }],
     visuals: [{
       id: "source",
       kind: "reference" as const,
@@ -161,21 +447,150 @@ test("prompt enhancement sends text first and labels image visual inputs", () =>
       name: "source.png",
       role: "reference" as const,
     }],
-  });
+  }));
 
   assert.equal(content[0]?.type, "text");
   assert.match(content[0]?.type === "text" ? content[0].text : "", /Visual 1: @1 source\.png \(reference, reference\)/);
+  assert.match(content[0]?.type === "text" ? content[0].text : "", /semantic purpose=subject_identity/);
   assert.deepEqual(content.slice(1).map((part) => part.type), ["image_url"]);
   assert.doesNotMatch(JSON.stringify(content), /video_url/);
 });
 
+test("enhancePrompt sends the structured planner schema with target workflow and signature", async () => {
+  const plannerPlan = {
+    version: 1,
+    mode: "image",
+    workflow: "text_to_image",
+    language: "en",
+    deliverable: "a polished product image",
+    intent: "show the product clearly",
+    scene: ["a quiet studio"],
+    subjects: ["a red apple"],
+    action: ["rests on a table"],
+    composition: ["centered medium shot"],
+    camera: ["eye level"],
+    lighting: ["softbox lighting"],
+    color: ["warm red"],
+    style: ["clean commercial"],
+    materials: ["smooth skin"],
+    exactText: [],
+    temporalBeats: [],
+    subjectMotion: [],
+    cameraMotion: [],
+    audio: [],
+    editChanges: [],
+    preserve: ["the product identity"],
+    ambiguities: [],
+    constraints: [{ requirement: "no extra logos", desiredState: "only the requested logo is visible" }],
+    references: [{
+      slot: 1,
+      target: "the product",
+      purpose: "product_identity",
+      priority: "required",
+      evidence: "user",
+      copy: ["shape and label geometry"],
+      preserve: ["silhouette"],
+      ignore: ["unrelated background details"],
+    }],
+  };
+  const input = enhancementInput({
+    promptModel: "openai/gpt-5.6",
+    target: promptTarget({ id: "openai/gpt-image-1", name: "GPT Image 1" }),
+    workflow: "text_to_image",
+    signature: "planner-signature",
+    prompt: "Create a product image using @1.",
+    references: [{
+      slot: 1,
+      name: "product.png",
+      mediaType: "image/png",
+      role: "reference",
+      purpose: "product_identity",
+    }],
+  });
+  const runtime = globalThis as unknown as {
+    window?: { localStorage: { getItem: (key: string) => string | null } };
+  };
+  const previousWindow = runtime.window;
+  const previousFetch = globalThis.fetch;
+  const requestBodies: Array<Record<string, unknown>> = [];
+  runtime.window = { localStorage: { getItem: () => null } };
+  globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    requestBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+    const repairing = requestBodies.length === 1;
+    return {
+      ok: true,
+      json: async () => ({
+        choices: [{ message: { content: repairing ? "{}" : JSON.stringify(plannerPlan) } }],
+        usage: { cost: repairing ? 0.001 : 0.0123 },
+      }),
+    } as Response;
+  }) as typeof fetch;
+
+  try {
+    let actualCost: number | undefined;
+    const artifact = await enhancePrompt(input, (cost) => { actualCost = cost; });
+    const body = requestBodies[0];
+    assert.deepEqual(body?.response_format, PROMPT_PLAN_RESPONSE_FORMAT);
+    assert.deepEqual(body?.provider, { require_parameters: true });
+    assert.equal(body?.model, input.promptModel);
+    assert.equal(actualCost, 0.0133);
+    assert.equal(requestBodies.length, 2);
+    assert.equal(artifact.repairAttempts, 1);
+    assert.equal(artifact.target.id, input.target.id);
+    assert.ok(artifact.profileSources.length > 0);
+    assert.equal(artifact.signature, input.signature);
+    assert.equal(artifact.workflow, input.workflow);
+    assert.match(artifact.prompt, /@1/);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousWindow) runtime.window = previousWindow;
+    else delete runtime.window;
+  }
+});
+
+test("enhancePrompt reports accumulated planner cost when the repair request fails", async () => {
+  const runtime = globalThis as unknown as {
+    window?: { localStorage: { getItem: (key: string) => string | null } };
+  };
+  const previousWindow = runtime.window;
+  const previousFetch = globalThis.fetch;
+  let calls = 0;
+  runtime.window = { localStorage: { getItem: () => null } };
+  globalThis.fetch = (async () => {
+    calls += 1;
+    if (calls === 1) {
+      return {
+        ok: true,
+        json: async () => ({ choices: [{ message: { content: "{}" } }], usage: { cost: 0.0042 } }),
+      } as Response;
+    }
+    throw new Error("repair transport failed");
+  }) as typeof fetch;
+
+  try {
+    let actualCost: number | undefined;
+    await assert.rejects(
+      enhancePrompt(enhancementInput(), (cost) => { actualCost = cost; }),
+      /repair transport failed/,
+    );
+    assert.equal(calls, 2);
+    assert.equal(actualCost, 0.0042);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousWindow) runtime.window = previousWindow;
+    else delete runtime.window;
+  }
+});
+
 test("masked enhancement does not claim a visual guide when only the target image is available", () => {
-  const instruction = productSystemInstruction({
+  const instruction = productSystemInstruction(enhancementInput({
     mode: "image",
     editMode: true,
     editTarget: "@1",
     hasMask: true,
     maskInstructions: "Turn the selected feathers black.",
+    target: promptTarget({ id: "openai/gpt-image-1", name: "GPT Image 1" }),
+    workflow: "inpaint",
     references: [],
     visuals: [{
       id: "target",
@@ -185,7 +600,7 @@ test("masked enhancement does not claim a visual guide when only the target imag
       name: "target.png",
       role: "reference",
     }],
-  });
+  }));
 
   assert.match(instruction, /No visual mask-guide image is supplied/);
   assert.doesNotMatch(instruction, /magenta mask-guide view are supplied/);
