@@ -12,6 +12,6 @@ agent-kit/dist/
 *.log
 apps/desktop/src-tauri/gen/
 
-.agent
+.agents/
 AGENTS.md
 run.sh
