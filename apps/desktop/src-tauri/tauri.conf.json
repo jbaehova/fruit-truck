@@ -2,7 +2,7 @@
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Fruit Truck",
   "mainBinaryName": "Fruit Truck",
-  "version": "0.6.4",
+  "version": "0.6.5",
   "identifier": "ui.fruittruck.desktop",
   "build": {
     "frontendDist": "../dist",

@@ -7,8 +7,8 @@ catalog does not, by itself, make every OpenRouter endpoint available here.
 | Capability | OpenRouter endpoint | Status | Notes |
 | --- | --- | --- | --- |
 | Text-to-image and image editing | `/api/v1/images` | Supported | Controls and reference slots are limited to the selected model's verified endpoint capabilities. |
-| Image partial progress (SSE) | `/api/v1/images` | Endpoint-gated | Fruit Truck includes `stream: true` in the reviewed request only when the selected definitive endpoint declares streaming, consumes bounded SSE, and records partial progress. |
-| Text-to-video | `/api/v1/videos` | Supported | The request must satisfy the selected model and endpoint contract. Jobs are polled and kept with the session. |
+| Image partial progress (SSE) | `/api/v1/images` | Endpoint- and combination-gated | Fruit Truck includes `stream: true` only for a definitive streaming endpoint with one text-only output. Multi-output and reference requests stay buffered until OpenRouter exposes or passes a definitive combination contract. |
+| Text-to-video | `/api/v1/videos` | Supported | The OpenRouter video-catalog record is authoritative for text-only controls and pricing. Jobs are polled and kept with the session; provider/privacy metadata remains unverified when the catalog supplies no endpoint record. |
 | Prompt enhancement | `/api/v1/chat/completions` | Optional, supported | This is a separate planner request, not a general-purpose chat mode. It can send the prompt and supported visual context to the selected planner model. |
 | Image/video/audio references for video | `/api/v1/videos` | Unavailable unless transport is verified | Local files cannot be assumed to work as provider references. Fruit Truck keeps these controls closed until a verified public HTTPS or signed-upload transport and endpoint capability are available. |
 | General chat, Responses, tools/function calling, TTS, STT, audio output, embeddings | Various OpenRouter endpoints | Not exposed | These endpoints are outside the current image/video studio scope. |

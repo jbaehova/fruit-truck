@@ -718,7 +718,7 @@ export function generationCostMetadata(
   context: GenerationCostContext = {},
 ): GenerationCostMetadata {
   const resolution = context.route
-    ? { selected: context.route, eligible: [context.route], definitive: context.route.endpointVerified }
+    ? { selected: context.route, eligible: [context.route], definitive: routeHasDefinitiveContract(context.route) }
     : resolveEligibleRoute({ mode, model, options, providerJson: context.providerJson });
   const routes = resolution.eligible.length ? resolution.eligible : resolution.selected ? [resolution.selected] : [];
   const estimates = routes
@@ -1539,6 +1539,7 @@ export type GenerationRoute = {
   pricingSkus?: Record<string, string>;
   supportsStreaming?: boolean;
   endpointVerified: boolean;
+  contractSource?: "endpoint" | "video_catalog" | "model_union";
   privacy: EndpointPrivacy;
   endpoint?: ImageModelEndpoint | VideoModelEndpoint;
 };
@@ -1551,6 +1552,14 @@ export type GenerationRouteResolution = {
   errors: CapabilityValidationIssue[];
   warnings: string[];
 };
+
+function routeHasDefinitiveContract(route: GenerationRoute | undefined): boolean {
+  if (!route) return false;
+  if (route.contractSource === "endpoint" || route.contractSource === "video_catalog") return true;
+  // Prepared artifacts created before contractSource existed remain safe:
+  // only an actually hydrated endpoint can retain definitive status.
+  return route.contractSource == null && route.endpointVerified;
+}
 
 function normalizedProvider(value: unknown): string {
   return normalizeModelSearchText(value).replace(/\s+/g, "");
@@ -1603,6 +1612,7 @@ function imageRoute(model: ImageModel, endpoint?: ImageModelEndpoint): Generatio
     pricing: endpoint ? endpoint.pricing : model.pricing,
     supportsStreaming: endpoint?.supports_streaming,
     endpointVerified: Boolean(endpoint),
+    contractSource: endpoint ? "endpoint" : "model_union",
     privacy: routePrivacy(endpoint, model),
     ...(endpoint ? { endpoint } : {}),
   };
@@ -1622,6 +1632,11 @@ function videoRoute(model: VideoModel, endpoint?: VideoModelEndpoint): Generatio
     pricingSkus: endpoint ? endpoint.pricing_skus ?? undefined : model.pricing_skus ?? undefined,
     supportsStreaming: endpoint?.supports_streaming,
     endpointVerified: Boolean(endpoint),
+    // Unlike the image catalog, OpenRouter's video catalog does not expose a
+    // per-model endpoint-details URL. Its model record is the authoritative
+    // contract for text-only video controls and pricing. Reference transports
+    // remain closed unless endpoint/fixture metadata proves them separately.
+    contractSource: endpoint ? "endpoint" : "video_catalog",
     privacy: routePrivacy(endpoint, model),
     ...(endpoint ? { endpoint } : {}),
   };
@@ -1712,11 +1727,12 @@ export function resolveEligibleRoute(
     }
   }
   const selected = eligible[0];
-  if (selected && !selected.endpointVerified) warnings.push("Endpoint metadata is not hydrated; model-level capability is a union and price/privacy may be uncertain.");
+  if (selected?.contractSource === "model_union") warnings.push("Endpoint metadata is not hydrated; model-level capability is a union and price/privacy may be uncertain.");
+  if (selected?.contractSource === "video_catalog") warnings.push("OpenRouter's video catalog is authoritative for text-only controls; provider/privacy and reference transport remain unverified.");
   return {
     selected,
     eligible,
-    definitive: Boolean(selected?.endpointVerified && eligible.length === 1),
+    definitive: routeHasDefinitiveContract(selected) && eligible.length === 1,
     provider,
     errors,
     warnings,
@@ -2009,7 +2025,7 @@ function buildRequestInternal(
   }
   const provider = parseProviderConfiguration(draft.providerJson);
   validateProviderPassthrough(provider, model, route);
-  if (strict && route && !route.providerSlug) {
+  if (strict && route && !route.providerSlug && route.contractSource !== "video_catalog") {
     throw new Error("The selected endpoint has no provider slug and cannot be pinned to the reviewed request.");
   }
   // A reviewed request must not silently fall through to another eligible
@@ -2310,7 +2326,13 @@ export function prepareRequest(
       // Streaming is selected only from the definitive endpoint contract and
       // becomes part of the immutable reviewed payload. No hidden transport
       // toggle is added after review.
-      if (effectiveDraft.mode === "image" && route.supportsStreaming === true) {
+      const outputCount = typeof payload.n === "number" ? payload.n : 1;
+      const hasInputReferences = Array.isArray(payload.input_references) && payload.input_references.length > 0;
+      // Live OpenRouter paid-contract checks prove native SSE for a single
+      // text-to-image output. OpenAI currently rejects stream + n>1 and
+      // stream + input_references even though those capabilities are each
+      // advertised independently, so keep combination support conservative.
+      if (effectiveDraft.mode === "image" && route.supportsStreaming === true && outputCount === 1 && !hasInputReferences) {
         payload = { ...payload, stream: true };
       }
     } catch (error) {

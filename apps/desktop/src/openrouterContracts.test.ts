@@ -114,7 +114,7 @@ test("strict preparation blocks unproven video data/local references and freezes
   assert.deepEqual(prepared.payload, prepared.sanitizedPayload);
 });
 
-test("final image preparation exposes the same immutable object for review and paid submission", () => {
+test("final image preparation disables SSE for unproven reference and multi-output combinations", () => {
   const model: ImageModel = {
     id: "example/image",
     name: "Image",
@@ -144,9 +144,59 @@ test("final image preparation exposes the same immutable object for review and p
   assert.equal(prepared.cost.totalMaxUsd, 0.16);
   assert.equal(prepared.privacy.zdr, "supported");
   assert.deepEqual((prepared.payload.provider as Record<string, unknown>).only, ["example"]);
-  assert.equal(prepared.payload.stream, true);
+  assert.equal(prepared.payload.stream, undefined);
   assert.equal(preparedRequestPayload(prepared), prepared.payload);
   assert.equal(Object.isFrozen(prepared.payload), true);
+});
+
+test("final image preparation enables SSE for the proven single text-to-image combination", () => {
+  const model: ImageModel = {
+    id: "example/image",
+    name: "Image",
+    supported_parameters: { n: { type: "range", min: 1, max: 4 } },
+    endpoint_details: [{
+      endpoint_id: "image-route",
+      provider_name: "Example Provider",
+      provider_slug: "example",
+      supported_parameters: { n: { type: "range", min: 1, max: 4 } },
+      supports_streaming: true,
+      pricing: [{ billable: "output_image", unit: "image", cost_usd: 0.08 }],
+    }],
+  };
+  const prepared = prepareRequest({
+    mode: "image",
+    model: model.id,
+    prompt: "a fruit truck",
+    assets: [],
+    options: { n: 1 },
+    providerJson: "",
+  }, model, { final: true });
+  assert.equal(prepared.status, "ready");
+  assert.equal(prepared.payload.stream, true);
+});
+
+test("live-shaped video catalog records are definitive for text-only paid requests", () => {
+  const model: VideoModel = {
+    id: "x-ai/grok-imagine-video",
+    name: "Grok Imagine Video",
+    supported_resolutions: ["480p", "720p"],
+    supported_aspect_ratios: ["1:1", "16:9"],
+    supported_durations: [1, 2],
+    pricing_skus: { cents_per_video_output_second_480p: "5" },
+  };
+  const prepared = prepareRequest({
+    mode: "video",
+    model: model.id,
+    prompt: "a fruit truck rolls forward",
+    assets: [],
+    options: { duration: 1, resolution: "480p", aspect_ratio: "1:1" },
+    providerJson: "",
+  }, model, { final: true });
+  assert.equal(prepared.status, "ready");
+  assert.equal(prepared.routeResolution.definitive, true);
+  assert.equal(prepared.route?.contractSource, "video_catalog");
+  assert.deepEqual(prepared.payload.provider, { require_parameters: true });
+  assert.equal(prepared.cost.generationMaxUsd, 0.05);
 });
 
 test("verified endpoint permits HTTPS video references but never HTTP/data/local by default", () => {
