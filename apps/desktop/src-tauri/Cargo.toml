@@ -1,6 +1,6 @@
 [package]
 name = "fruit-truck"
-version = "0.6.3"
+version = "0.6.4"
 description = "A lightweight OpenRouter image and video generation client"
 authors = ["Johnny Bae"]
 edition = "2021"
@@ -16,12 +16,22 @@ tauri-build = { version = "2.6.3", features = [] }
 [dependencies]
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+quick-xml = "0.41"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+sha2 = "0.10"
 tauri = { version = "2.11.3", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-process = "2.3.1"
 tauri-plugin-shell = "2"
 tauri-plugin-updater = "2.10.1"
+tokio = { version = "1.52", features = ["macros", "sync", "time"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "2.11"
+security-framework-sys = "2.17"
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,0 +1,69 @@
+{
+  "fixture": "openrouter-video-catalog",
+  "anonymized": true,
+  "contract": "catalog-v1",
+  "data": [
+    {
+      "id": "fixture/video-cinema",
+      "name": "Cinema Motion",
+      "description": "An anonymized image-to-video model used for contract tests.",
+      "architecture": {
+        "input_modalities": ["text", "image", "video", "audio"],
+        "output_modalities": ["video"]
+      },
+      "supported_parameters": {
+        "duration": { "type": "range", "min": 1, "max": 10 },
+        "resolution": { "type": "enum", "values": ["720p", "1080p"] },
+        "aspect_ratio": { "type": "enum", "values": ["16:9", "9:16"] },
+        "generate_audio": { "type": "boolean" }
+      },
+      "input_reference_types": ["image", "video", "audio"],
+      "max_input_references": 3,
+      "supported_resolutions": ["720p", "1080p"],
+      "supported_aspect_ratios": ["16:9", "9:16"],
+      "supported_durations": [5, 10],
+      "supported_frame_images": ["first_frame", "last_frame"],
+      "generate_audio": true,
+      "reference_transport_source": "contract_fixture"
+    },
+    {
+      "id": "fixture/video-story",
+      "name": "Story Motion",
+      "description": "An anonymized text-to-video model used for contract tests.",
+      "architecture": {
+        "input_modalities": ["text", "image"],
+        "output_modalities": ["video"]
+      },
+      "supported_parameters": {
+        "duration": { "type": "range", "min": 2, "max": 8 },
+        "resolution": { "type": "enum", "values": ["720p"] },
+        "aspect_ratio": { "type": "enum", "values": ["16:9"] }
+      },
+      "input_reference_types": ["image"],
+      "max_input_references": 1,
+      "supported_resolutions": ["720p"],
+      "supported_aspect_ratios": ["16:9"],
+      "supported_durations": [4, 8],
+      "supported_frame_images": ["first_frame"],
+      "generate_audio": false,
+      "reference_transport_source": "contract_fixture"
+    }
+  ],
+  "expected": {
+    "modelIds": ["fixture/video-cinema", "fixture/video-story"],
+    "minimumModels": 2,
+    "smoke": {
+      "fixture/video-cinema": {
+        "provider": "northstar-motion",
+        "options": { "duration": 5, "resolution": "1080p", "aspect_ratio": "16:9", "generate_audio": true },
+        "referenceCount": 1,
+        "referenceTransport": "https_url"
+      },
+      "fixture/video-story": {
+        "provider": "harbor-motion",
+        "options": { "duration": 4, "resolution": "720p", "aspect_ratio": "16:9" },
+        "referenceCount": 0
+      }
+    }
+  }
+}

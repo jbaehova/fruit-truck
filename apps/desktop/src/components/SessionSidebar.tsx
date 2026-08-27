@@ -16,6 +16,12 @@ function clampSidebarWidth(width: number) {
   return Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, width));
 }
 
+function localizedSessionName(name: string, t: ReturnType<typeof useI18n>["t"]) {
+  if (name === "First session") return t("firstSession");
+  const numbered = /^Session (\d+)$/.exec(name);
+  return numbered ? t("newSessionName", { count: numbered[1] }) : name;
+}
+
 export function SessionSidebar({
   sessions,
   activeId,
@@ -48,15 +54,15 @@ export function SessionSidebar({
   const filtered = useMemo(() => {
     const value = query.trim().toLowerCase();
     if (!value) return sessions;
-    return sessions.filter((session) => session.name.toLowerCase().includes(value));
-  }, [query, sessions]);
+    return sessions.filter((session) => localizedSessionName(session.name, t).toLowerCase().includes(value));
+  }, [query, sessions, t]);
   const tabbableSessionId = filtered.some((session) => session.id === activeId)
     ? activeId
     : filtered[0]?.id;
 
   useEffect(() => {
-    if (renaming) setName(renaming.name);
-  }, [renaming]);
+    if (renaming) setName(localizedSessionName(renaming.name, t));
+  }, [renaming, t]);
 
   const beginResize = (event: PointerEvent<HTMLDivElement>) => {
     event.preventDefault();
@@ -114,6 +120,7 @@ export function SessionSidebar({
           {!filtered.length ? <p className="session-empty">{t("noMatchingSessions")}</p> : null}
           {filtered.map((session) => {
             const active = session.id === activeId;
+            const displayName = localizedSessionName(session.name, t);
             const runningThreads = [...session.threads.image, ...session.threads.video]
               .filter((thread) => Boolean(activeGenerationAttempt(thread))).length;
             return (
@@ -143,7 +150,7 @@ export function SessionSidebar({
                 >
                   <span className="session-state">{active ? <Check /> : null}</span>
                   <span>
-                    <strong>{session.name}</strong>
+                    <strong>{displayName}</strong>
                     <small>{runningThreads
                       ? t("activeGenerations", { count: runningThreads })
                       : new Date(session.updatedAt).toLocaleString(locale)}</small>
@@ -154,7 +161,7 @@ export function SessionSidebar({
                     type="button"
                     variant="ghost"
                     size="icon-xs"
-                    aria-label={t("renameSessionNamed", { name: session.name })}
+                    aria-label={t("renameSessionNamed", { name: displayName })}
                     onClick={() => setRenameId(session.id)}
                   ><Pencil /></Button>
                   <Button
@@ -162,7 +169,7 @@ export function SessionSidebar({
                     variant="ghost"
                     size="icon-xs"
                     disabled={sessions.length === 1}
-                    aria-label={t("deleteSessionNamed", { name: session.name })}
+                    aria-label={t("deleteSessionNamed", { name: displayName })}
                     onClick={() => onDelete(session.id)}
                   ><Trash2 /></Button>
                 </div>

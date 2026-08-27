@@ -20,21 +20,32 @@ jobs:
         working-directory: apps/desktop
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
 
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
         with:
-          node-version: 24
+          node-version: 24.19.0
           cache: npm
           cache-dependency-path: |
             apps/desktop/package-lock.json
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: 1.96.0
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@67f0979373f19b7d59af7e976dfcb10ae9848006
+        with:
+          tool: cargo-llvm-cov@0.9.0
 
       - name: Install desktop dependencies
         run: npm ci
+
+      - name: Verify clean-checkout Quick Start contract
+        working-directory: .
+        run: ./run.sh --check
 
       - name: Install Chromium
         run: npx playwright install chromium
@@ -43,6 +54,7 @@ jobs:
         run: |
           npm run check
           npm run test:unit
+          npm run test:coverage
           npm run build
 
       - name: Run headless full-window E2E
@@ -55,26 +67,46 @@ jobs:
         working-directory: apps/desktop
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
 
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
         with:
-          node-version: 24
+          node-version: 24.19.0
           cache: npm
           cache-dependency-path: |
             apps/desktop/package-lock.json
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: 1.96.0
 
       - name: Install desktop dependencies
         run: npm ci
 
       - name: Run Rust tests
         run: |
-          cargo test --manifest-path src-tauri/Cargo.toml
-          cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+          cargo fmt --check --manifest-path src-tauri/Cargo.toml
+          cargo test --locked --manifest-path src-tauri/Cargo.toml
+          cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
+      - name: Run Rust coverage gate
+        run: |
+          rustup component add llvm-tools-preview
+          cargo llvm-cov --locked \
+            --manifest-path src-tauri/Cargo.toml \
+            --all-features \
+            --lcov \
+            --output-path "$RUNNER_TEMP/fruit-truck-rust.lcov" \
+            --fail-under-lines 35 \
+            --fail-under-functions 20
 
       - name: Build native desktop test bundle
         run: npx tauri build --debug --bundles app --config src-tauri/tauri.e2e.conf.json
+
+      - name: Launch packaged app smoke test
+        run: |
+          app_path=$(find src-tauri/target -path '*/bundle/macos/Fruit Truck E2E.app' -print -quit)
+          test -n "$app_path"
+          bash scripts/smoke-native-app.sh "$app_path"

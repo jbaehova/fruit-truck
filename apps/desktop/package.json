@@ -1,20 +1,26 @@
 {
   "name": "fruit-truck",
   "private": true,
-  "version": "0.6.3",
+  "version": "0.6.4",
   "type": "module",
   "engines": {
     "node": ">=24"
   },
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "tsc -b && vite build && npm run check:bundle",
     "lint": "oxlint",
     "test:unit": "node --test 'src/**/*.test.ts' 'scripts/**/*.test.mjs'",
+    "test:coverage": "node --test --experimental-test-coverage --test-coverage-lines=75 --test-coverage-functions=70 --test-coverage-branches=65 'src/**/*.test.ts' 'scripts/**/*.test.mjs'",
     "test:e2e": "playwright test",
     "preview": "vite preview",
     "tauri": "tauri",
-    "check": "tsc -b && oxlint && node scripts/check-release-contract.mjs",
+    "check": "tsc -b && oxlint && node scripts/check-release-contract.mjs && npm run check:openrouter-contracts",
+    "check:bundle": "node scripts/check-bundle-budget.mjs",
+    "check:licenses": "node scripts/check-dependency-licenses.mjs",
+    "check:openrouter-contracts": "node scripts/check-openrouter-contracts.mjs",
+    "smoke:openrouter:paid": "node scripts/run-openrouter-paid-smoke.mjs",
+    "sbom": "node scripts/generate-sbom.mjs",
     "tauri:dev": "tauri dev",
     "build:e2e:desktop": "tauri build --debug --bundles app --config src-tauri/tauri.e2e.conf.json",
     "bundle:mac": "bash scripts/build-macos-apple-silicon.sh"
@@ -23,6 +29,7 @@
     "@base-ui/react": "^1.6.0",
     "@fontsource-variable/geist": "^5.2.9",
     "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/plugin-dialog": "^2.7.2",
     "@tauri-apps/plugin-opener": "^2.5.4",
     "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-updater": "^2.10.1",

@@ -18,7 +18,7 @@ function ToastList() {
       <Toast.Content className="base-toast-content">
         <span className="base-toast-icon"><ToastIcon type={item.type} /></span>
         <span className="base-toast-copy">
-          <Toast.Title className="base-toast-title" />
+          <Toast.Title className="base-toast-title">{item.type === "success" ? t("statusCompleted") : item.type === "error" ? t("statusFailed") : t("notificationNotice")}</Toast.Title>
           <Toast.Description className="base-toast-description" />
         </span>
         <Toast.Close className="base-toast-close" aria-label={t("dismissNotification")}><X /></Toast.Close>

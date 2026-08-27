@@ -1,0 +1,122 @@
+{
+  "fixture": "openrouter-video-endpoints",
+  "anonymized": true,
+  "contract": "video-endpoints-v1",
+  "models": {
+    "fixture/video-cinema": {
+      "endpoints": [
+        {
+          "endpoint_id": "fixture-cinema-northstar",
+          "provider_name": "Northstar Motion",
+          "provider_slug": "northstar-motion",
+          "provider_tag": "reference",
+          "supported_parameters": {
+            "duration": { "type": "range", "min": 1, "max": 10 },
+            "resolution": { "type": "enum", "values": ["720p", "1080p"] },
+            "aspect_ratio": { "type": "enum", "values": ["16:9", "9:16"] },
+            "generate_audio": { "type": "boolean" }
+          },
+          "supported_resolutions": ["720p", "1080p"],
+          "supported_aspect_ratios": ["16:9", "9:16"],
+          "supported_durations": [5, 10],
+          "input_reference_types": ["image"],
+          "max_input_references": 1,
+          "supported_frame_images": ["first_frame", "last_frame"],
+          "reference_transports": { "image": ["https_url", "signed_url"] },
+          "supports_references": true,
+          "pricing_skus": {
+            "duration_seconds_1080p_with_audio_image_to_video": "0.12",
+            "duration_seconds_720p_without_audio_image_to_video": "0.07",
+            "reference_image": "0.01"
+          },
+          "privacy": { "zdr": true, "data_collection": "deny" }
+        },
+        {
+          "endpoint_id": "fixture-cinema-lattice",
+          "provider_name": "Lattice Motion",
+          "provider_slug": "lattice-motion",
+          "provider_tag": "multimodal",
+          "supported_parameters": {
+            "duration": { "type": "range", "min": 2, "max": 8 },
+            "resolution": { "type": "enum", "values": ["720p"] },
+            "aspect_ratio": { "type": "enum", "values": ["16:9"] },
+            "generate_audio": { "type": "boolean" }
+          },
+          "supported_resolutions": ["720p"],
+          "supported_aspect_ratios": ["16:9"],
+          "supported_durations": [5],
+          "input_reference_types": ["image", "video", "audio"],
+          "max_input_references": 3,
+          "supported_frame_images": ["first_frame"],
+          "reference_transports": {
+            "image": ["https_url", "signed_url"],
+            "video": ["signed_url"],
+            "audio": ["signed_url"]
+          },
+          "supports_references": true,
+          "pricing_skus": {
+            "duration_seconds_720p_with_audio_image_to_video": "0.09",
+            "reference_image": "0.008"
+          },
+          "privacy": { "zdr": false, "data_collection": "standard" }
+        }
+      ]
+    },
+    "fixture/video-story": {
+      "endpoints": [
+        {
+          "endpoint_id": "fixture-story-harbor",
+          "provider_name": "Harbor Motion",
+          "provider_slug": "harbor-motion",
+          "provider_tag": "text",
+          "supported_parameters": {
+            "duration": { "type": "range", "min": 2, "max": 8 },
+            "resolution": { "type": "enum", "values": ["720p"] },
+            "aspect_ratio": { "type": "enum", "values": ["16:9"] }
+          },
+          "supported_resolutions": ["720p"],
+          "supported_aspect_ratios": ["16:9"],
+          "supported_durations": [4, 8],
+          "input_reference_types": ["image"],
+          "max_input_references": 1,
+          "supported_frame_images": ["first_frame"],
+          "reference_transports": { "image": ["https_url"] },
+          "supports_references": true,
+          "pricing_skus": {
+            "duration_seconds_720p_without_audio_text_to_video": "0.05",
+            "minimum_generation": "0.15"
+          },
+          "privacy": { "zdr": true, "data_collection": "deny" }
+        },
+        {
+          "endpoint_id": "fixture-story-citrine",
+          "provider_name": "Citrine Motion",
+          "provider_slug": "citrine-motion",
+          "provider_tag": "text",
+          "supported_parameters": {
+            "duration": { "type": "range", "min": 2, "max": 4 },
+            "resolution": { "type": "enum", "values": ["720p"] },
+            "aspect_ratio": { "type": "enum", "values": ["16:9"] }
+          },
+          "supported_resolutions": ["720p"],
+          "supported_aspect_ratios": ["16:9"],
+          "supported_durations": [4],
+          "input_reference_types": [],
+          "max_input_references": 0,
+          "supported_frame_images": [],
+          "reference_transports": [],
+          "supports_references": false,
+          "pricing_skus": {
+            "duration_seconds_720p_without_audio_text_to_video": "0.045",
+            "minimum_generation": "0.12"
+          },
+          "privacy": { "zdr": false, "data_collection": "allow" }
+        }
+      ]
+    }
+  },
+  "expected": {
+    "minimumModels": 2,
+    "providerFamilies": ["northstar-motion", "lattice-motion", "harbor-motion", "citrine-motion"]
+  }
+}

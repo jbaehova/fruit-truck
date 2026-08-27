@@ -1,12 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
 import {
   allowedAssetRoles,
   buildRequest,
+  cancelOpenRouterRequest,
   defaultOptions,
   enhancePrompt,
   estimateGenerationCost,
   formatUsd,
+  generateImage,
+  generationActualCost,
+  generationRecoveryPath,
   modelPriceLabel,
   productSystemInstruction,
   promptEnhancementUserContent,
@@ -18,6 +23,7 @@ import {
   prettyRequest,
   referenceCoverageReport,
   retryDelayMs,
+  submitVideo,
   validateReferenceCoverage,
   type ImageModel,
   type PromptEnhancementInput,
@@ -68,6 +74,92 @@ const enhancementInput = (overrides: Partial<PromptEnhancementInput> = {}): Prom
   references: [],
   visuals: [],
   ...overrides,
+});
+
+test("native IPC receives the exact reviewed payload for image and video POSTs", async (t) => {
+  const previousWindowDescriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    writable: true,
+    value: { crypto: globalThis.crypto },
+  });
+  t.after(() => {
+    clearMocks();
+    if (previousWindowDescriptor) Object.defineProperty(globalThis, "window", previousWindowDescriptor);
+    else Reflect.deleteProperty(globalThis, "window");
+  });
+
+  const invocations: Array<{ command: string; args: Record<string, unknown> }> = [];
+  mockIPC((command, args) => {
+    invocations.push({ command, args: args as Record<string, unknown> });
+    if (command === "cancel_openrouter_request") return true;
+    const path = (args as { path?: unknown }).path;
+    if (path === "/images") return { data: [{ local_path: "/managed/result.png", media_type: "image/png" }], usage: { cost: 0.04 } };
+    if (path === "/videos") return { id: "job-exact-payload", status: "pending", usage: { cost: 0.2 } };
+    throw new Error(`Unexpected IPC path ${String(path)}`);
+  });
+  const imagePayload = Object.freeze({
+    model: "example/image",
+    prompt: "Reviewed image prompt",
+    provider: Object.freeze({ only: Object.freeze(["example-provider"]), require_parameters: true }),
+    input_references: Object.freeze([Object.freeze({ image_url: "fruit-truck-local:/managed/input.png" })]),
+  });
+  const videoPayload = Object.freeze({
+    model: "example/video",
+    prompt: "Reviewed video prompt",
+    duration: 5,
+    provider: Object.freeze({ only: Object.freeze(["example-video-provider"]), require_parameters: true }),
+  });
+
+  await generateImage(imagePayload, undefined, { requestId: "attempt-image" });
+  await submitVideo(videoPayload);
+  await cancelOpenRouterRequest("attempt-image");
+
+  assert.equal(invocations.length, 3);
+  assert.deepEqual(invocations[0], {
+    command: "openrouter_request",
+    args: { method: "POST", path: "/images", body: imagePayload, requestId: "attempt-image" },
+  });
+  assert.deepEqual(invocations[1], {
+    command: "openrouter_request",
+    args: { method: "POST", path: "/videos", body: videoPayload },
+  });
+  assert.deepEqual(invocations[2], {
+    command: "cancel_openrouter_request",
+    args: { requestId: "attempt-image" },
+  });
+});
+
+test("browser image SSE reports partial progress and returns the completed image", async (t) => {
+  const previousWindowDescriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+  const previousFetch = globalThis.fetch;
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    writable: true,
+    value: { localStorage: { getItem: () => "sk-test-browser-stream" } },
+  });
+  const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+  globalThis.fetch = async () => new Response([
+    `data: {"type":"image_generation.partial_image","partial_image_index":0,"b64_json":"${png}"}`,
+    `data: {"type":"image_generation.completed","b64_json":"${png}","usage":{"cost":0.019}}`,
+    "data: [DONE]",
+    "",
+  ].join("\n\n"), { headers: { "content-type": "text/event-stream" } });
+  t.after(() => {
+    globalThis.fetch = previousFetch;
+    if (previousWindowDescriptor) Object.defineProperty(globalThis, "window", previousWindowDescriptor);
+    else Reflect.deleteProperty(globalThis, "window");
+  });
+
+  const progress: string[] = [];
+  const result = await generateImage(
+    Object.freeze({ model: "example/stream", prompt: "stream", stream: true }),
+    undefined,
+    { requestId: "browser-stream", onProgress: (event) => progress.push(`${event.stage}:${event.partialImageIndex ?? ""}`) },
+  );
+  assert.deepEqual(progress, ["partial_image:0", "completed:"]);
+  assert.equal(result.actualCostUsd, 0.019);
+  assert.equal(result.urls[0], `data:image/png;base64,${png}`);
 });
 
 test("image request includes only discovered capabilities", () => {
@@ -580,6 +672,56 @@ test("enhancePrompt reports accumulated planner cost when the repair request fai
     if (previousWindow) runtime.window = previousWindow;
     else delete runtime.window;
   }
+});
+
+test("generateImage preserves a paid response recovery path when no result can be materialized", async () => {
+  const runtime = globalThis as unknown as {
+    window?: { localStorage: { getItem: (key: string) => string | null } };
+  };
+  const previousWindow = runtime.window;
+  const previousFetch = globalThis.fetch;
+  runtime.window = { localStorage: { getItem: () => null } };
+  globalThis.fetch = (async () => ({
+    ok: true,
+    json: async () => ({
+      data: [],
+      usage: { cost: 0.027 },
+      _fruit_truck_recovery_path: "/managed/recovery/paid-image-response.json",
+      _fruit_truck_materialization_errors: ["result 1 exceeded the decoded image limit"],
+    }),
+  }) as Response) as typeof fetch;
+
+  try {
+    let actualCost: number | undefined;
+    let caught: unknown;
+    try {
+      await generateImage({ model: "example/image", prompt: "test" }, (cost) => { actualCost = cost; });
+    } catch (error) {
+      caught = error;
+    }
+    assert.ok(caught instanceof Error);
+    assert.equal(actualCost, 0.027);
+    assert.equal(generationActualCost(caught), 0.027);
+    assert.equal(generationRecoveryPath(caught), "/managed/recovery/paid-image-response.json");
+    assert.deepEqual((caught as { materializationErrors?: unknown }).materializationErrors, ["result 1 exceeded the decoded image limit"]);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousWindow) runtime.window = previousWindow;
+    else delete runtime.window;
+  }
+});
+
+test("generationRecoveryPath only parses native retained-response markers", () => {
+  assert.equal(
+    generationRecoveryPath("OpenRouter response exceeded its limit (partial response retained at /managed/recovery/response.part)."),
+    "/managed/recovery/response.part",
+  );
+  assert.equal(
+    generationRecoveryPath(new Error("Could not parse response (recovery response retained at /managed/recovery/response.json).")),
+    "/managed/recovery/response.json",
+  );
+  assert.equal(generationRecoveryPath("Recovery payload might be /tmp/untrusted"), undefined);
+  assert.equal(generationActualCost(Object.assign(new Error("failed"), { actualCostUsd: -1 })), undefined);
 });
 
 test("masked enhancement does not claim a visual guide when only the target image is available", () => {

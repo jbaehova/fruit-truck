@@ -2,25 +2,25 @@ import { Dialog } from "@base-ui/react/dialog";
 import { Field } from "@base-ui/react/field";
 import { Fieldset } from "@base-ui/react/fieldset";
 import { Form } from "@base-ui/react/form";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useRef, useState } from "react";
 import {
   ArrowLeft,
   ArrowRight,
   Check,
   CheckCircle2,
-  ExternalLink,
+  ExternalLink as ExternalLinkIcon,
   Eye,
   EyeOff,
   KeyRound,
   LoaderCircle,
   LockKeyhole,
+  ShieldAlert,
   Sparkles,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { ExternalLink } from "@/components/ExternalLink";
 import { Input } from "@/components/ui/input";
 import { useI18n } from "@/i18n";
-import { isTauriRuntime } from "@/openrouter";
 
 const OPENROUTER_KEYS_URL = "https://openrouter.ai/settings/keys";
 
@@ -33,7 +33,7 @@ type Props = {
 };
 
 export function Onboarding({ ready, onSave, onComplete }: Props) {
-  const { t } = useI18n();
+  const { language, setLanguage, t } = useI18n();
   const [step, setStep] = useState<OnboardingStep>("welcome");
   const [apiKey, setApiKey] = useState("");
   const [showKey, setShowKey] = useState(false);
@@ -48,12 +48,6 @@ export function Onboarding({ ready, onSave, onComplete }: Props) {
   useEffect(() => {
     if (ready) setStep("welcome");
   }, [ready]);
-
-  const openKeys = (event: React.MouseEvent<HTMLAnchorElement>) => {
-    if (!isTauriRuntime()) return;
-    event.preventDefault();
-    void openUrl(OPENROUTER_KEYS_URL);
-  };
 
   const save = async () => {
     try {
@@ -82,6 +76,8 @@ export function Onboarding({ ready, onSave, onComplete }: Props) {
           <Dialog.Popup className="onboarding-dialog" aria-describedby="onboarding-description">
             {!ready ? (
               <div className="onboarding-loading" role="status">
+                <Dialog.Title className="sr-only">{t("onboardingLoading")}</Dialog.Title>
+                <Dialog.Description id="onboarding-description" className="sr-only">{t("onboardingLoadingHint")}</Dialog.Description>
                 <span className="onboarding-loading-mark"><img src="/fruit-truck-icon.png" alt="" /></span>
                 <LoaderCircle className="spin" aria-hidden="true" />
                 <span>{t("onboardingLoading")}</span>
@@ -92,6 +88,10 @@ export function Onboarding({ ready, onSave, onComplete }: Props) {
                   <div className="onboarding-brand">
                     <span className="brand-mark"><img src="/fruit-truck-icon.png" alt="" /></span>
                     <strong>Fruit Truck</strong>
+                  </div>
+                  <div className="onboarding-language" aria-label={t("language")}>
+                    <Button type="button" size="xs" variant={language === "ko" ? "outline" : "ghost"} onClick={() => setLanguage("ko")}>한국어</Button>
+                    <Button type="button" size="xs" variant={language === "en" ? "outline" : "ghost"} onClick={() => setLanguage("en")}>English</Button>
                   </div>
 
                   <div className="onboarding-progress" aria-label={t("onboardingProgress")}>
@@ -160,16 +160,17 @@ export function Onboarding({ ready, onSave, onComplete }: Props) {
                         <Fieldset.Root className="onboarding-fieldset">
                           <Fieldset.Legend className="onboarding-legend">{t("onboardingOpenRouterLegend")}</Fieldset.Legend>
                           <p className="onboarding-provider-copy">{t("onboardingOpenRouterCopy")}</p>
-                          <a
+                          <div className="onboarding-cloud-disclosure" role="note">
+                            <ShieldAlert aria-hidden="true" />
+                            <span><strong>{t("privacyBeforeGenerate")}</strong><small>{t("cloudTransferNotice")} {t("plannerPrivacyNotice")}</small></span>
+                          </div>
+                          <ExternalLink
                             className="onboarding-external-link"
                             href={OPENROUTER_KEYS_URL}
-                            target="_blank"
-                            rel="noreferrer"
-                            onClick={openKeys}
                           >
                             <span><strong>{t("onboardingCreateKey")}</strong><small>{t("onboardingCreateKeyHint")}</small></span>
-                            <ExternalLink aria-hidden="true" />
-                          </a>
+                            <ExternalLinkIcon aria-hidden="true" />
+                          </ExternalLink>
 
                           <Field.Root className="onboarding-key-field" name="apiKey" invalid={Boolean(error)}>
                             <Field.Label>{t("apiKey")}</Field.Label>

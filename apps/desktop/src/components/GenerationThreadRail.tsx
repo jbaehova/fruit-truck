@@ -9,6 +9,13 @@ import { useI18n } from "@/i18n";
 import { activeGenerationAttempt, latestGenerationAttempt, type GenerationThread } from "@/studio";
 import { formatElapsedClock } from "@/videoPolling";
 
+function localizedThreadName(threadName: string, t: ReturnType<typeof useI18n>["t"]) {
+  const match = /^(Image|Video) (\d+)( copy)?$/.exec(threadName);
+  if (!match) return threadName;
+  const base = `${t(match[1] === "Image" ? "image" : "video")} ${match[2]}`;
+  return match[3] ? `${base} ${t("threadCopySuffix")}` : base;
+}
+
 export function GenerationThreadRail({
   threads,
   activeId,
@@ -38,7 +45,7 @@ export function GenerationThreadRail({
   const [name, setName] = useState("");
   const [nowMs, setNowMs] = useState(() => Date.now());
   const hasLiveVideoJob = visible.some((thread) => Boolean(activeGenerationAttempt(thread)?.jobId));
-  useEffect(() => setName(renaming?.name ?? ""), [renaming?.id, renaming?.name]);
+  useEffect(() => setName(renaming ? localizedThreadName(renaming.name, t) : ""), [renaming, t]);
   useEffect(() => {
     if (!hasLiveVideoJob) return;
     setNowMs(Date.now());
@@ -51,6 +58,7 @@ export function GenerationThreadRail({
     <section className="thread-rail" aria-label={t("generationThreads")}>
       <div className="thread-rail-scroll">
         {visible.map((thread) => {
+          const displayName = localizedThreadName(thread.name, t);
           const activeAttempt = activeGenerationAttempt(thread);
           const latest = latestGenerationAttempt(thread);
           const state = activeAttempt?.status ?? latest?.status ?? "idle";
@@ -74,12 +82,12 @@ export function GenerationThreadRail({
                 <span className={`thread-status ${state}`}>
                   {activeAttempt ? <LoaderCircle className="spin" /> : state === "failed" || state === "uncertain" ? <TriangleAlert /> : state === "completed" ? <Check /> : null}
                 </span>
-                <span><strong>{thread.name}</strong><small title={status}>{status}</small></span>
+                <span><strong>{displayName}</strong><small title={status}>{status}</small></span>
               </button>
               <div className="thread-tab-actions">
-                <Button variant="ghost" size="icon-xs" disabled={disabled} aria-label={t("renameThreadNamed", { name: thread.name })} onClick={() => setRenameId(thread.id)}><Pencil /></Button>
-                <Button variant="ghost" size="icon-xs" disabled={disabled} aria-label={t("duplicateThread", { name: thread.name })} aria-keyshortcuts="Meta+D" onClick={() => onDuplicate(thread.id)}><Copy /></Button>
-                <Button variant="ghost" size="icon-xs" disabled={disabled || Boolean(activeAttempt) || visible.length <= 1} aria-label={t("archiveThread", { name: thread.name })} aria-keyshortcuts="Meta+W" onClick={() => onArchive(thread.id)}><Archive /></Button>
+                <Button variant="ghost" size="icon-xs" disabled={disabled} aria-label={t("renameThreadNamed", { name: displayName })} onClick={() => setRenameId(thread.id)}><Pencil /></Button>
+                <Button variant="ghost" size="icon-xs" disabled={disabled} aria-label={t("duplicateThread", { name: displayName })} aria-keyshortcuts="Meta+D" onClick={() => onDuplicate(thread.id)}><Copy /></Button>
+                <Button variant="ghost" size="icon-xs" disabled={disabled || Boolean(activeAttempt) || visible.length <= 1} aria-label={t("archiveThread", { name: displayName })} aria-keyshortcuts="Meta+W" onClick={() => onArchive(thread.id)}><Archive /></Button>
               </div>
             </article>
           );
@@ -93,7 +101,7 @@ export function GenerationThreadRail({
             <div>
               {archived.map((thread) => (
                 <Button key={thread.id} variant="ghost" size="xs" disabled={disabled} aria-keyshortcuts="Meta+Shift+T" onClick={() => onRestore(thread.id)}>
-                  <RotateCcw /> {t("restoreThread", { name: thread.name })}
+                  <RotateCcw /> {t("restoreThread", { name: localizedThreadName(thread.name, t) })}
                 </Button>
               ))}
             </div>

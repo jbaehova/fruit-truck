@@ -6,16 +6,22 @@ import type { Update } from "@tauri-apps/plugin-updater";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useI18n } from "@/i18n";
-import { createRetryableCheck, UPDATE_CHECK_RETRY_DELAYS_MS } from "@/updateCheck";
+import { bindUpdateCheckLifecycle, createUpdateCheckController, prepareUpdateInstall } from "@/updateCheck";
+import { toast } from "@/components/ui/toast-manager";
 
 type UpdatePhase = "ready" | "installing" | "failed";
 
-const checkOnce = createRetryableCheck(async () => {
-  const { check } = await import("@tauri-apps/plugin-updater");
-  return check();
-});
-
-export function UpdatePrompt() {
+export function UpdatePrompt({
+  getActiveAttemptCount = () => 0,
+  isDurableSavePending = () => false,
+  getDurableSaveError,
+  onBeforeInstall,
+}: {
+  getActiveAttemptCount?: () => number;
+  isDurableSavePending?: () => boolean;
+  getDurableSaveError?: () => unknown;
+  onBeforeInstall?: () => void | Promise<void>;
+}) {
   const { t } = useI18n();
   const [update, setUpdate] = useState<Update | null>(null);
   const [phase, setPhase] = useState<UpdatePhase>("ready");
@@ -26,33 +32,31 @@ export function UpdatePrompt() {
 
   useEffect(() => {
     if (!("__TAURI_INTERNALS__" in window)) return;
-    let active = true;
-    let retryTimer: number | undefined;
-    let retryIndex = 0;
-
-    const runCheck = () => {
-      void checkOnce()
-        .then((available) => {
-          if (active && available) setUpdate(available);
-        })
-        .catch((error: unknown) => {
-          if (!active) return;
-          const retryDelay = UPDATE_CHECK_RETRY_DELAYS_MS[retryIndex];
-          retryIndex += 1;
-          if (retryDelay === undefined) {
-            console.warn("Fruit Truck could not check for updates after retrying.", error);
-            return;
-          }
-          retryTimer = window.setTimeout(runCheck, retryDelay);
-        });
-    };
-
-    runCheck();
+    const controller = createUpdateCheckController<Update>({
+      check: async () => {
+        const { check } = await import("@tauri-apps/plugin-updater");
+        return check();
+      },
+      isOnline: () => navigator.onLine,
+    });
+    const unsubscribe = controller.subscribe((state) => {
+      localStorage.setItem("fruit-truck.update.last-state", JSON.stringify({ status: state.status, lastCheckedAt: state.lastCheckedAt }));
+      window.dispatchEvent(new CustomEvent("fruit-truck:update-state", { detail: { status: state.status, lastCheckedAt: state.lastCheckedAt } }));
+      if (state.value) setUpdate(state.value);
+    });
+    const unbind = bindUpdateCheckLifecycle(controller, window);
+    const manual = () => void controller.manualCheck().then((available) => {
+      if (!available) toast.info(t("appUpToDate"));
+    }).catch((error) => toast.error(t("updateCheckFailed", { error: error instanceof Error ? error.message : String(error) })));
+    window.addEventListener("fruit-truck:check-update", manual);
+    void controller.check().catch((error) => console.warn("Fruit Truck update check failed", error));
     return () => {
-      active = false;
-      if (retryTimer !== undefined) window.clearTimeout(retryTimer);
+      window.removeEventListener("fruit-truck:check-update", manual);
+      unbind();
+      unsubscribe();
+      controller.dispose();
     };
-  }, []);
+  }, [t]);
 
   const dismiss = () => {
     if (phase === "installing") return;
@@ -68,6 +72,23 @@ export function UpdatePrompt() {
     setTotal(null);
     downloadedRef.current = 0;
     try {
+      let forcedSnapshotPending = true;
+      const gate = await prepareUpdateInstall({
+        getActiveAttemptCount,
+        isDurableSavePending: () => forcedSnapshotPending || isDurableSavePending(),
+        getDurableSaveError,
+        flushDurableSave: async () => {
+          await onBeforeInstall?.();
+          forcedSnapshotPending = false;
+        },
+      });
+      if (!gate.allowed) {
+        setPhase("failed");
+        setMessage(gate.reason === "active_attempts"
+          ? t("updateBlockedAttempts", { count: gate.activeAttemptCount })
+          : t("updateDurableSaveFailed"));
+        return;
+      }
       await update.downloadAndInstall((event) => {
         if (event.event === "Started") {
           setTotal(event.data.contentLength ?? null);

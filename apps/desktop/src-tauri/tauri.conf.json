@@ -2,7 +2,7 @@
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Fruit Truck",
   "mainBinaryName": "Fruit Truck",
-  "version": "0.6.3",
+  "version": "0.6.4",
   "identifier": "ui.fruittruck.desktop",
   "build": {
     "frontendDist": "../dist",
@@ -25,7 +25,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost https://openrouter.ai; img-src 'self' asset: http://asset.localhost blob:; media-src 'self' asset: http://asset.localhost blob:; style-src 'self' 'unsafe-inline'; script-src 'self'",
+      "csp": "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'; connect-src 'self' ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost blob:; media-src 'self' asset: http://asset.localhost blob:; style-src 'self' 'unsafe-inline'; script-src 'self'",
       "assetProtocol": {
         "enable": true,
         "scope": [

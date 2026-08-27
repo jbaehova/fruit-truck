@@ -1,5 +1,6 @@
 import { Dialog } from "@base-ui/react/dialog";
 import { Command, X } from "lucide-react";
+import { useRef } from "react";
 import { APP_COMMANDS, type ShortcutGroup } from "@/shortcuts";
 import { Button } from "@/components/ui/button";
 import { useI18n, type MessageKey } from "@/i18n";
@@ -21,19 +22,32 @@ const CONTEXT_SHORTCUTS: Array<{ labelKey: MessageKey; display: string }> = [
 
 export function ShortcutHelpDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { t } = useI18n();
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
   return (
-    <Dialog.Root open={open} onOpenChange={(next) => { if (!next) onClose(); }}>
+    <Dialog.Root modal open={open} onOpenChange={(next) => { if (!next) onClose(); }}>
       <Dialog.Portal>
         <Dialog.Backdrop className="dialog-backdrop" />
         <Dialog.Viewport className="dialog-viewport">
-          <Dialog.Popup className="shortcut-help-dialog">
+          <Dialog.Popup
+            className="shortcut-help-dialog"
+            initialFocus={closeButtonRef}
+            onKeyDown={(event) => {
+              // This read-only dialog has one interactive element. Keep both
+              // Tab directions on it so programmatic shortcut opening cannot
+              // leak focus into the inert workspace.
+              if (event.key === "Tab") {
+                event.preventDefault();
+                closeButtonRef.current?.focus();
+              }
+            }}
+          >
             <header className="dialog-header">
               <div>
                 <span className="dialog-eyebrow"><Command /> Fruit Truck</span>
                 <Dialog.Title className="dialog-title">{t("keyboardShortcuts")}</Dialog.Title>
                 <Dialog.Description className="dialog-description">{t("keyboardShortcutsHint")}</Dialog.Description>
               </div>
-              <Dialog.Close render={<Button variant="ghost" size="icon" />} aria-label={t("closeKeyboardShortcuts")}><X /></Dialog.Close>
+              <Dialog.Close render={<Button ref={closeButtonRef} variant="ghost" size="icon" />} aria-label={t("closeKeyboardShortcuts")}><X /></Dialog.Close>
             </header>
             <div className="shortcut-help-grid">
               {(Object.keys(GROUP_LABELS) as ShortcutGroup[]).map((group) => (

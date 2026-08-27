@@ -1,25 +1,25 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  applyKnownVideoCapabilities,
+  applyVideoCapabilityProvenance,
   explainGenerationError,
   modelPolicyNotices,
   validateInputConstraints,
 } from "./modelPolicies.ts";
 import type { VideoModel } from "./openrouter.ts";
 
-test("explicit OpenRouter reference workflow descriptions fill missing catalog metadata", () => {
-  const model = applyKnownVideoCapabilities({
+test("direct-provider research never invents OpenRouter reference capability", () => {
+  const model = applyVideoCapabilityProvenance({
     id: "bytedance/seedance-2.0-fast",
     name: "Seedance 2.0 Fast",
     description: "Supports first frame control and multimodal reference-to-video.",
     supported_frame_images: ["first_frame", "last_frame"],
   });
 
-  assert.deepEqual(model.input_reference_types, ["image", "video", "audio"]);
-  assert.equal(model.max_input_references, 9);
+  assert.equal(model.input_reference_types, undefined);
+  assert.equal(model.max_input_references, undefined);
 
-  const frameOnly = applyKnownVideoCapabilities({
+  const frameOnly = applyVideoCapabilityProvenance({
     id: "runway/gen-4.5",
     name: "Gen-4.5",
     description: "Text-to-video and image-to-video generation.",

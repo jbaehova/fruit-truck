@@ -129,6 +129,7 @@ export type PromptEnhancementArtifact = CompiledPrompt & {
   target: PromptTarget;
   profileSources: PromptProfileSource[];
   repairAttempts: number;
+  actualCostUsd?: number;
   createdAt: string;
   plan: PromptPlan;
 };

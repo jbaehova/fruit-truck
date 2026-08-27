@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -24,11 +24,29 @@ const ffmpegEnvironment = readText("apps/desktop/scripts/ffmpeg-version.env");
 const mediaBuildScript = readText("apps/desktop/scripts/build-ffmpeg-macos.sh");
 const releaseWorkflow = readText(".github/workflows/release.yml");
 const checkWorkflow = readText(".github/workflows/check.yml");
+const thirdPartyNotices = readText("THIRD_PARTY_NOTICES.md");
+const releaseDocs = readText("docs/RELEASING.md");
+const supportDocs = readText("docs/SUPPORT.md");
+const workflowFiles = readdirSync(resolve(repositoryDirectory, ".github/workflows"))
+  .filter((name) => name.endsWith(".yml") || name.endsWith(".yaml"))
+  .map((name) => [name, readText(`.github/workflows/${name}`)]);
 
 const cargoVersion = cargoToml.match(/^version\s*=\s*"([^"]+)"/m)?.[1];
 assert.ok(cargoVersion, "Could not read the desktop Cargo package version.");
 assert.equal(packageJson.version, tauriConfig.version, "package.json and tauri.conf.json versions differ.");
 assert.equal(cargoVersion, tauriConfig.version, "Cargo.toml and tauri.conf.json versions differ.");
+
+const csp = tauriConfig.app?.security?.csp ?? "";
+assert.ok(!csp.includes("https://openrouter.ai"), "Production renderer CSP still permits direct OpenRouter connections.");
+for (const directive of ["object-src 'none'", "base-uri 'none'", "frame-ancestors 'none'"]) {
+  assert.ok(csp.includes(directive), `Production renderer CSP is missing ${directive}.`);
+}
+
+const runnerPath = resolve(repositoryDirectory, "run.sh");
+assert.ok(existsSync(runnerPath), "The tracked source-tree runner is missing.");
+assert.ok((statSync(runnerPath).mode & 0o111) !== 0, "run.sh must be executable.");
+assert.match(readText("run.sh"), /ffprobe/, "run.sh does not document the source-tree FFprobe requirement.");
+assert.ok(!readText(".gitignore").split(/\r?\n/).includes("run.sh"), "run.sh is still ignored instead of tracked.");
 
 const tagIndex = process.argv.indexOf("--tag");
 if (tagIndex !== -1) {
@@ -110,6 +128,13 @@ assert.match(
   /npx tauri build --debug --bundles app/,
   "The native desktop check does not build the prepared app bundle.",
 );
+for (const requiredNativeCheck of ["cargo fmt --check", "cargo clippy", "smoke-native-app.sh"]) {
+  assert.ok(nativeBuildWorkflow.includes(requiredNativeCheck), `Native CI is missing ${requiredNativeCheck}.`);
+}
+assert.match(nativeBuildWorkflow, /cargo llvm-cov/, "Native CI is missing the Rust coverage gate.");
+for (const requiredCheck of ["npm run test:coverage", "npm run test:e2e", "npm run build"]) {
+  assert.ok(checkWorkflow.includes(requiredCheck), `Desktop CI is missing ${requiredCheck}.`);
+}
 assert.equal(
   packageJson.scripts?.["bundle:mac"],
   "bash scripts/build-macos-apple-silicon.sh",
@@ -131,6 +156,40 @@ assert.equal(
 );
 assert.match(mediaBuildScript, /--disable-ffmpeg/, "The release media build still enables the removed FFmpeg program.");
 assert.ok(!mediaBuildScript.includes('INSTALL_DIR}/bin/ffmpeg"'), "The release media build still copies the removed FFmpeg program.");
+
+for (const assetName of [
+  "Fruit-Truck-ffmpeg-source.tar.xz",
+  "Fruit-Truck-ffmpeg-build-config-arm64.txt",
+  "Fruit-Truck-ffmpeg-source.sha256",
+]) {
+  assert.match(releaseWorkflow, new RegExp(assetName.replaceAll(".", "\\.")), `Release workflow does not publish ${assetName}.`);
+  assert.match(thirdPartyNotices, new RegExp(assetName.replaceAll(".", "\\.")), `Third-party notice does not name ${assetName}.`);
+  assert.match(releaseDocs, new RegExp(assetName.replaceAll(".", "\\.")), `Release documentation does not name ${assetName}.`);
+}
+assert.match(releaseWorkflow, /verify-github-release\.sh/, "Release workflow does not run the GitHub release verifier.");
+assert.match(releaseWorkflow, /release-validation:/, "Release workflow does not run the exact-tag validation job.");
+assert.match(releaseWorkflow, /cargo fmt --check/, "Release workflow does not gate on cargo fmt.");
+assert.match(releaseWorkflow, /cargo llvm-cov/, "Release workflow does not gate on Rust coverage.");
+assert.match(releaseWorkflow, /npm run test:e2e/, "Release workflow does not gate on headless E2E.");
+assert.match(releaseWorkflow, /(?:npm run check:licenses|run-supply-chain-checks\.sh)/, "Release workflow does not gate on npm license policy.");
+assert.match(releaseWorkflow, /(?:npm run sbom|run-supply-chain-checks\.sh)/, "Release workflow does not produce an SBOM.");
+assert.match(releaseWorkflow, /(?:npm audit --audit-level=high|run-supply-chain-checks\.sh)/, "Release workflow does not gate on npm advisories.");
+assert.match(releaseWorkflow, /(?:cargo deny|run-supply-chain-checks\.sh)/, "Release workflow does not gate on Rust advisory/license/source checks.");
+
+for (const [workflowName, workflow] of workflowFiles) {
+  for (const match of workflow.matchAll(/^\s*uses:\s*([^\s@]+)@([^\s#]+)\s*$/gm)) {
+    assert.match(match[2], /^[0-9a-f]{40}$/, `${workflowName} uses mutable action ref ${match[1]}@${match[2]}.`);
+  }
+}
+
+assert.equal(packageJson.scripts?.["check:bundle"], "node scripts/check-bundle-budget.mjs", "Bundle budget script is not wired.");
+assert.equal(packageJson.scripts?.["check:licenses"], "node scripts/check-dependency-licenses.mjs", "License policy script is not wired.");
+assert.equal(packageJson.scripts?.sbom, "node scripts/generate-sbom.mjs", "SBOM script is not wired.");
+assert.match(packageJson.scripts?.["test:coverage"] ?? "", /test-coverage-lines=/, "Node coverage thresholds are not configured.");
+assert.match(supportDocs, /\/api\/v1\/images/, "Support matrix is missing the image endpoint.");
+assert.match(supportDocs, /\/api\/v1\/videos/, "Support matrix is missing the video endpoint.");
+assert.match(supportDocs, /\/api\/v1\/chat\/completions/, "Support matrix is missing the planner endpoint.");
+assert.match(supportDocs, /not.*general-purpose chat/i, "Support matrix does not limit chat scope.");
 
 assert.match(
   releaseWorkflow,

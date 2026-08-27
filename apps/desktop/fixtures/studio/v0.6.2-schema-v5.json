@@ -1,0 +1,231 @@
+{
+  "schemaVersion": 5,
+  "activeSessionId": "v062-session",
+  "promptModel": "openai/gpt-5.6-terra",
+  "sessions": [
+    {
+      "id": "v062-session",
+      "name": "v0.6.2 production workspace",
+      "createdAt": "2026-08-01T01:02:03.000Z",
+      "updatedAt": "2026-08-01T01:08:00.000Z",
+      "mode": "video",
+      "assets": [
+        {
+          "id": "v062-input",
+          "name": "fruit-truck-reference.png",
+          "kind": "image",
+          "mimeType": "image/png",
+          "origin": "upload",
+          "createdAt": "2026-08-01T01:02:03.000Z",
+          "localPath": "/Users/example/.fruit-truck/assets/fruit-truck-reference.png",
+          "width": 1024,
+          "height": 768,
+          "byteSize": 4096
+        },
+        {
+          "id": "v062-result",
+          "name": "fruit-truck-result.mp4",
+          "kind": "video",
+          "mimeType": "video/mp4",
+          "origin": "generated",
+          "createdAt": "2026-08-01T01:07:00.000Z",
+          "localPath": "/Users/example/.fruit-truck/generated/fruit-truck-result.mp4",
+          "jobId": "v062-job",
+          "duration": 5,
+          "byteSize": 8192
+        }
+      ],
+      "generationDefaults": {
+        "modelIds": {
+          "image": "google/gemini-2.5-flash-image",
+          "video": "google/veo-3.1"
+        },
+        "options": {
+          "image": { "quality": "high", "n": 2 },
+          "video": { "duration": 5, "resolution": "720p" }
+        },
+        "providerJson": {
+          "image": "{\"order\":[\"google\"]}",
+          "video": "{\"order\":[\"google\"]}"
+        }
+      },
+      "threads": {
+        "image": [
+          {
+            "id": "v062-image-thread",
+            "requestKey": "image-request-v062",
+            "name": "Image 1",
+            "mode": "image",
+            "createdAt": "2026-08-01T01:02:03.000Z",
+            "updatedAt": "2026-08-01T01:04:00.000Z",
+            "revision": 2,
+            "outputRole": "generated_image",
+            "optionOverrides": { "n": 1 },
+            "providerJsonOverride": "{\"order\":[\"google\"]}",
+            "draft": {
+              "prompt": "Use @1 as the truck identity.",
+              "references": [{ "assetId": "v062-input", "slot": 1, "role": "reference" }],
+              "options": {},
+              "providerJson": "",
+              "enhancePrompt": true,
+              "enhancedPrompt": "A faithful fruit truck portrait using @1.",
+              "enhancedPromptDirty": false,
+              "enhancedVisualCount": 1,
+              "imageEditMode": false,
+              "imageEditTarget": "",
+              "maskInstructions": "",
+              "maskStrokes": []
+            },
+            "attempts": [
+              {
+                "id": "v062-image-attempt",
+                "requestKey": "image-request-v062",
+                "status": "completed",
+                "backend": "openrouter",
+                "draftRevision": 2,
+                "requestedBy": "human",
+                "createdAt": "2026-08-01T01:03:00.000Z",
+                "updatedAt": "2026-08-01T01:04:00.000Z",
+                "submittedAt": "2026-08-01T01:03:30.000Z",
+                "completedAt": "2026-08-01T01:04:00.000Z",
+                "modelId": "google/gemini-2.5-flash-image",
+                "snapshot": {
+                  "mode": "image",
+                  "modelId": "google/gemini-2.5-flash-image",
+                  "outputRole": "generated_image",
+                  "prompt": "Use @1 as the truck identity.",
+                  "enhancePrompt": true,
+                  "enhancedPrompt": "A faithful fruit truck portrait using @1.",
+                  "options": { "quality": "high", "n": 1 },
+                  "providerJson": "{\"order\":[\"google\"]}",
+                  "assetBindings": [{ "assetId": "v062-input", "slot": 1, "role": "reference" }],
+                  "imageEditMode": false,
+                  "imageEditTarget": "",
+                  "maskInstructions": "",
+                  "maskStrokes": []
+                },
+                "request": { "model": "google/gemini-2.5-flash-image", "n": 1 },
+                "inputAssetIds": ["v062-input"],
+                "assetIds": [],
+                "estimatedCostUsd": 0.05,
+                "actualCostUsd": 0.042,
+                "costRecordedAt": "2026-08-01T01:04:00.000Z"
+              }
+            ],
+            "enhancementAttempts": [
+              {
+                "id": "v062-enhancement-attempt",
+                "requestKey": "enhance-v062",
+                "status": "completed",
+                "threadRevision": 2,
+                "originalPrompt": "Use @1 as the truck identity.",
+                "enhancedPrompt": "A faithful fruit truck portrait using @1.",
+                "createdAt": "2026-08-01T01:03:00.000Z",
+                "updatedAt": "2026-08-01T01:03:20.000Z",
+                "actualCostUsd": 0.006,
+                "costRecordedAt": "2026-08-01T01:03:20.000Z"
+              }
+            ]
+          }
+        ],
+        "video": [
+          {
+            "id": "v062-video-thread",
+            "requestKey": "video-request-v062",
+            "name": "Video 1",
+            "mode": "video",
+            "createdAt": "2026-08-01T01:02:03.000Z",
+            "updatedAt": "2026-08-01T01:08:00.000Z",
+            "revision": 1,
+            "outputRole": "generated_video",
+            "optionOverrides": { "duration": 5, "resolution": "720p" },
+            "draft": {
+              "prompt": "A fruit truck crosses the frame.",
+              "references": [],
+              "options": {},
+              "providerJson": "",
+              "enhancePrompt": false,
+              "enhancedPrompt": "",
+              "enhancedPromptDirty": false,
+              "enhancedVisualCount": 0,
+              "imageEditMode": false,
+              "imageEditTarget": "",
+              "maskInstructions": "",
+              "maskStrokes": []
+            },
+            "attempts": [
+              {
+                "id": "v062-video-attempt",
+                "requestKey": "video-request-v062",
+                "status": "completed",
+                "backend": "openrouter",
+                "draftRevision": 1,
+                "requestedBy": "human",
+                "createdAt": "2026-08-01T01:05:00.000Z",
+                "updatedAt": "2026-08-01T01:08:00.000Z",
+                "submittedAt": "2026-08-01T01:05:30.000Z",
+                "completedAt": "2026-08-01T01:08:00.000Z",
+                "modelId": "google/veo-3.1",
+                "request": { "model": "google/veo-3.1", "duration": 5, "resolution": "720p" },
+                "inputAssetIds": [],
+                "assetIds": ["v062-result"],
+                "jobId": "v062-job",
+                "progress": 100,
+                "pollAttempts": 3,
+                "estimatedCostUsd": 0.9,
+                "actualCostUsd": 0.84,
+                "costRecordedAt": "2026-08-01T01:08:00.000Z"
+              }
+            ],
+            "enhancementAttempts": []
+          }
+        ]
+      },
+      "activeThreadIds": {
+        "image": "v062-image-thread",
+        "video": "v062-video-thread"
+      },
+      "agent": {
+        "schemaVersion": 4,
+        "connection": { "status": "disconnected" },
+        "controlMode": "human",
+        "runStatus": "idle",
+        "brief": {
+          "originalIntent": "",
+          "goal": "",
+          "deliverable": "",
+          "usage": "",
+          "visualApproach": "",
+          "outputSpec": "",
+          "message": "",
+          "mustInclude": [],
+          "mustAvoid": []
+        },
+        "requirements": [],
+        "plan": [],
+        "decisions": [],
+        "activity": [],
+        "artifacts": [],
+        "appliedSkills": [{ "name": "fruit-truck-agent", "version": "2.0.0", "source": "core" }],
+        "imageGeneration": { "status": "unselected" },
+        "modelSelections": { "image": { "status": "unselected" }, "video": { "status": "unselected" } },
+        "currentStepIds": [],
+        "assembly": { "clips": [], "status": "draft" },
+        "execution": {
+          "currentJobIds": [],
+          "generationCount": 2,
+          "costLedger": [
+            { "id": "generation:v062-image-attempt", "category": "generation", "actualCostUsd": 0.042, "recordedAt": "2026-08-01T01:04:00.000Z" },
+            { "id": "prompt-enhancement:v062-enhancement-attempt", "category": "prompt_enhancement", "actualCostUsd": 0.006, "recordedAt": "2026-08-01T01:03:20.000Z" },
+            { "id": "generation:v062-video-attempt", "category": "generation", "actualCostUsd": 0.84, "recordedAt": "2026-08-01T01:08:00.000Z" }
+          ],
+          "spentUsd": 0.888,
+          "retryCount": 0
+        },
+        "revision": 0,
+        "updatedAt": "2026-08-01T01:08:00.000Z"
+      },
+      "agentBridge": false
+    }
+  ]
+}

@@ -1,0 +1,99 @@
+{
+  "fixture": "openrouter-image-endpoints",
+  "anonymized": true,
+  "contract": "image-endpoints-v1",
+  "models": {
+    "fixture/image-prism": {
+      "endpoints": [
+        {
+          "endpoint_id": "fixture-prism-northstar",
+          "provider_name": "Northstar Images",
+          "provider_slug": "northstar-images",
+          "provider_tag": "standard",
+          "supported_parameters": {
+            "size": { "type": "enum", "values": ["1024x1024", "1536x1024"] },
+            "n": { "type": "range", "min": 1, "max": 4 },
+            "input_references": { "type": "range", "min": 0, "max": 2 },
+            "output_format": { "type": "enum", "values": ["png"] }
+          },
+          "supported_sizes": ["1024x1024", "1536x1024"],
+          "allowed_passthrough_parameters": ["output_format"],
+          "pricing": [
+            { "billable": "output_image", "unit": "image", "cost_usd": 0.04 },
+            { "billable": "input_image", "unit": "image", "cost_usd": 0.006 }
+          ],
+          "supports_streaming": false,
+          "privacy": { "zdr": true, "data_collection": "deny" }
+        },
+        {
+          "endpoint_id": "fixture-prism-citrine",
+          "provider_name": "Citrine Render",
+          "provider_slug": "citrine-render",
+          "provider_tag": "fast",
+          "supported_parameters": {
+            "size": { "type": "enum", "values": ["1024x1024"] },
+            "n": { "type": "range", "min": 1, "max": 2 },
+            "input_references": { "type": "range", "min": 0, "max": 1 },
+            "output_format": { "type": "enum", "values": ["png", "webp"] }
+          },
+          "supported_sizes": ["1024x1024"],
+          "allowed_passthrough_parameters": ["output_format"],
+          "pricing": [
+            { "billable": "output_image", "unit": "image", "cost_usd": 0.025 },
+            { "billable": "input_image", "unit": "image", "cost_usd": 0.004 }
+          ],
+          "supports_streaming": false,
+          "privacy": { "zdr": false, "data_collection": "allow" }
+        }
+      ]
+    },
+    "fixture/image-vector": {
+      "endpoints": [
+        {
+          "endpoint_id": "fixture-vector-harbor",
+          "provider_name": "Harbor Vector",
+          "provider_slug": "harbor-vector",
+          "provider_tag": "svg",
+          "supported_parameters": {
+            "size": { "type": "enum", "values": ["1024x1024"] },
+            "n": { "type": "range", "min": 1, "max": 2 },
+            "input_references": { "type": "range", "min": 1, "max": 1 },
+            "output_format": { "type": "enum", "values": ["svg", "png"] }
+          },
+          "supported_sizes": ["1024x1024"],
+          "allowed_passthrough_parameters": ["output_format"],
+          "pricing": [
+            { "billable": "output_image", "unit": "image", "cost_usd": 0.03, "variant": "svg" },
+            { "billable": "input_image", "unit": "image", "cost_usd": 0.005 }
+          ],
+          "supports_streaming": false,
+          "privacy": { "zdr": true, "data_collection": "deny" }
+        },
+        {
+          "endpoint_id": "fixture-vector-lumen",
+          "provider_name": "Lumen Vector",
+          "provider_slug": "lumen-vector",
+          "provider_tag": "raster",
+          "supported_parameters": {
+            "size": { "type": "enum", "values": ["1024x1024"] },
+            "n": { "type": "range", "min": 1, "max": 1 },
+            "input_references": { "type": "range", "min": 1, "max": 1 },
+            "output_format": { "type": "enum", "values": ["png"] }
+          },
+          "supported_sizes": ["1024x1024"],
+          "allowed_passthrough_parameters": ["output_format"],
+          "pricing": [
+            { "billable": "output_image", "unit": "image", "cost_usd": 0.035 },
+            { "billable": "input_image", "unit": "image", "cost_usd": 0.005 }
+          ],
+          "supports_streaming": false,
+          "privacy": { "zdr": false, "data_collection": "standard" }
+        }
+      ]
+    }
+  },
+  "expected": {
+    "minimumModels": 2,
+    "providerFamilies": ["northstar-images", "citrine-render", "harbor-vector", "lumen-vector"]
+  }
+}

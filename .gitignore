@@ -5,6 +5,7 @@ node_modules/
 dist/
 target/
 output/
+apps/desktop/fruit-truck.cdx.json
 apps/desktop/test-results/
 apps/desktop/playwright-report/
 agent-kit/dist/
@@ -14,4 +15,3 @@ apps/desktop/src-tauri/gen/
 
 .agents/
 AGENTS.md
-run.sh

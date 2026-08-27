@@ -127,17 +127,23 @@ export function AssetPreview({
   className,
   controls = false,
   transparentControls = false,
+  interactiveError = false,
 }: {
   asset: SessionAsset;
   className?: string;
   controls?: boolean;
   transparentControls?: boolean;
+  interactiveError?: boolean;
 }) {
+  const { t } = useI18n();
   const [source, setSource] = useState(asset.externalUrl ?? "");
+  const [loadState, setLoadState] = useState<"loading" | "ready" | "error">("loading");
+  const [revision, setRevision] = useState(0);
 
   useEffect(() => {
     let active = true;
     let objectUrl = "";
+    setLoadState("loading");
     void resolveAssetSource(asset).then((value) => {
       if (!active) {
         if (value.startsWith("blob:")) URL.revokeObjectURL(value);
@@ -145,18 +151,23 @@ export function AssetPreview({
       }
       objectUrl = value;
       setSource(value);
+      setLoadState(value ? "ready" : "error");
     }).catch(() => {
-      if (active) setSource("");
+      if (active) {
+        setSource("");
+        setLoadState("error");
+      }
     });
     return () => {
       active = false;
       if (objectUrl.startsWith("blob:")) URL.revokeObjectURL(objectUrl);
     };
-  }, [asset]);
+  }, [asset, revision]);
 
-  if (!source) return <span className={`asset-missing ${className ?? ""}`} />;
-  if (asset.kind === "image") return <img className={className} src={source} alt={asset.name} draggable={false} />;
-  if (asset.kind === "audio") return <audio className={className} src={source} controls preload="metadata" />;
+  if (loadState === "loading") return <span className={`asset-missing loading ${className ?? ""}`} role="status">{t("loading")}</span>;
+  if (!source || loadState === "error") return <span className={`asset-missing error ${className ?? ""}`} role="alert"><span>{t("mediaLoadFailed")}</span>{interactiveError ? <button type="button" onClick={() => setRevision((current) => current + 1)}>{t("retryMedia")}</button> : null}</span>;
+  if (asset.kind === "image") return <img className={className} src={source} alt={asset.name} draggable={false} onError={() => setLoadState("error")} />;
+  if (asset.kind === "audio") return <audio className={className} src={source} controls preload="metadata" onError={() => setLoadState("error")} />;
   if (transparentControls) return <TransparentVideoPlayer source={source} name={asset.name} className={className} />;
   return <video
     className={className}
@@ -166,5 +177,6 @@ export function AssetPreview({
     playsInline
     preload={controls ? "metadata" : "auto"}
     draggable={false}
+    onError={() => setLoadState("error")}
   />;
 }

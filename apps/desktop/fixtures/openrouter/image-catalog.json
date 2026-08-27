@@ -1,0 +1,59 @@
+{
+  "fixture": "openrouter-image-catalog",
+  "anonymized": true,
+  "contract": "catalog-v1",
+  "data": [
+    {
+      "id": "fixture/image-prism",
+      "name": "Prism Image",
+      "description": "An anonymized raster image model used for contract tests.",
+      "architecture": {
+        "input_modalities": ["text", "image"],
+        "output_modalities": ["image"]
+      },
+      "supported_parameters": {
+        "size": { "type": "enum", "values": ["1024x1024", "1536x1024"] },
+        "n": { "type": "range", "min": 1, "max": 4 },
+        "input_references": { "type": "range", "min": 0, "max": 2 },
+        "output_format": { "type": "enum", "values": ["png", "webp"] }
+      },
+      "supported_sizes": ["1024x1024", "1536x1024"],
+      "supports_streaming": false,
+      "endpoint_count": 2
+    },
+    {
+      "id": "fixture/image-vector",
+      "name": "Vector Image",
+      "description": "An anonymized mixed raster/vector model used for contract tests.",
+      "architecture": {
+        "input_modalities": ["text", "image"],
+        "output_modalities": ["image"]
+      },
+      "supported_parameters": {
+        "size": { "type": "enum", "values": ["1024x1024"] },
+        "n": { "type": "range", "min": 1, "max": 2 },
+        "input_references": { "type": "range", "min": 1, "max": 1 },
+        "output_format": { "type": "enum", "values": ["svg", "png"] }
+      },
+      "supported_sizes": ["1024x1024"],
+      "supports_streaming": false,
+      "endpoint_count": 2
+    }
+  ],
+  "expected": {
+    "modelIds": ["fixture/image-prism", "fixture/image-vector"],
+    "minimumModels": 2,
+    "smoke": {
+      "fixture/image-prism": {
+        "provider": "northstar-images",
+        "options": { "size": "1024x1024", "n": 2, "output_format": "png" },
+        "referenceCount": 0
+      },
+      "fixture/image-vector": {
+        "provider": "harbor-vector",
+        "options": { "size": "1024x1024", "n": 1, "output_format": "svg" },
+        "referenceCount": 1
+      }
+    }
+  }
+}

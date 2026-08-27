@@ -8,7 +8,13 @@ General Public License, version 2.1 or later. The distributed build does not
 enable GPL or non-free components.
 
 The exact corresponding FFmpeg source archive, build configuration, and
-checksums are published beside every Fruit Truck DMG in its GitHub Release.
+SHA-256 manifest are published beside every Fruit Truck DMG in its GitHub
+Release with these stable asset names:
+
+- `Fruit-Truck-ffmpeg-source.tar.xz`
+- `Fruit-Truck-ffmpeg-build-config-arm64.txt`
+- `Fruit-Truck-ffmpeg-source.sha256`
+
 The source archive is also available from:
 
 <https://ffmpeg.org/releases/ffmpeg-8.1.2.tar.xz>

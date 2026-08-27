@@ -3,14 +3,16 @@ import { Dialog } from "@base-ui/react/dialog";
 import { Progress } from "@base-ui/react/progress";
 import { Toggle } from "@base-ui/react/toggle";
 import { ToggleGroup } from "@base-ui/react/toggle-group";
-import { AudioLines, Check, Download, Eye, ImageIcon, Plus, Trash2, Video, X } from "lucide-react";
+import { AudioLines, Check, Download, Eye, FolderOpen, ImageIcon, Paintbrush, Plus, RefreshCw, Trash2, Video, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { AssetPreview } from "@/components/AssetPreview";
 import { beginAssetPointerDrag, clearAssetDragData } from "@/assetDrag";
 import { Button } from "@/components/ui/button";
 import { toast } from "@/components/ui/toast-manager";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useI18n, type MessageKey } from "@/i18n";
+import { isTauriRuntime } from "@/openrouter";
 import { exportAssetToDownloads, type SessionAsset, type SessionVideoJob } from "@/studio";
 import { formatElapsedClock } from "@/videoPolling";
 
@@ -34,7 +36,9 @@ export function AssetLibrary({
   onImport,
   onPick,
   onUse,
+  onEdit,
   onDelete,
+  onReimport,
   jobs,
   highlightedIds = new Set(),
   onFocusedAssetChange,
@@ -46,7 +50,9 @@ export function AssetLibrary({
   onImport: (files: FileList | File[]) => Promise<void>;
   onPick: () => Promise<void>;
   onUse: (assetId: string) => void;
+  onEdit: (assetId: string) => void;
   onDelete: (ids: string[]) => void;
+  onReimport: (assetId: string) => void;
   jobs: SessionVideoJob[];
   highlightedIds?: Set<string>;
   onFocusedAssetChange?: (assetId: string | null) => void;
@@ -62,6 +68,11 @@ export function AssetLibrary({
   const visibleAssets = assets
     .filter((asset) => filter === "all" || asset.kind === filter)
     .toSorted((a, b) => b.createdAt.localeCompare(a.createdAt));
+  const visibleIds = new Set(visibleAssets.map((asset) => asset.id));
+  const visibleSelectedIds = [...selectedIds].filter((id) => visibleIds.has(id));
+  const allVisibleSelected = visibleAssets.length > 0 && visibleAssets.every((asset) => selectedIds.has(asset.id));
+  const storageBytes = assets.reduce((total, asset) => total + (asset.byteSize ?? 0), 0);
+  const previewAsset = preview ? assets.find((asset) => asset.id === preview.id) ?? preview : null;
 
   useEffect(() => {
     if (!jobs.length) return;
@@ -113,22 +124,31 @@ export function AssetLibrary({
     }
   };
 
+  const revealAsset = async (asset: SessionAsset) => {
+    if (!asset.localPath || !isTauriRuntime()) return;
+    try {
+      await revealItemInDir(asset.localPath);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
+    }
+  };
+
   useEffect(() => {
-    onPreviewAssetChange?.(preview?.id ?? null);
-    if (!preview) return;
-    onFocusedAssetChange?.(preview.id);
+    onPreviewAssetChange?.(previewAsset?.id ?? null);
+    if (!previewAsset) return;
+    onFocusedAssetChange?.(previewAsset.id);
     const handlePreviewKey = (event: KeyboardEvent) => {
       if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
       if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
       event.preventDefault();
-      const index = visibleAssets.findIndex((asset) => asset.id === preview.id);
+      const index = visibleAssets.findIndex((asset) => asset.id === previewAsset.id);
       if (index < 0 || visibleAssets.length < 2) return;
       const offset = event.key === "ArrowRight" ? 1 : -1;
       setPreview(visibleAssets[(index + offset + visibleAssets.length) % visibleAssets.length]);
     };
     window.addEventListener("keydown", handlePreviewKey, true);
     return () => window.removeEventListener("keydown", handlePreviewKey, true);
-  }, [onFocusedAssetChange, onPreviewAssetChange, preview, visibleAssets]);
+  }, [onFocusedAssetChange, onPreviewAssetChange, previewAsset, visibleAssets]);
 
   return (
     <aside
@@ -140,8 +160,8 @@ export function AssetLibrary({
           event.preventDefault();
           onSelectedIdsChange(new Set(visibleAssets.map((asset) => asset.id)));
         } else if ((event.metaKey || event.ctrlKey) && event.key === "Backspace") {
-          const ids = selectedIds.size
-            ? [...selectedIds]
+          const ids = visibleSelectedIds.length
+            ? visibleSelectedIds
             : target.closest<HTMLElement>("[data-asset-id]")?.dataset.assetId
               ? [target.closest<HTMLElement>("[data-asset-id]")!.dataset.assetId!]
               : [];
@@ -188,7 +208,13 @@ export function AssetLibrary({
           value={[filter]}
           onValueChange={(value) => {
             const next = value[0];
-            if (next === "all" || next === "image" || next === "video" || next === "audio") setFilter(next);
+            if (next === "all" || next === "image" || next === "video" || next === "audio") {
+              const nextVisible = new Set(assets.filter((asset) => next === "all" || asset.kind === next).map((asset) => asset.id));
+              const intersection = new Set([...selectedIds].filter((id) => nextVisible.has(id)));
+              if (intersection.size !== selectedIds.size) toast.info(t("hiddenSelectionCleared"));
+              onSelectedIdsChange(intersection);
+              setFilter(next);
+            }
           }}
         >
           {(["all", "image", "video", "audio"] as const).map((value) => (
@@ -201,11 +227,11 @@ export function AssetLibrary({
           <Button
             size="xs"
             variant="ghost"
-            aria-label={`${t("deleteAssets")} (${selectedIds.size})`}
+            aria-label={`${t("deleteAssets")} (${visibleSelectedIds.length})`}
             aria-keyshortcuts="Meta+Backspace"
-            onClick={() => onDelete([...selectedIds])}
+            onClick={() => onDelete(visibleSelectedIds)}
           >
-            <Trash2 /> {selectedIds.size}
+            <Trash2 /> {visibleSelectedIds.length}
           </Button>
         ) : null}
       </div>
@@ -248,7 +274,7 @@ export function AssetLibrary({
             onBlurCapture={(event) => {
               if (!event.currentTarget.contains(event.relatedTarget as Node | null)) onFocusedAssetChange?.(null);
             }}
-            className={`asset-tile ${selectedIds.has(asset.id) ? "selected" : ""} ${highlightedIds.has(asset.id) ? "just-added" : ""}`}
+            className={`asset-tile ${selectedIds.has(asset.id) ? "selected" : ""} ${highlightedIds.has(asset.id) ? "just-added" : ""} ${asset.storageAvailability === "missing" ? "storage-missing" : ""}`}
           >
             <Checkbox.Root
               className="asset-select"
@@ -283,14 +309,15 @@ export function AssetLibrary({
               onClick={() => setPreview(asset)}
             >
               <AssetPreview asset={asset} />
-              <span>{asset.kind === "image" ? <ImageIcon /> : asset.kind === "video" ? <Video /> : <AudioLines />}{t(ORIGIN_KEYS[asset.origin])}</span>
+              <span>{asset.storageAvailability === "missing" ? <><X />{t("managedFileMissing")}</> : <>{asset.kind === "image" ? <ImageIcon /> : asset.kind === "video" ? <Video /> : <AudioLines />}{t(ORIGIN_KEYS[asset.origin])}</>}</span>
             </Button>
             <footer>
               <span title={asset.name}>{asset.name}</span>
               <div>
-                <Button variant="ghost" size="icon-xs" aria-label={t("export")} aria-keyshortcuts="Meta+Shift+E" onClick={() => void exportAsset(asset)}><Download /></Button>
+                <Button variant="ghost" size="icon-xs" aria-label={t("export")} aria-keyshortcuts="Meta+Shift+E" disabled={asset.storageAvailability === "missing"} onClick={() => void exportAsset(asset)}><Download /></Button>
                 <Button variant="ghost" size="icon-xs" aria-label={t("preview")} onClick={() => setPreview(asset)}><Eye /></Button>
-                <Button variant="ghost" size="icon-xs" aria-label={t("useInput")} onClick={() => onUse(asset.id)}><Plus /></Button>
+                <Button variant="ghost" size="icon-xs" aria-label={t("useInput")} disabled={asset.storageAvailability === "missing"} onClick={() => onUse(asset.id)}><Plus /></Button>
+                {asset.kind === "image" ? <Button variant="ghost" size="icon-xs" aria-label={t("editOnCanvas")} disabled={asset.storageAvailability === "missing"} onClick={() => onEdit(asset.id)}><Paintbrush /></Button> : null}
               </div>
             </footer>
           </article>
@@ -299,10 +326,11 @@ export function AssetLibrary({
 
       <footer className="asset-library-footer">
         {visibleAssets.length ? (
-          <Button size="xs" variant="ghost" onClick={() => onSelectedIdsChange(selectedIds.size === visibleAssets.length ? new Set() : new Set(visibleAssets.map((asset) => asset.id)))}>
-            {selectedIds.size === visibleAssets.length ? t("clearSelection") : t("selectVisible")}
+          <Button size="xs" variant="ghost" onClick={() => onSelectedIdsChange(allVisibleSelected ? new Set() : new Set(visibleAssets.map((asset) => asset.id)))}>
+            {allVisibleSelected ? t("clearSelection") : t("selectVisible")}
           </Button>
         ) : <span>{t("noAssets", { kind: filter === "all" ? "" : `${t(filter)} ` })}</span>}
+        <span>{(storageBytes / 1024 / 1024).toFixed(1)} MB · {t("localStorage")}</span>
       </footer>
       {draggingFiles ? <div className="asset-library-drop-overlay"><Plus /> <strong>{t("releaseToImport")}</strong><small>{t("dropFilesHint")}</small></div> : null}
 
@@ -313,15 +341,17 @@ export function AssetLibrary({
             <Dialog.Popup className="asset-preview-dialog">
               <header>
                 <span>
-                  <Dialog.Title>{preview?.name}</Dialog.Title>
-                  <Dialog.Description>{preview ? t(preview.kind) : ""} · {preview ? t(ORIGIN_KEYS[preview.origin]) : ""} · {preview?.byteSize ? `${(preview.byteSize / 1024 / 1024).toFixed(2)} MB · ` : ""}{t("localStorage")}</Dialog.Description>
+                  <Dialog.Title>{previewAsset?.name}</Dialog.Title>
+                  <Dialog.Description>{previewAsset ? t(previewAsset.kind) : ""} · {previewAsset ? t(ORIGIN_KEYS[previewAsset.origin]) : ""} · {previewAsset?.byteSize ? `${(previewAsset.byteSize / 1024 / 1024).toFixed(2)} MB · ` : ""}{previewAsset?.storageAvailability === "missing" ? t("managedFileMissing") : t("localStorage")}</Dialog.Description>
                 </span>
                 <div>
-                  {preview ? <Button variant="ghost" size="sm" onClick={() => void exportAsset(preview)}><Download /> {t("export")}</Button> : null}
+                  {previewAsset?.storageAvailability === "missing" ? <Button variant="outline" size="sm" onClick={() => onReimport(previewAsset.id)}><RefreshCw /> {t("reimportAsset")}</Button> : null}
+                  {previewAsset?.localPath && previewAsset.storageAvailability !== "missing" && isTauriRuntime() ? <Button variant="ghost" size="sm" onClick={() => void revealAsset(previewAsset)}><FolderOpen /> {t("revealInFinder")}</Button> : null}
+                  {previewAsset && previewAsset.storageAvailability !== "missing" ? <Button variant="ghost" size="sm" onClick={() => void exportAsset(previewAsset)}><Download /> {t("export")}</Button> : null}
                   <Dialog.Close render={<Button variant="ghost" size="icon" />} aria-label={t("closePreview")}><X /></Dialog.Close>
                 </div>
               </header>
-              {preview ? <AssetPreview asset={preview} controls transparentControls /> : null}
+              {previewAsset ? <AssetPreview asset={previewAsset} controls transparentControls interactiveError /> : null}
             </Dialog.Popup>
           </Dialog.Viewport>
         </Dialog.Portal>

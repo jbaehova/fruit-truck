@@ -7,7 +7,9 @@ type ToastKind = "success" | "error" | "info";
 function addToast(kind: ToastKind, description: string) {
   return toastManager.add({
     type: kind,
-    title: kind === "success" ? "Completed" : kind === "error" ? "Something went wrong" : "Notice",
+    // The visible title is resolved through i18n by BaseToaster. Keep only a
+    // semantic fallback here so notifications never freeze an English label.
+    title: kind,
     description,
     priority: kind === "error" ? "high" : "low",
   });

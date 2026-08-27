@@ -97,6 +97,8 @@ function MaskCanvas({
   const activeStroke = useRef<MaskStroke | null>(null);
   const workingStrokes = useRef<MaskStroke[]>(strokes);
   const [source, setSource] = useState(asset.externalUrl ?? "");
+  const [keyboardCursor, setKeyboardCursor] = useState<MaskPoint>({ x: .5, y: .5 });
+  const [keyboardFocused, setKeyboardFocused] = useState(false);
 
   const redraw = useCallback((nextStrokes = workingStrokes.current) => {
     if (canvasRef.current && imageRef.current) {
@@ -163,6 +165,21 @@ function MaskCanvas({
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "z" && strokes.length) {
       event.preventDefault();
       onChange(strokes.slice(0, -1));
+      return;
+    }
+    if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) {
+      event.preventDefault();
+      const step = event.shiftKey ? .05 : .01;
+      setKeyboardCursor((current) => ({
+        x: Math.max(0, Math.min(1, current.x + (event.key === "ArrowRight" ? step : event.key === "ArrowLeft" ? -step : 0))),
+        y: Math.max(0, Math.min(1, current.y + (event.key === "ArrowDown" ? step : event.key === "ArrowUp" ? -step : 0))),
+      }));
+      return;
+    }
+    if (event.key === " " || event.key === "Enter") {
+      event.preventDefault();
+      const point = { x: Number(keyboardCursor.x.toFixed(4)), y: Number(keyboardCursor.y.toFixed(4)) };
+      onChange([...strokes, { size: brushSize, operation: tool, points: [point, point] }]);
     }
   };
 
@@ -190,9 +207,12 @@ function MaskCanvas({
         ref={canvasRef}
         className={editing && !preview ? `drawing ${tool}` : ""}
         aria-label={t("maskDrawingCanvas")}
+        aria-description={t("maskKeyboardHint")}
         aria-disabled={!editing || preview}
         tabIndex={editing && !preview ? 0 : -1}
         onKeyDown={handleKeyDown}
+        onFocus={() => setKeyboardFocused(true)}
+        onBlur={() => setKeyboardFocused(false)}
         onPointerDown={(event) => {
           if (!editing || preview) return;
           event.preventDefault();
@@ -216,6 +236,7 @@ function MaskCanvas({
         }}
         onPointerCancel={finishStroke}
       />
+      {keyboardFocused && editing && !preview ? <span className="mask-keyboard-cursor" aria-hidden="true" style={{ left: `${keyboardCursor.x * 100}%`, top: `${keyboardCursor.y * 100}%`, width: brushSize, height: brushSize }} /> : null}
     </div>
   );
 }

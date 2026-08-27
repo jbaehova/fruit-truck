@@ -20,7 +20,7 @@ Explore OpenRouter models, shape a request around each model's real capabilities
 
 <br />
 
-[Why Fruit Truck?](#why-fruit-truck) · [Features](#features) · [How it works](#how-it-works) · [Download](#download) · [Quick start](#quick-start) · [Security](#security-and-local-data) · [Development](#development)
+[Why Fruit Truck?](#why-fruit-truck) · [Features](#features) · [Supported capabilities](#supported-capabilities) · [How it works](#how-it-works) · [Download](#download) · [Quick start](#quick-start) · [Security](#security-and-local-data) · [Development](#development)
 
 </div>
 
@@ -48,15 +48,33 @@ Fruit Truck adapts the workspace and request to the selected model instead of as
 - **Live model and price discovery** — loads image and video catalogs, endpoint capabilities, and published pricing from OpenRouter.
 - **Capability-aware controls** — renders supported options, clamps constrained values, and validates provider-specific passthrough fields against the selected endpoint.
 - **Model-aware prompt enhancement** — turns the original intent into a structured plan, then compiles it with a profile suited to the target image or video model. Enhancement can be enabled once for every current and future thread.
-- **Reference contracts** — assigns stable `@1`, `@2`, … inputs a purpose such as subject identity, product identity, style, composition, pose, motion, audio, or context. Required mappings are verified before generation; optional gaps remain visible as warnings.
-- **Image and video workflows** — supports text generation, multi-reference composition, first/last-frame video, image editing, and semantic-mask edits according to the selected model's declared support.
+- **Reference contracts** — assigns stable `@1`, `@2`, … inputs a purpose such as subject identity, product identity, style, composition, pose, motion, audio, or context when the selected endpoint declares that reference type. Required mappings are verified before generation; optional gaps remain visible as warnings.
+- **Image and video workflows** — supports text-to-image/video generation, multi-reference composition, image editing, and semantic-mask edits according to the selected model's verified endpoint support. Prompt enhancement uses a separate chat-completions planner; Fruit Truck is not a general chat client.
 - **Independent generation threads** — keeps image and video prompts, models, options, attempts, and background work isolated while several ideas progress in parallel.
 - **Request inspector** — shows the provider-facing prompt, numbered-input mapping, native transport field, and sanitized JSON without embedding local media bodies.
-- **Result follow-up** — reviews generated candidates and can reuse a result as a new input, an image-edit target, or a video reference.
+- **Result follow-up** — reviews generated candidates and can reuse a result as a new input or image-edit target where the selected endpoint supports it; video references remain closed until their transport is verified.
 - **Job and cost continuity** — restores active video polling, records attempt history, and keeps estimated or actual generation and enhancement costs in a per-session ledger.
 - **Asset Library** — imports and previews image, video, and audio files; filters, reuses, deletes, and exports managed results to Downloads.
 - **Desktop-native workflow** — provides macOS menus and shortcuts, a maximized full-window layout, English and Korean UI, and signed in-app updates.
 - **Managed local data** — keeps uploads, generated media, session state, and credentials on the Mac instead of placing Base64 media in saved metadata.
+
+## Supported capabilities
+
+Fruit Truck is intentionally an OpenRouter image/video studio. A model in the
+live catalog is not a promise that every OpenRouter endpoint or provider
+feature is available in the app.
+
+| Capability | Endpoint | Status |
+| --- | --- | --- |
+| Text-to-image and image editing | `/api/v1/images` | Supported when the selected endpoint declares the required options and references |
+| Text-to-video | `/api/v1/videos` | Supported with persisted job polling |
+| Prompt enhancement | `/api/v1/chat/completions` | Optional planner request; not general chat |
+| Video image/video/audio references and editing | `/api/v1/videos` | Unavailable until a verified public HTTPS or signed-upload transport is configured |
+| General chat, Responses, tools/function calling, TTS, STT, audio output, embeddings | Various | Not exposed in this studio |
+
+The live endpoint metadata and Fruit Truck's request validator determine the
+supported route. Direct-provider documentation alone does not enable an
+OpenRouter capability. See the fuller [support matrix](./docs/SUPPORT.md).
 
 ## How it works
 
@@ -75,11 +93,11 @@ flowchart LR
     G --> K[Session cost ledger]
 ```
 
-1. Fruit Truck fetches OpenRouter's image and video catalogs, their prices, and the capabilities needed to build a valid request.
+1. Fruit Truck fetches OpenRouter's image and video catalogs, their prices, and the endpoint capabilities needed to build a valid request.
 2. Each generation thread keeps its own mode, model, prompt, numbered inputs, and options.
 3. When prompt enhancement is enabled, the selected planner preserves the original intent and creates reference-by-reference instructions for the active workflow and target model.
 4. Fruit Truck compiles the final provider prompt, removes unsupported fields, validates reference coverage and provider options, and exposes the sanitized result in **Request preview**.
-5. Images enter candidate review immediately. Video jobs remain attached to the session and resume polling after the app is reopened.
+5. Images enter candidate review immediately. Video jobs remain attached to the session and resume polling after the app is reopened. Unsupported reference transports are blocked before a planner or paid generation request.
 6. Accepted outputs are materialized in managed local storage and can be exported or routed into the next generation.
 
 ## Download
@@ -90,7 +108,7 @@ Fruit Truck currently ships for **Apple Silicon Macs only**. Intel Macs are not 
 
 The stable asset filename contains `universal`, but the release workflow and bundled executable target `aarch64-apple-darwin`. Installed builds include the native media-inspection tool they need; app users do not need Node.js, Rust, Homebrew, or a separate FFmpeg installation.
 
-After installing, open Fruit Truck and follow the one-minute setup to save an [OpenRouter API key](https://openrouter.ai/settings/keys). The app checks signed updates and can install them without replacing the workspace manually.
+After installing, open Fruit Truck and follow the one-minute setup to save an [OpenRouter API key](https://openrouter.ai/settings/keys). The key is stored locally, but prompts and selected media leave the Mac when you generate. The app checks signed updates and can install them without replacing the workspace manually.
 
 ## Quick start
 
@@ -122,14 +140,16 @@ npm run tauri:dev
 
 For the browser-only development view, run `./run.sh --web` from the repository root or `npm run dev` from `apps/desktop`. Native credential and managed-file behavior is available in the Tauri app; the browser view uses development fallbacks.
 
+To verify a fresh source checkout without opening a window, run `./run.sh --check`. It installs the lockfile dependencies when needed, validates the TypeScript/OpenRouter/release contracts, and runs a locked Rust check; CI executes this same path.
+
 ### Create your first generation
 
 1. Add the OpenRouter key during first-run setup. It can be changed later in **Settings**.
 2. Choose an image or video thread and select a model by capability and price.
 3. Write the prompt and, when useful, drag media from the Asset Library into the input tray.
 4. Set the purpose and transport role of every reference. Use `@1`, `@2`, and so on when referring to a specific input in the prompt.
-5. Keep prompt enhancement on for a model-aware rewrite, or turn it off to send the original prompt through the same request validation.
-6. Open **Request** to verify the final JSON and reference mapping, then generate and continue from the result.
+5. Keep prompt enhancement on for a model-aware rewrite, or turn it off to send the original prompt through the same request validation. Enhancement sends a separate planner request to `/chat/completions` before generation; review its possible cost and transfer notice.
+6. Open **Request** to verify the final JSON, route, privacy notice, file count/size, and reference mapping, then generate and continue from the result.
 
 ## Security and local data
 
@@ -146,6 +166,9 @@ The Tauri app stores its data under `~/.fruit-truck` by default:
 - The API key is masked in the interface and excluded from request previews and application logs.
 - The key is attached only by the Rust process, whose proxy accepts the specific OpenRouter catalog, generation, endpoint, and job paths used by the app.
 - Request previews replace local media payloads with readable placeholders instead of exposing Base64 data.
+- A generation sends the prompt and the selected reference files to OpenRouter, which may route them to a downstream provider. Provider retention, training, and ZDR policies apply; local credential storage does not make cloud generation local.
+- Prompt enhancement is a separate planner request and may send the prompt and supported visual context to the planner model before the final generation request. Review the planner cost and transfer notice before the first generation.
+- Video routes can require temporary retention. An enforced ZDR constraint that the selected route cannot satisfy blocks the request; ZDR is not a universal guarantee.
 - Local imports reject empty files and enforce safety limits of 30 MB for images, 700 MB for videos, and 50 MB for audio.
 - The browser-only development view uses local storage as a fallback. Use the Tauri app for native credential and file handling.
 
@@ -159,17 +182,29 @@ Run the same core checks used by CI from `apps/desktop`:
 npm ci
 npm run check
 npm run test:unit
+npm run test:coverage
 npm run build
 npm run test:e2e
 cargo test --manifest-path src-tauri/Cargo.toml
+cargo fmt --check --manifest-path src-tauri/Cargo.toml
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+cargo llvm-cov --manifest-path src-tauri/Cargo.toml --all-features --lcov --output-path "$TMPDIR/fruit-truck-rust.lcov" --fail-under-lines 35 --fail-under-functions 20
+npm run check:licenses
+npm run sbom -- --output "$TMPDIR/fruit-truck.cdx.json"
 ```
+
+Install the pinned Rust coverage tool once with
+`cargo install cargo-llvm-cov --version 0.9.0 --locked` if it is not already
+available on your `PATH`.
+
+`npm run build` also enforces a production JavaScript budget of 900,000 bytes
+uncompressed and 300,000 bytes gzip-compressed.
 
 Playwright always runs headless with a 1920×1080 viewport, matching the desktop app's default maximized-window workflow.
 
 ### macOS release
 
-`npm run bundle:mac` builds the pinned FFmpeg project source for Apple Silicon but packages only its `ffprobe` executable. The app does **not** bundle or invoke the `ffmpeg` program. FFmpeg licensing notices and build configuration remain in the bundle because FFprobe is an FFmpeg project output.
+`npm run bundle:mac` builds the pinned FFmpeg project source for Apple Silicon but packages only its `ffprobe` executable. The app does **not** bundle or invoke the `ffmpeg` program. FFmpeg licensing notices and build configuration remain in the bundle because FFprobe is an FFmpeg project output. The matching source archive, build configuration, and SHA-256 manifest are uploaded as named release assets; see [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md).
 
 The release workflow builds, signs, notarizes, and staples the DMG, verifies the Apple Silicon app bundle, and publishes signed Tauri updater artifacts. See [docs/RELEASING.md](./docs/RELEASING.md) for the complete release contract.
 

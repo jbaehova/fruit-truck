@@ -58,4 +58,7 @@ test("first-time setup provides the same connection flow in Korean", async ({ pa
   await expect(page.getByRole("heading", { name: "이제 만들 준비가 됐습니다." })).toBeVisible();
   await expect(page.locator(".onboarding-dialog")).toHaveCount(0, { timeout: 3_000 });
   await expect(page.getByRole("button", { name: "설정" })).toBeVisible();
+  const openSidebar = page.getByRole("button", { name: "세션 사이드바 열기" });
+  if (await openSidebar.isVisible().catch(() => false)) await openSidebar.click();
+  await expect(page.locator(".session-row-main").getByText("첫 번째 세션", { exact: true })).toBeVisible();
 });

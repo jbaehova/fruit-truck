@@ -1,7 +1,37 @@
-import type { DraftOptions, GenerationMode, GenerationModel, ReferenceRole, VideoModel } from "./openrouter.ts";
+import type {
+  DraftOptions,
+  GenerationMode,
+  GenerationModel,
+  ReferenceRole,
+  VideoModel,
+  VideoModelEndpoint,
+} from "./openrouter.ts";
 
 export type InputMediaKind = "image" | "video" | "audio";
 export type FacePresence = "present" | "absent" | "unknown";
+/** Transports which can be proven at the OpenRouter endpoint boundary. */
+export type VideoReferenceTransport = "data_url" | "https_url" | "signed_url" | "http_url" | "local_file";
+
+export type VideoSupportMatrixEntry = {
+  key: string;
+  modelId: string;
+  endpointId?: string;
+  providerSlug?: string;
+  providerName?: string;
+  kind: InputMediaKind;
+  transport: VideoReferenceTransport;
+  limit: number;
+  aggregateLimit?: number;
+  supported: boolean;
+  verified: boolean;
+  reason: string;
+};
+
+export type VideoSupportMatrix = {
+  modelId: string;
+  entries: VideoSupportMatrixEntry[];
+  byKey: Record<string, VideoSupportMatrixEntry>;
+};
 
 export type PolicySource = {
   label: string;
@@ -184,20 +214,233 @@ export function videoInputPolicy(modelId: string): VideoInputPolicy {
   return VIDEO_POLICIES.find((entry) => entry.test(modelId))?.policy ?? DEFAULT_POLICY;
 }
 
+const VIDEO_REFERENCE_TRANSPORTS: VideoReferenceTransport[] = ["https_url", "signed_url", "data_url", "http_url", "local_file"];
+
+function normalizedTransport(value: unknown): VideoReferenceTransport | null {
+  const normalized = String(value ?? "").toLowerCase().replace(/[\s-]+/g, "_");
+  if (normalized === "http" || normalized === "http_url") return "http_url";
+  if (normalized === "https" || normalized === "url" || normalized === "https_url" || normalized === "remote_url" || normalized === "public_url") return "https_url";
+  if (normalized === "signed" || normalized === "signed_url" || normalized === "presigned_url") return "signed_url";
+  if (normalized === "data" || normalized === "data_url" || normalized === "data_uri" || normalized === "base64") return "data_url";
+  if (normalized === "local" || normalized === "local_file" || normalized === "file") return "local_file";
+  return null;
+}
+
+function endpointTransports(endpoint: VideoModelEndpoint | undefined, kind: InputMediaKind): VideoReferenceTransport[] {
+  const raw = endpoint?.reference_transports ?? endpoint?.input_reference_transports;
+  if (Array.isArray(raw)) return raw.map(normalizedTransport).filter((value): value is VideoReferenceTransport => value != null);
+  if (raw && typeof raw === "object") {
+    const values = (raw as Partial<Record<InputMediaKind, unknown[]>>)[kind];
+    return Array.isArray(values)
+      ? values.map(normalizedTransport).filter((value): value is VideoReferenceTransport => value != null)
+      : [];
+  }
+  return [];
+}
+
+function endpointReferenceLimit(endpoint: VideoModelEndpoint | undefined): number | undefined {
+  if (!endpoint) return undefined;
+  if (endpoint.max_input_references != null && Number.isFinite(endpoint.max_input_references)) {
+    return Math.max(0, endpoint.max_input_references);
+  }
+  const descriptor = endpoint.supported_parameters?.input_references;
+  return descriptor?.max != null && Number.isFinite(descriptor.max)
+    ? Math.max(0, descriptor.max)
+    : undefined;
+}
+
+function modelTransports(model: VideoModel, kind: InputMediaKind): VideoReferenceTransport[] {
+  if (model.reference_transport_source !== "openrouter_endpoint" && model.reference_transport_source !== "contract_fixture") return [];
+  const raw = model.reference_transports;
+  if (Array.isArray(raw)) return raw.map(normalizedTransport).filter((value): value is VideoReferenceTransport => value != null);
+  if (raw && typeof raw === "object") {
+    const values = (raw as Partial<Record<InputMediaKind, unknown[]>>)[kind];
+    return Array.isArray(values)
+      ? values.map(normalizedTransport).filter((value): value is VideoReferenceTransport => value != null)
+      : [];
+  }
+  return [];
+}
+
+export function videoSupportMatrixKey(
+  modelId: string,
+  endpointId: string | undefined,
+  providerSlug: string | undefined,
+  kind: InputMediaKind,
+  transport: VideoReferenceTransport,
+  limit?: number,
+): string {
+  return [modelId, endpointId ?? "", providerSlug ?? "", kind, transport, limit ?? ""].join("|");
+}
+
+/**
+ * Build the conservative video reference capability matrix. Model-level
+ * `input_reference_types` is not enough to activate a transport: an endpoint
+ * must explicitly declare the transport (or a checked contract fixture must
+ * mark the model source as verified). This prevents direct-provider policy
+ * notes from accidentally enabling OpenRouter data/local uploads.
+ */
+export function buildVideoSupportMatrix(
+  model: VideoModel,
+  endpoint?: VideoModelEndpoint,
+): VideoSupportMatrix {
+  const policy = videoInputPolicy(model.id);
+  const endpoints = endpoint ? [endpoint] : model.endpoints?.length ? model.endpoints : [undefined];
+  const entries: VideoSupportMatrixEntry[] = [];
+  const modelAggregate = model.max_input_references == null
+    ? undefined
+    : Math.max(0, model.max_input_references);
+  const policyAggregate = policy.totalReferenceLimit == null ? undefined : Math.max(0, policy.totalReferenceLimit);
+  const modelAggregateCandidates = [modelAggregate, policyAggregate].filter((value): value is number => value != null);
+  const modelRouteAggregate = modelAggregateCandidates.length ? Math.min(...modelAggregateCandidates) : undefined;
+  for (const candidate of endpoints) {
+    // Each hydrated endpoint has its own aggregate limit. Do not combine it
+    // with a model-level union or direct-provider policy limit.
+    const aggregateLimit = candidate ? endpointReferenceLimit(candidate) : modelRouteAggregate;
+    for (const kind of ["image", "video", "audio"] as const) {
+      const endpointKinds = candidate?.input_reference_types ?? [];
+      const declaredKind = endpointKinds.includes(kind);
+      const declaredTransports = endpointTransports(candidate, kind);
+      const modelDeclaredTransports = !candidate ? modelTransports(model, kind) : [];
+      const transports = candidate ? declaredTransports : modelDeclaredTransports;
+      const explicitlySupported = Boolean(candidate && candidate.supports_references !== false && (declaredKind || declaredTransports.length > 0) && declaredTransports.length > 0)
+        || Boolean(!candidate && modelDeclaredTransports.length > 0);
+      const policyLimit = policy.references[kind];
+      const endpointLimit = endpointReferenceLimit(candidate);
+      // Endpoint limits are definitive. Direct-provider policy limits are
+      // only fallback hints for an unhydrated model-level route.
+      const kindCandidates = candidate
+        ? [endpointLimit, aggregateLimit]
+        : [policyLimit, aggregateLimit];
+      const filteredCandidates = kindCandidates.filter((value): value is number => value != null);
+      const limit = filteredCandidates.length ? Math.min(...filteredCandidates) : (explicitlySupported ? 1 : 0);
+      for (const transport of VIDEO_REFERENCE_TRANSPORTS) {
+        const supported = explicitlySupported && transports.includes(transport);
+        const key = videoSupportMatrixKey(model.id, candidate?.endpoint_id ?? candidate?.id, candidate?.provider_slug, kind, transport, supported ? limit : 0);
+        entries.push({
+          key,
+          modelId: model.id,
+          endpointId: candidate?.endpoint_id ?? candidate?.id,
+          providerSlug: candidate?.provider_slug,
+          providerName: candidate?.provider_name,
+          kind,
+          transport,
+          limit: supported ? limit : 0,
+          aggregateLimit,
+          supported,
+          verified: supported,
+          reason: supported
+            ? "The selected OpenRouter endpoint explicitly declares this reference transport."
+            : candidate
+              ? "The selected endpoint does not explicitly declare this reference transport."
+              : "No verified OpenRouter endpoint transport metadata is available.",
+        });
+      }
+    }
+  }
+  return {
+    modelId: model.id,
+    entries,
+    byKey: Object.fromEntries(entries.map((entry) => [entry.key, entry])),
+  };
+}
+
+export const videoReferenceSupportMatrix = buildVideoSupportMatrix;
+export const videoSupportMatrix = buildVideoSupportMatrix;
+
+export function videoReferenceCapability(
+  model: VideoModel,
+  kind: InputMediaKind,
+  transport: VideoReferenceTransport,
+  endpoint?: VideoModelEndpoint,
+): VideoSupportMatrixEntry {
+  const matrix = buildVideoSupportMatrix(model, endpoint);
+  const entry = matrix.entries.find((candidate) => candidate.kind === kind && candidate.transport === transport);
+  return entry ?? {
+    key: videoSupportMatrixKey(model.id, endpoint?.endpoint_id ?? endpoint?.id, endpoint?.provider_slug, kind, transport, 0),
+    modelId: model.id,
+    endpointId: endpoint?.endpoint_id ?? endpoint?.id,
+    providerSlug: endpoint?.provider_slug,
+    providerName: endpoint?.provider_name,
+    kind,
+    transport,
+    limit: 0,
+    aggregateLimit: model.max_input_references ?? undefined,
+    supported: false,
+    verified: false,
+    reason: "No matching verified endpoint capability was found.",
+  };
+}
+
+export type VideoReferenceTransportIssue = {
+  code: "unverified_reference_transport" | "too_many_references";
+  slot?: number;
+  kind?: InputMediaKind;
+  transport?: VideoReferenceTransport;
+  limit?: number;
+  message: string;
+};
+
+export function assessVideoReferenceTransport(
+  model: VideoModel,
+  references: Array<{ slot: number; kind: InputMediaKind; transport: VideoReferenceTransport }>,
+  endpoint?: VideoModelEndpoint,
+): VideoReferenceTransportIssue[] {
+  const matrix = buildVideoSupportMatrix(model, endpoint);
+  const issues: VideoReferenceTransportIssue[] = [];
+  for (const reference of references) {
+    const matches = matrix.entries.filter((candidate) => candidate.kind === reference.kind && candidate.transport === reference.transport);
+    // Without a selected endpoint every possible route must support the
+    // transport; otherwise the request could be routed to a provider that
+    // ignores or rejects the reference.
+    if (!matches.length || matches.some((entry) => !entry.supported || !entry.verified)) {
+      issues.push({
+        code: "unverified_reference_transport",
+        slot: reference.slot,
+        kind: reference.kind,
+        transport: reference.transport,
+        message: `Reference @${reference.slot} uses an unverified ${reference.transport} transport for this OpenRouter endpoint.`,
+      });
+    }
+  }
+  const routeAggregates = endpoint
+    ? [endpointReferenceLimit(endpoint)]
+    : (model.endpoints ?? []).map((candidate) => endpointReferenceLimit(candidate));
+  const knownRouteAggregates = routeAggregates.filter((value): value is number => value != null);
+  const aggregateLimit = knownRouteAggregates.length
+    ? Math.min(...knownRouteAggregates)
+    : endpoint ? undefined : model.max_input_references ?? videoInputPolicy(model.id).totalReferenceLimit;
+  if (aggregateLimit != null && references.length > aggregateLimit) {
+    issues.push({
+      code: "too_many_references",
+      limit: aggregateLimit,
+      message: `This endpoint accepts at most ${aggregateLimit} total reference inputs; received ${references.length}.`,
+    });
+  }
+  return issues;
+}
+
+export function videoReferenceTransportForUrl(value: string): VideoReferenceTransport {
+  const normalized = value.trim().toLowerCase();
+  if (normalized.startsWith("data:")) return "data_url";
+  if (normalized.startsWith("fruit-truck-local:") || normalized.startsWith("file:") || normalized.startsWith("/")) return "local_file";
+  if (normalized.startsWith("https://")) return "https_url";
+  if (normalized.startsWith("http://")) return "http_url";
+  return "local_file";
+}
+
 export function isSeedance20Model(modelId: string): boolean {
   return /^bytedance\/seedance-2\.0(?:$|-)/.test(modelId);
 }
 
-export function applyKnownVideoCapabilities(model: VideoModel): VideoModel {
-  const policy = videoInputPolicy(model.id);
-  const declared = new Set(model.input_reference_types ?? []);
-  for (const [kind, limit] of Object.entries(policy.references)) {
-    if ((limit ?? 0) > 0) declared.add(kind as InputMediaKind);
-  }
+export function applyVideoCapabilityProvenance(model: VideoModel): VideoModel {
+  // Direct-provider documentation is useful for policy notices and for
+  // narrowing an input that OpenRouter already declared. It is never proof
+  // that an OpenRouter route transports that input, so do not synthesize
+  // reference kinds or limits into the live catalog.
   return {
     ...model,
-    input_reference_types: declared.size ? [...declared] : model.input_reference_types,
-    max_input_references: model.max_input_references ?? policy.references.image ?? null,
+    reference_transport_source: model.reference_transport_source ?? "unknown",
   };
 }
 
@@ -244,6 +487,7 @@ export type InputAssetFacts = {
   mimeType?: string;
   codec?: string;
   facePresence?: FacePresence;
+  transport?: VideoReferenceTransport;
 };
 
 export type InputConstraintCode =
@@ -251,7 +495,7 @@ export type InputConstraintCode =
   | "duplicate_first_frame" | "duplicate_last_frame" | "frame_requires_image" | "audio_requires_visual" | "audio_requires_image"
   | "media_too_large" | "unsupported_media_format" | "unsupported_media_codec" | "dimensions_too_small" | "dimensions_too_large" | "aspect_ratio_unsupported"
   | "duration_too_short" | "duration_too_long" | "combined_duration_too_long" | "fps_too_high"
-  | "resolution_with_references" | "frames_will_crop" | "real_person_blocked" | "face_check_unavailable";
+  | "resolution_with_references" | "frames_will_crop" | "real_person_blocked" | "face_check_unavailable" | "unverified_reference_transport";
 
 export type InputConstraint = {
   code: InputConstraintCode;
@@ -271,6 +515,9 @@ export function assessInputConstraints({
   allowedRoles,
   limit,
   referenceLimit,
+  totalReferenceLimit,
+  modelMaxInputReferences,
+  endpoint,
   mode,
   modelId = "",
   options = {},
@@ -279,6 +526,9 @@ export function assessInputConstraints({
   allowedRoles: ReferenceRole[];
   limit: number;
   referenceLimit?: number;
+  totalReferenceLimit?: number;
+  modelMaxInputReferences?: number;
+  endpoint?: VideoModelEndpoint;
   mode: GenerationMode;
   modelId?: string;
   options?: DraftOptions;
@@ -299,8 +549,12 @@ export function assessInputConstraints({
   if (referenceLimit != null && general.filter((reference) => reference.kind === "image").length > referenceLimit) {
     issues.push({ code: "too_many_inputs", severity: "error", limit: referenceLimit, value: "image" });
   }
-  if (policy.totalReferenceLimit != null && general.length > policy.totalReferenceLimit) {
-    issues.push({ code: "too_many_inputs", severity: "error", limit: policy.totalReferenceLimit });
+  const aggregateLimit = totalReferenceLimit
+    ?? endpoint?.max_input_references
+    ?? modelMaxInputReferences
+    ?? policy.totalReferenceLimit;
+  if (aggregateLimit != null && general.length > aggregateLimit) {
+    issues.push({ code: "too_many_inputs", severity: "error", limit: aggregateLimit });
   }
 
   const frames = references.filter((reference) => reference.role === "first_frame" || reference.role === "last_frame");
@@ -318,6 +572,15 @@ export function assessInputConstraints({
   }
   if (policy.audioRequiresImage && general.some((reference) => reference.kind === "audio") && !general.some((reference) => reference.kind === "image")) {
     issues.push({ code: "audio_requires_image", severity: "error" });
+  }
+  if (endpoint && references.some((reference) => reference.transport)) {
+    const transportModel: VideoModel = { id: modelId, name: modelId, endpoints: [endpoint] };
+    const transportIssues = assessVideoReferenceTransport(transportModel, references
+      .filter((reference): reference is InputAssetFacts & { transport: VideoReferenceTransport } => Boolean(reference.transport))
+      .map((reference) => ({ slot: reference.slot, kind: reference.kind, transport: reference.transport })), endpoint);
+    for (const issue of transportIssues.filter((candidate) => candidate.code === "unverified_reference_transport")) {
+      issues.push({ code: "unverified_reference_transport", severity: "error", slot: issue.slot, value: issue.transport });
+    }
   }
   for (const reference of references) {
     const spec = sizePolicy(policy, reference.kind);
