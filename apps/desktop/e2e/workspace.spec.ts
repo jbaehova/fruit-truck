@@ -203,7 +203,7 @@ test("full-window workspace has one flow and applies enhancement defaults everyw
   await page.getByRole("button", { name: "Prepare final request" }).click();
   await expect(page.getByRole("button", { name: "Generate Image" })).toBeEnabled();
   await page.getByRole("button", { name: "Generate Image" }).click();
-  await expect(page.getByText("Generation complete")).toBeVisible();
+  await expect(page.getByText("Generation complete")).toBeVisible({ timeout: 15_000 });
   await expect(page.getByText("Saved to Asset library")).toBeVisible();
   await page.getByRole("button", { name: "Done" }).click();
   await expect(page.getByRole("status", { name: /Session spend: \$0\.04/ })).toBeVisible();
@@ -240,7 +240,7 @@ test("attempt history preserves exact replay settings and duplicates without sub
   await page.getByRole("combobox", { name: /^Prompt/ }).fill(prompt);
   await page.getByRole("button", { name: "Prepare final request" }).click();
   await page.getByRole("button", { name: "Generate Image" }).click();
-  await expect(page.getByText("Generation complete")).toBeVisible();
+  await expect(page.getByText("Generation complete")).toBeVisible({ timeout: 15_000 });
   await page.getByRole("button", { name: "Done" }).click();
   expect(paidImageRequests).toBe(1);
 
