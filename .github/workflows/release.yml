@@ -48,6 +48,7 @@ jobs:
             apps/desktop/package.json
             apps/desktop/src-tauri/Cargo.lock
             apps/desktop/src-tauri/Cargo.toml
+            apps/desktop/src-tauri/osv-scanner.toml
           if-no-files-found: error
           retention-days: 2
 
@@ -166,9 +167,7 @@ jobs:
           components: rustfmt, clippy, llvm-tools-preview
 
       - name: Install pinned cargo-deny
-        uses: taiki-e/install-action@67f0979373f19b7d59af7e976dfcb10ae9848006
-        with:
-          tool: cargo-deny@0.19.9
+        run: cargo install cargo-deny --locked --version 0.19.9
 
       - name: Install pinned cargo-llvm-cov
         run: cargo install cargo-llvm-cov --locked --version 0.9.0

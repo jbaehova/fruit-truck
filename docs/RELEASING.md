@@ -43,7 +43,11 @@ The license check covers both npm and third-party Cargo packages from the
 locked dependency graph. Cargo-deny keeps vulnerable, yanked, and unknown
 source findings fatal; unmaintained advisories are scoped to direct workspace
 packages because the current Tauri native stack includes transitive GTK/WebKit
-crates without a compatible maintained replacement.
+crates without a compatible maintained replacement. OSV exceptions are listed
+by advisory ID with reasons and review expiry dates in
+`apps/desktop/src-tauri/osv-scanner.toml`. Linux-only GTK findings are allowed
+only after confirming they are absent from the Apple Silicon target tree;
+new or unlisted vulnerabilities remain fatal.
 
 The contract requires the release bundle to contain only `ffprobe` as an
 external executable. It rejects the removed media renderer and old helper

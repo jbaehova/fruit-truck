@@ -10,6 +10,7 @@ on:
       - "apps/desktop/package.json"
       - "apps/desktop/src-tauri/Cargo.lock"
       - "apps/desktop/src-tauri/Cargo.toml"
+      - "apps/desktop/src-tauri/osv-scanner.toml"
       - "apps/desktop/scripts/check-dependency-licenses.mjs"
       - "apps/desktop/scripts/generate-sbom.mjs"
       - "apps/desktop/scripts/run-supply-chain-checks.sh"
@@ -21,6 +22,7 @@ on:
       - "apps/desktop/package.json"
       - "apps/desktop/src-tauri/Cargo.lock"
       - "apps/desktop/src-tauri/Cargo.toml"
+      - "apps/desktop/src-tauri/osv-scanner.toml"
       - "apps/desktop/scripts/check-dependency-licenses.mjs"
       - "apps/desktop/scripts/generate-sbom.mjs"
       - "apps/desktop/scripts/run-supply-chain-checks.sh"
@@ -53,9 +55,7 @@ jobs:
           toolchain: 1.96.0
 
       - name: Install pinned cargo-deny
-        uses: taiki-e/install-action@67f0979373f19b7d59af7e976dfcb10ae9848006
-        with:
-          tool: cargo-deny@0.19.9
+        run: cargo install cargo-deny --locked --version 0.19.9
 
       - name: Install JavaScript dependencies without lifecycle scripts
         working-directory: apps/desktop

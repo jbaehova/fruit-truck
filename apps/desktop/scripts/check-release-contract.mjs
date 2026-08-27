@@ -24,6 +24,8 @@ const ffmpegEnvironment = readText("apps/desktop/scripts/ffmpeg-version.env");
 const mediaBuildScript = readText("apps/desktop/scripts/build-ffmpeg-macos.sh");
 const releaseWorkflow = readText(".github/workflows/release.yml");
 const checkWorkflow = readText(".github/workflows/check.yml");
+const supplyChainWorkflow = readText(".github/workflows/supply-chain.yml");
+const osvConfiguration = readText("apps/desktop/src-tauri/osv-scanner.toml");
 const thirdPartyNotices = readText("THIRD_PARTY_NOTICES.md");
 const releaseDocs = readText("docs/RELEASING.md");
 const supportDocs = readText("docs/SUPPORT.md");
@@ -175,6 +177,9 @@ assert.match(releaseWorkflow, /(?:npm run check:licenses|run-supply-chain-checks
 assert.match(releaseWorkflow, /(?:npm run sbom|run-supply-chain-checks\.sh)/, "Release workflow does not produce an SBOM.");
 assert.match(releaseWorkflow, /(?:npm audit --audit-level=high|run-supply-chain-checks\.sh)/, "Release workflow does not gate on npm advisories.");
 assert.match(releaseWorkflow, /(?:cargo deny|run-supply-chain-checks\.sh)/, "Release workflow does not gate on Rust advisory/license/source checks.");
+assert.match(releaseWorkflow, /src-tauri\/osv-scanner\.toml/, "Release OSV artifact omits its audited exception policy.");
+assert.match(supplyChainWorkflow, /src-tauri\/osv-scanner\.toml/, "Supply-chain workflow does not rerun when the OSV policy changes.");
+assert.match(osvConfiguration, /ignoreUntil\s*=\s*\d{4}-\d{2}-\d{2}/, "OSV exceptions must expire for review.");
 
 for (const [workflowName, workflow] of workflowFiles) {
   for (const match of workflow.matchAll(/^\s*uses:\s*([^\s@]+)@([^\s#]+)\s*$/gm)) {

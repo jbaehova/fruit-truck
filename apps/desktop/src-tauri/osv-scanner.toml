@@ -1,0 +1,92 @@
+# Fruit Truck ships only aarch64 macOS. These GTK3 advisories belong to
+# Linux-only Tauri lockfile branches and are absent from:
+# cargo tree --target aarch64-apple-darwin
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0411"
+ignoreUntil = 2027-02-28
+reason = "Linux-only GTK3 transitive dependency; not selected by the Apple Silicon release target."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0412"
+ignoreUntil = 2027-02-28
+reason = "Linux-only GTK3 transitive dependency; not selected by the Apple Silicon release target."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0413"
+ignoreUntil = 2027-02-28
+reason = "Linux-only GTK3 transitive dependency; not selected by the Apple Silicon release target."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0414"
+ignoreUntil = 2027-02-28
+reason = "Linux-only GTK3 transitive dependency; not selected by the Apple Silicon release target."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0415"
+ignoreUntil = 2027-02-28
+reason = "Linux-only GTK3 transitive dependency; not selected by the Apple Silicon release target."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0416"
+ignoreUntil = 2027-02-28
+reason = "Linux-only GTK3 transitive dependency; not selected by the Apple Silicon release target."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0417"
+ignoreUntil = 2027-02-28
+reason = "Linux-only GTK3 transitive dependency; not selected by the Apple Silicon release target."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0418"
+ignoreUntil = 2027-02-28
+reason = "Linux-only GTK3 transitive dependency; not selected by the Apple Silicon release target."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0419"
+ignoreUntil = 2027-02-28
+reason = "Linux-only GTK3 transitive dependency; not selected by the Apple Silicon release target."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0420"
+ignoreUntil = 2027-02-28
+reason = "Linux-only GTK3 transitive dependency; not selected by the Apple Silicon release target."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0429"
+ignoreUntil = 2027-02-28
+reason = "Affected glib 0.18 is reachable only through the Linux GTK3 branch and is absent from the macOS release target."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0370"
+ignoreUntil = 2027-02-28
+reason = "Unmaintained transitive macro crate absent from the Apple Silicon release target; no patched version is available upstream."
+
+# These are unmaintained notices, not exploitable vulnerability reports. They
+# are pulled through Tauri's urlpattern dependency and have no compatible
+# replacement until Tauri migrates upstream.
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0075"
+ignoreUntil = 2027-02-28
+reason = "Unmaintained unic transitive crate in Tauri urlpattern; no compatible upstream replacement is available."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0080"
+ignoreUntil = 2027-02-28
+reason = "Unmaintained unic transitive crate in Tauri urlpattern; no compatible upstream replacement is available."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0081"
+ignoreUntil = 2027-02-28
+reason = "Unmaintained unic transitive crate in Tauri urlpattern; no compatible upstream replacement is available."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0098"
+ignoreUntil = 2027-02-28
+reason = "Unmaintained unic transitive crate in Tauri urlpattern; no compatible upstream replacement is available."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0100"
+ignoreUntil = 2027-02-28
+reason = "Unmaintained unic transitive crate in Tauri urlpattern; no compatible upstream replacement is available."
