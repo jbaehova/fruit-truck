@@ -23,14 +23,10 @@ const cargoToml = readText("apps/desktop/src-tauri/Cargo.toml");
 const ffmpegEnvironment = readText("apps/desktop/scripts/ffmpeg-version.env");
 const mediaBuildScript = readText("apps/desktop/scripts/build-ffmpeg-macos.sh");
 const releaseWorkflow = readText(".github/workflows/release.yml");
-const checkWorkflow = readText(".github/workflows/check.yml");
-const supplyChainWorkflow = readText(".github/workflows/supply-chain.yml");
-const osvConfiguration = readText("apps/desktop/src-tauri/osv-scanner.toml");
-const thirdPartyNotices = readText("THIRD_PARTY_NOTICES.md");
-const releaseDocs = readText("docs/RELEASING.md");
 const supportDocs = readText("docs/SUPPORT.md");
 const workflowFiles = readdirSync(resolve(repositoryDirectory, ".github/workflows"))
   .filter((name) => name.endsWith(".yml") || name.endsWith(".yaml"))
+  .sort()
   .map((name) => [name, readText(`.github/workflows/${name}`)]);
 
 const cargoVersion = cargoToml.match(/^version\s*=\s*"([^"]+)"/m)?.[1];
@@ -114,29 +110,6 @@ for (const unsupportedReleaseValue of ["macos-15-intel", "x86_64-apple-darwin", 
     `The release workflow still contains unsupported architecture work: ${unsupportedReleaseValue}`,
   );
 }
-const nativeBuildWorkflow = checkWorkflow.split(/^  native-build:\s*$/m)[1];
-assert.ok(nativeBuildWorkflow, "The desktop check workflow is missing the native-build job.");
-assert.ok(
-  !checkWorkflow.includes("brew install ffmpeg"),
-  "Browser CI must not install FFmpeg; release packaging builds its pinned copy from source.",
-);
-const nativeCargoTestIndex = nativeBuildWorkflow.indexOf("cargo test");
-assert.ok(
-  nativeCargoTestIndex !== -1,
-  "The native desktop check does not run Rust tests.",
-);
-assert.match(
-  nativeBuildWorkflow,
-  /npx tauri build --debug --bundles app/,
-  "The native desktop check does not build the prepared app bundle.",
-);
-for (const requiredNativeCheck of ["cargo fmt --check", "cargo clippy", "smoke-native-app.sh"]) {
-  assert.ok(nativeBuildWorkflow.includes(requiredNativeCheck), `Native CI is missing ${requiredNativeCheck}.`);
-}
-assert.match(nativeBuildWorkflow, /cargo llvm-cov/, "Native CI is missing the Rust coverage gate.");
-for (const requiredCheck of ["npm run test:coverage", "npm run test:e2e", "npm run build"]) {
-  assert.ok(checkWorkflow.includes(requiredCheck), `Desktop CI is missing ${requiredCheck}.`);
-}
 assert.equal(
   packageJson.scripts?.["bundle:mac"],
   "bash scripts/build-macos-apple-silicon.sh",
@@ -159,27 +132,12 @@ assert.equal(
 assert.match(mediaBuildScript, /--disable-ffmpeg/, "The release media build still enables the removed FFmpeg program.");
 assert.ok(!mediaBuildScript.includes('INSTALL_DIR}/bin/ffmpeg"'), "The release media build still copies the removed FFmpeg program.");
 
-for (const assetName of [
-  "Fruit-Truck-ffmpeg-source.tar.xz",
-  "Fruit-Truck-ffmpeg-build-config-arm64.txt",
-  "Fruit-Truck-ffmpeg-source.sha256",
-]) {
-  assert.match(releaseWorkflow, new RegExp(assetName.replaceAll(".", "\\.")), `Release workflow does not publish ${assetName}.`);
-  assert.match(thirdPartyNotices, new RegExp(assetName.replaceAll(".", "\\.")), `Third-party notice does not name ${assetName}.`);
-  assert.match(releaseDocs, new RegExp(assetName.replaceAll(".", "\\.")), `Release documentation does not name ${assetName}.`);
-}
 assert.match(releaseWorkflow, /verify-github-release\.sh/, "Release workflow does not run the GitHub release verifier.");
-assert.match(releaseWorkflow, /release-validation:/, "Release workflow does not run the exact-tag validation job.");
-assert.match(releaseWorkflow, /cargo fmt --check/, "Release workflow does not gate on cargo fmt.");
-assert.match(releaseWorkflow, /cargo llvm-cov/, "Release workflow does not gate on Rust coverage.");
-assert.match(releaseWorkflow, /npm run test:e2e/, "Release workflow does not gate on headless E2E.");
-assert.match(releaseWorkflow, /(?:npm run check:licenses|run-supply-chain-checks\.sh)/, "Release workflow does not gate on npm license policy.");
-assert.match(releaseWorkflow, /(?:npm run sbom|run-supply-chain-checks\.sh)/, "Release workflow does not produce an SBOM.");
-assert.match(releaseWorkflow, /(?:npm audit --audit-level=high|run-supply-chain-checks\.sh)/, "Release workflow does not gate on npm advisories.");
-assert.match(releaseWorkflow, /(?:cargo deny|run-supply-chain-checks\.sh)/, "Release workflow does not gate on Rust advisory/license/source checks.");
-assert.match(releaseWorkflow, /src-tauri\/osv-scanner\.toml/, "Release OSV artifact omits its audited exception policy.");
-assert.match(supplyChainWorkflow, /src-tauri\/osv-scanner\.toml/, "Supply-chain workflow does not rerun when the OSV policy changes.");
-assert.match(osvConfiguration, /ignoreUntil\s*=\s*\d{4}-\d{2}-\d{2}/, "OSV exceptions must expire for review.");
+assert.deepEqual(
+  workflowFiles.map(([name]) => name),
+  ["release.yml"],
+  "Only the macOS release workflow should remain enabled.",
+);
 
 for (const [workflowName, workflow] of workflowFiles) {
   for (const match of workflow.matchAll(/^\s*uses:\s*([^\s@]+)@([^\s#]+)\s*$/gm)) {
@@ -206,5 +164,11 @@ assert.match(
   /releases\/latest\/download\/Fruit-Truck-macOS-universal\.dmg/,
   "The permanent GitHub Release DMG URL changed.",
 );
+assert.match(
+  releaseWorkflow,
+  /releases\/download\/\$RELEASE_TAG\/Fruit-Truck-macOS-universal\.dmg/,
+  "The version-specific DMG link is missing from generated release notes.",
+);
+assert.match(releaseWorkflow, /## Download/, "The release body is missing its download section.");
 
 console.log(`Release contract is valid for Fruit Truck v${tauriConfig.version} and FFmpeg ${ffmpegValues.FFMPEG_VERSION}.`);

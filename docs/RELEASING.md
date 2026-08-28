@@ -2,13 +2,13 @@
 
 Fruit Truck ships an Apple Silicon macOS app and updater artifacts. The
 release workflow is deliberately tag-bound: every source file used by the
-gate and build is checked out at the exact commit pointed to by the requested
+preflight and build is checked out at the exact commit pointed to by the requested
 `vX.Y.Z` tag.
 
 ## Release contract
 
-From `apps/desktop`, a local preflight should be equivalent to the required CI
-checks:
+Automated GitHub Actions are limited to building and publishing the macOS
+release. Run broader checks locally from `apps/desktop` before creating a tag:
 
 ```sh
 npm ci
@@ -26,13 +26,8 @@ npm run check:licenses
 npm run sbom -- --output "$TMPDIR/fruit-truck.cdx.json"
 ```
 
-The CI image installs `cargo-llvm-cov` at version `0.9.0`; install that same
-version locally before running the coverage command.
-
-The release gate also runs the pinned ShellCheck and actionlint versions,
-validates the packaged app's native launch path, and keeps a dependency SBOM
-as a CI artifact. Browser E2E remains headless at the maximized desktop
-viewport (1920×1080).
+Install `cargo-llvm-cov` at version `0.9.0` before running the coverage command.
+Browser E2E remains headless at the maximized desktop viewport (1920×1080).
 
 The production JavaScript budget defaults to 900,000 bytes uncompressed and
 300,000 bytes gzip-compressed. A deliberate budget change must be made through
@@ -51,8 +46,8 @@ new or unlisted vulnerabilities remain fatal.
 
 The contract requires the release bundle to contain only `ffprobe` as an
 external executable. It rejects the removed media renderer and old helper
-binaries, workflow resources, commands, and crates. All GitHub Actions are
-referenced by immutable commit SHA rather than a moving tag.
+binaries, commands, and crates. The release workflow references GitHub Actions
+by immutable commit SHA rather than a moving tag.
 
 ## Release assets
 
@@ -64,24 +59,22 @@ The public release contains exactly these assets:
 | `Fruit-Truck-macOS-universal.app.tar.gz` | Signed Tauri updater payload |
 | `Fruit-Truck-macOS-universal.app.tar.gz.sig` | Updater signature |
 | `latest.json` | Signed updater manifest |
-| `Fruit-Truck-ffmpeg-source.tar.xz` | Exact source used to build the bundled FFprobe |
-| `Fruit-Truck-ffmpeg-build-config-arm64.txt` | Exact FFmpeg configure arguments and source digest |
-| `Fruit-Truck-ffmpeg-source.sha256` | SHA-256 manifest for the source archive |
 
-The release verifier downloads the source/config/checksum assets, verifies the
-source digest against `apps/desktop/scripts/ffmpeg-version.env`, checks the
-archive's top-level version directory, and rejects missing or unexpected
-assets. This keeps [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md) and the
-published release contract in sync.
+The release verifier rejects missing or unexpected uploaded assets and checks
+the updater manifest, signature, DMG digest, code signature, notarization
+ticket, and Gatekeeper assessment. GitHub also displays its two generated
+source archives and the release attestation, so the release page shows seven
+items in total.
 
 ## Build assets
 
 `scripts/prepare-macos-release-assets.sh` builds the pinned FFmpeg source on
 Apple Silicon, copies only FFprobe into `src-tauri/target/bundled-tools`, and
 retains the required LGPL notices and build configuration. The workflow keeps
-the verified source archive in the runner temporary directory until it uploads
-the three source-disclosure assets above. The app does not bundle or invoke
-the `ffmpeg` executable.
+the verified FFmpeg source URL and SHA-256 pin in
+`scripts/ffmpeg-version.env`; the corresponding upstream source is linked from
+[THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md). The app does not bundle or
+invoke the `ffmpeg` executable.
 
 ## Signing and notarization
 
@@ -108,22 +101,6 @@ generation or promise universal ZDR.
 
 # Paid OpenRouter provider matrix
 
-Provider/reference transport claims must be verified with the manual
-`OpenRouter paid provider smoke` workflow before a release enables them.
-Protect the `openrouter-paid-smoke` GitHub environment with reviewer approval,
-configure `OPENROUTER_API_KEY` and `OPENROUTER_PAID_SMOKE_CASES` as environment
-secrets, then type `RUN_PAID_OPENROUTER_SMOKE` and choose a budget no greater
-than $5. Each JSON case declares `id`, `mode`, `expect`, `maxCostUsd`,
-`referenceKind`, `transport`, and the exact OpenRouter `request`. The runner
-never retries a paid POST, retains video job IDs in the log, and stops when the
-authorized budget is reached. It also saves bounded provider-returned media,
-checks declared MIME against file signatures, records result counts, byte sizes,
-and SHA-256 digests, and reconciles every provider-reported case cost with the
-total cost ledger. An expected 400/404/405/415/422 contract rejection without
-usage may enter the ledger as zero only with `providerCostReported: false`;
-authentication, rate-limit, timeout, and server errors remain failures. The
-workflow uploads the runner-side private-mode media and
-`paid-smoke-report.json` as a seven-day evidence artifact; release reviewers
-must compare that artifact—including every unreported rejection—with the
-isolated OpenRouter test account before enabling a provider/reference
-combination.
+The paid provider smoke test remains available as a local, explicitly
+authorized command (`npm run smoke:openrouter:paid`). It is no longer a GitHub
+Actions workflow.

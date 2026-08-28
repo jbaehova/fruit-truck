@@ -204,7 +204,7 @@ Playwright always runs headless with a 1920×1080 viewport, matching the desktop
 
 ### macOS release
 
-`npm run bundle:mac` builds the pinned FFmpeg project source for Apple Silicon but packages only its `ffprobe` executable. The app does **not** bundle or invoke the `ffmpeg` program. FFmpeg licensing notices and build configuration remain in the bundle because FFprobe is an FFmpeg project output. The matching source archive, build configuration, and SHA-256 manifest are uploaded as named release assets; see [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md).
+`npm run bundle:mac` builds the pinned FFmpeg project source for Apple Silicon but packages only its `ffprobe` executable. The app does **not** bundle or invoke the `ffmpeg` program. FFmpeg licensing notices and build configuration remain in the bundle because FFprobe is an FFmpeg project output. The exact upstream source URL and SHA-256 pin are documented in the repository; see [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md).
 
 The release workflow builds, signs, notarizes, and staples the DMG, verifies the Apple Silicon app bundle, and publishes signed Tauri updater artifacts. See [docs/RELEASING.md](./docs/RELEASING.md) for the complete release contract.
 
