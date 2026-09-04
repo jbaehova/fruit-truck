@@ -11,8 +11,12 @@ import {
   formatUsd,
   generateImage,
   generationActualCost,
+  generationCostMetadata,
   generationRecoveryPath,
+  loadPromptModelAvailability,
   modelPriceLabel,
+  normalizePromptModelAvailability,
+  prepareRequest,
   productSystemInstruction,
   promptEnhancementUserContent,
   promptEnhancerInstruction,
@@ -26,10 +30,12 @@ import {
   submitVideo,
   validateReferenceCoverage,
   type ImageModel,
+  type PrepareRequestContext,
   type PromptEnhancementInput,
   type ReferenceAsset,
   type VideoModel,
 } from "./openrouter.ts";
+import { PROMPT_MODELS } from "./promptModels.ts";
 import { PROMPT_PLAN_RESPONSE_FORMAT } from "./prompting/index.ts";
 
 const asset = (
@@ -65,7 +71,7 @@ const promptTarget = (overrides: Partial<PromptEnhancementInput["target"]> = {})
 });
 
 const enhancementInput = (overrides: Partial<PromptEnhancementInput> = {}): PromptEnhancementInput => ({
-  promptModel: "openai/gpt-5.6",
+  promptModel: "openai/gpt-5.6-sol",
   mode: "image",
   target: promptTarget(),
   workflow: "text_to_image",
@@ -510,10 +516,13 @@ test("image edit enhancement distinguishes the target from context references", 
     workflow: "image_edit",
     references: [],
     visuals: [],
+    directorContext: "Shot 2 keeps the camera locked on the fruit display.",
   }));
   assert.match(instruction, /explicit edit target is "@2"/);
   assert.match(instruction, /other numbered images are context only/);
   assert.doesNotMatch(instruction, /Rewrite the user's request/);
+  assert.match(instruction, /Read-only Director context: Shot 2 keeps the camera locked/);
+  assert.match(instruction, /do not rewrite or mutate the Director plan/);
   assert.match(promptEnhancerInstruction(), /Return only the requested JSON object/);
   assert.equal(validateEnhancedPrompt("Keep @1, copy @2", "Keep @1 and copy @2"), null);
   assert.match(validateEnhancedPrompt("Keep @1", "Keep @1 and use @3") ?? "", /invented @3/);
@@ -522,7 +531,7 @@ test("image edit enhancement distinguishes the target from context references", 
 
 test("prompt enhancement sends text first and labels image visual inputs", () => {
   const content = promptEnhancementUserContent(enhancementInput({
-    promptModel: "openai/gpt-5.6-luna",
+    promptModel: "openai/gpt-5.6-sol",
     mode: "video",
     target: promptTarget({ id: "runway/gen-4.5", name: "Runway Gen-4.5" }),
     workflow: "image_to_video",
@@ -546,6 +555,98 @@ test("prompt enhancement sends text first and labels image visual inputs", () =>
   assert.match(content[0]?.type === "text" ? content[0].text : "", /semantic purpose=subject_identity/);
   assert.deepEqual(content.slice(1).map((part) => part.type), ["image_url"]);
   assert.doesNotMatch(JSON.stringify(content), /video_url/);
+});
+
+test("planner catalog availability requires exact IDs and both required capabilities", () => {
+  const availability = normalizePromptModelAvailability({
+    data: [
+      {
+        id: "openai/gpt-5.6-sol",
+        supported_parameters: ["temperature", "reasoning", "structured_outputs"],
+      },
+      {
+        id: "anthropic/claude-opus-5",
+        supported_parameters: ["reasoning"],
+      },
+      {
+        id: "google/gemini-3.8-flash",
+        supported_parameters: ["structured_outputs"],
+      },
+      {
+        id: "google/gemini-3.8-flash:free",
+        supported_parameters: ["reasoning", "structured_outputs"],
+      },
+    ],
+  });
+
+  assert.deepEqual(availability, {
+    "openai/gpt-5.6-sol": true,
+    "anthropic/claude-opus-5": false,
+    "google/gemini-3.8-flash": false,
+  });
+  assert.deepEqual(normalizePromptModelAvailability({ data: "missing" }), {
+    "openai/gpt-5.6-sol": false,
+    "anthropic/claude-opus-5": false,
+    "google/gemini-3.8-flash": false,
+  });
+});
+
+test("planner availability loads the queryless general catalog without fallback", async () => {
+  const previousFetch = globalThis.fetch;
+  let requestedUrl = "";
+  let requestedMethod = "";
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    requestedUrl = String(input);
+    requestedMethod = String(init?.method);
+    return {
+      ok: true,
+      headers: { get: () => "application/json" },
+      json: async () => ({
+        data: PROMPT_MODELS.map((model) => ({
+          id: model.id,
+          supported_parameters: ["reasoning", "structured_outputs"],
+        })),
+      }),
+    } as unknown as Response;
+  }) as typeof fetch;
+
+  try {
+    assert.deepEqual(await loadPromptModelAvailability(), {
+      "openai/gpt-5.6-sol": true,
+      "anthropic/claude-opus-5": true,
+      "google/gemini-3.8-flash": true,
+    });
+    assert.equal(requestedUrl, "https://openrouter.ai/api/v1/models");
+    assert.equal(requestedMethod, "GET");
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test("every configured planner request uses its registry ID with high reasoning effort", async () => {
+  const previousFetch = globalThis.fetch;
+  const requestBodies: Array<Record<string, unknown>> = [];
+  globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    requestBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+    return {
+      ok: true,
+      headers: { get: () => "application/json" },
+      json: async () => ({ choices: [{ message: { content: "{}" } }] }),
+    } as unknown as Response;
+  }) as typeof fetch;
+
+  try {
+    for (const model of PROMPT_MODELS) {
+      await assert.rejects(enhancePrompt(enhancementInput({ promptModel: model.id })));
+    }
+    assert.equal(requestBodies.length, PROMPT_MODELS.length * 2);
+    for (const [index, body] of requestBodies.entries()) {
+      assert.equal(body.model, PROMPT_MODELS[Math.floor(index / 2)]?.id);
+      assert.deepEqual(body.reasoning, { effort: "high" });
+    }
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
 });
 
 test("enhancePrompt sends the structured planner schema with target workflow and signature", async () => {
@@ -586,7 +687,7 @@ test("enhancePrompt sends the structured planner schema with target workflow and
     }],
   };
   const input = enhancementInput({
-    promptModel: "openai/gpt-5.6",
+    promptModel: "openai/gpt-5.6-sol",
     target: promptTarget({ id: "openai/gpt-image-1", name: "GPT Image 1" }),
     workflow: "text_to_image",
     signature: "planner-signature",
@@ -788,6 +889,57 @@ test("retry delays honor Retry-After and bound exponential fallback", () => {
   assert.equal(retryDelayMs("Thu, 01 Jan 1970 00:00:03 GMT", 0, 1_000, 0), 2_000);
   assert.equal(retryDelayMs(null, 2, 0, 0), 2_000);
   assert.equal(retryDelayMs("999", 0, 0, 0), 30_000);
+});
+
+test("request preparation always uses the visible draft prompt", () => {
+  const model: ImageModel = {
+    id: "example/visible-prompt",
+    name: "Visible prompt model",
+    supported_parameters: {},
+  };
+  const draft = {
+    mode: "image" as const,
+    model: model.id,
+    prompt: "Visible draft prompt",
+    assets: [],
+    options: {},
+    providerJson: "",
+  };
+  const hiddenEnhancementContext = {
+    enhancement: {
+      prompt: "Hidden replacement prompt",
+      negativePrompt: "Hidden negative prompt",
+      signature: "hidden-signature",
+    },
+  } as unknown as PrepareRequestContext;
+
+  const prepared = prepareRequest(draft, model, hiddenEnhancementContext);
+  const baseline = prepareRequest(draft, model);
+  assert.equal(prepared.payload.prompt, draft.prompt);
+  assert.equal(prepared.fingerprint, baseline.fingerprint);
+});
+
+test("planner cost remains separate from later generation totals", () => {
+  const image: ImageModel = {
+    id: "priced/separate-planner",
+    name: "Separate planner cost",
+    supported_parameters: {},
+    pricing: [{ billable: "output_image", unit: "image", cost_usd: 0.04 }],
+  };
+  const cost = generationCostMetadata("image", image, { n: 1 }, { plannerCostUsd: 0.25 });
+
+  assert.equal(cost.generationMinUsd, 0.04);
+  assert.equal(cost.generationMaxUsd, 0.04);
+  assert.equal(cost.plannerUsd, 0.25);
+  assert.equal(cost.totalMinUsd, 0.04);
+  assert.equal(cost.totalMaxUsd, 0.04);
+  assert.equal(cost.label, "$0.04 total");
+
+  const unknown = generationCostMetadata("video", { id: "unknown", name: "Unknown" }, {}, { plannerCostUsd: 0.25 });
+  assert.equal(unknown.plannerUsd, 0.25);
+  assert.equal(unknown.totalMinUsd, undefined);
+  assert.equal(unknown.totalMaxUsd, undefined);
+  assert.equal(unknown.label, "Price unavailable");
 });
 
 test("generation cost estimates use structured catalog pricing", () => {

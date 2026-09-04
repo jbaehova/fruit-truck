@@ -28,6 +28,11 @@ import {
   type PromptWorkflow,
   type ReferencePurpose,
 } from "./prompting/index.ts";
+import {
+  PROMPT_MODELS,
+  promptModelDefinition,
+  type PromptModel,
+} from "./promptModels.ts";
 import type { CompiledDirector } from "./director/types.ts";
 
 export type GenerationMode = "image" | "video";
@@ -743,8 +748,11 @@ export function generationCostMetadata(
   const plannerUsd = context.plannerCostUsd != null && Number.isFinite(context.plannerCostUsd) && context.plannerCostUsd >= 0
     ? normalizedUsd(context.plannerCostUsd)
     : undefined;
-  const totalMinUsd = generationMinUsd == null ? plannerUsd : normalizedUsd(generationMinUsd + (plannerUsd ?? 0));
-  const totalMaxUsd = generationMaxUsd == null ? plannerUsd : normalizedUsd(generationMaxUsd + (plannerUsd ?? 0));
+  // Prompt enhancement is charged and recorded when it runs. Keep that cost
+  // visible as separate metadata, but never roll it into a later generation
+  // total where it would be presented as newly payable a second time.
+  const totalMinUsd = generationMinUsd;
+  const totalMaxUsd = generationMaxUsd;
   const routeIds = routes.map((route) => route.routeId);
   const priceKnown = estimates.length > 0 && estimates.length === routes.length;
   const uncertain = !resolution.definitive || !priceKnown || generationMaxUsd !== generationMinUsd;
@@ -849,7 +857,7 @@ export type ReferenceCoverage = {
 };
 
 export type PromptEnhancementInput = {
-  promptModel: string;
+  promptModel: PromptModel;
   mode: GenerationMode;
   target: PromptTarget;
   workflow: PromptWorkflow;
@@ -865,6 +873,8 @@ export type PromptEnhancementInput = {
   targetRoute?: GenerationRoute;
   /** Explicit planner routing policy; passthrough fields are never copied. */
   plannerProvider?: Record<string, unknown>;
+  /** Read-only Director summary supplied as planner context, never mutable plan state. */
+  readonly directorContext?: string;
 };
 
 export type PromptEnhancementVisual = {
@@ -1269,6 +1279,36 @@ export async function loadModels(mode: GenerationMode): Promise<GenerationModel[
     ...model,
     architecture: model.architecture ?? architecture.get(model.id),
   }));
+}
+
+const unavailablePromptModels = (): Record<PromptModel, boolean> => Object.fromEntries(
+  PROMPT_MODELS.map((model) => [model.id, false]),
+) as Record<PromptModel, boolean>;
+
+/**
+ * Normalize the general OpenRouter catalog into an exact planner availability
+ * map. Presence alone is insufficient: the catalog item must explicitly
+ * advertise both reasoning and structured output support.
+ */
+export function normalizePromptModelAvailability(raw: unknown): Record<PromptModel, boolean> {
+  const availability = unavailablePromptModels();
+  const items = Array.isArray(raw)
+    ? raw
+    : isRecord(raw) && Array.isArray(raw.data) ? raw.data : [];
+  for (const definition of PROMPT_MODELS) {
+    availability[definition.id] = items.some((item) => {
+      if (!isRecord(item) || item.id !== definition.id || !Array.isArray(item.supported_parameters)) return false;
+      const supported = new Set(item.supported_parameters.filter((parameter): parameter is string => typeof parameter === "string"));
+      return supported.has("reasoning") && supported.has("structured_outputs");
+    });
+  }
+  return availability;
+}
+
+/** Load availability for the configured planner registry without fallback. */
+export async function loadPromptModelAvailability(): Promise<Record<PromptModel, boolean>> {
+  const response = await request<unknown>("GET", "/models");
+  return normalizePromptModelAvailability(response);
 }
 
 export function applyImageModelEndpoints(model: ImageModel, endpointDetails: ImageModelEndpoint[]): ImageModel {
@@ -2206,8 +2246,6 @@ export type PreparedRequestPlanner = {
 export type PrepareRequestContext = {
   route?: GenerationRoute;
   planner?: PreparedRequestPlanner;
-  /** Optional already-computed planner artifact; no hidden planner call occurs. */
-  enhancement?: Pick<PromptEnhancementArtifact, "prompt" | "negativePrompt" | "signature">;
   catalogFingerprint?: string;
   sourceSignature?: string;
   sizeLimits?: RequestSizeLimits;
@@ -2318,15 +2356,8 @@ export function prepareRequest(
   model: GenerationModel | null,
   context: PrepareRequestContext = {},
 ): PreparedRequest {
-  const effectiveDraft: GenerationDraft = context.enhancement
-    ? {
-      ...draft,
-      prompt: context.enhancement.prompt,
-      ...(context.enhancement.negativePrompt !== undefined ? { negativePrompt: context.enhancement.negativePrompt } : {}),
-    }
-    : draft;
   const routeResolution = model
-    ? resolveEligibleRoute({ mode: effectiveDraft.mode, model, options: effectiveDraft.options, providerJson: effectiveDraft.providerJson, endpoint: context.route?.endpoint })
+    ? resolveEligibleRoute({ mode: draft.mode, model, options: draft.options, providerJson: draft.providerJson, endpoint: context.route?.endpoint })
     : {
       selected: undefined,
       eligible: [],
@@ -2338,16 +2369,16 @@ export function prepareRequest(
   const route = context.route ?? routeResolution.selected;
   const issues: PreparedRequestIssue[] = routeResolution.errors.map((issue) => ({ code: issueCode(issue.message), message: issue.message }));
   if (!model) issues.push({ code: "catalog", message: "No generation model is selected." });
-  if (model && effectiveDraft.model !== model.id) issues.push({ code: "catalog", message: `Draft model ${effectiveDraft.model} does not match the selected catalog model ${model.id}.` });
-  if (!effectiveDraft.prompt.trim()) issues.push({ code: "prompt", message: "A prompt is required before this request can be sent." });
+  if (model && draft.model !== model.id) issues.push({ code: "catalog", message: `Draft model ${draft.model} does not match the selected catalog model ${model.id}.` });
+  if (!draft.prompt.trim()) issues.push({ code: "prompt", message: "A prompt is required before this request can be sent." });
   if (model && !route) issues.push({ code: "route", message: routeResolution.warnings[0] ?? "No eligible endpoint is available." });
   if (context.final && route && !routeResolution.definitive) {
     issues.push({ code: "route", message: "The final paid request requires one hydrated, definitive provider endpoint." });
   }
-  let payload: Record<string, unknown> = { model: effectiveDraft.model, prompt: effectiveDraft.prompt.trim() };
+  let payload: Record<string, unknown> = { model: draft.model, prompt: draft.prompt.trim() };
   if (model && route) {
     try {
-      payload = buildRequestInternal(effectiveDraft, model, { strict: true, route });
+      payload = buildRequestInternal(draft, model, { strict: true, route });
       // Streaming is selected only from the definitive endpoint contract and
       // becomes part of the immutable reviewed payload. No hidden transport
       // toggle is added after review.
@@ -2357,7 +2388,7 @@ export function prepareRequest(
       // text-to-image output. OpenAI currently rejects stream + n>1 and
       // stream + input_references even though those capabilities are each
       // advertised independently, so keep combination support conservative.
-      if (effectiveDraft.mode === "image" && route.supportsStreaming === true && outputCount === 1 && !hasInputReferences) {
+      if (draft.mode === "image" && route.supportsStreaming === true && outputCount === 1 && !hasInputReferences) {
         payload = { ...payload, stream: true };
       }
     } catch (error) {
@@ -2365,15 +2396,15 @@ export function prepareRequest(
       issues.push({ code: issueCode(message), message });
     }
   }
-  const size = estimateReferenceRequestSize(effectiveDraft.assets, payload, context.sizeLimits);
+  const size = estimateReferenceRequestSize(draft.assets, payload, context.sizeLimits);
   for (const message of size.issues) issues.push({ code: "size", message });
-  const fallbackModel: GenerationModel = effectiveDraft.mode === "image"
-    ? { id: effectiveDraft.model, name: effectiveDraft.model, supported_parameters: {} }
-    : { id: effectiveDraft.model, name: effectiveDraft.model };
-  const cost = generationCostMetadata(effectiveDraft.mode, model ?? fallbackModel, effectiveDraft.options, {
+  const fallbackModel: GenerationModel = draft.mode === "image"
+    ? { id: draft.model, name: draft.model, supported_parameters: {} }
+    : { id: draft.model, name: draft.model };
+  const cost = generationCostMetadata(draft.mode, model ?? fallbackModel, draft.options, {
     route,
-    providerJson: effectiveDraft.providerJson,
-    imageInputCount: effectiveDraft.assets.filter((asset) => assetMediaKind(asset) === "image").length,
+    providerJson: draft.providerJson,
+    imageInputCount: draft.assets.filter((asset) => assetMediaKind(asset) === "image").length,
     plannerCostUsd: context.planner?.costUsd,
     plannerRoute: context.planner?.route,
   });
@@ -2383,19 +2414,18 @@ export function prepareRequest(
     inheritsConstraints: context.planner?.inheritsConstraints,
   });
   const source = {
-    mode: effectiveDraft.mode,
-    modelId: model?.id ?? effectiveDraft.model,
+    mode: draft.mode,
+    modelId: model?.id ?? draft.model,
     ...(context.catalogFingerprint ? { catalogFingerprint: context.catalogFingerprint } : {}),
     ...(context.sourceSignature ? { signature: context.sourceSignature } : {}),
   };
   const fingerprint = stableHash({
-    source: prepareSource(effectiveDraft, model, context),
+    source: prepareSource(draft, model, context),
     payload,
     // Include the complete selected route, not only its id. Endpoint pricing,
     // capability, privacy, or provider metadata can change while an id stays
     // stable; such a catalog refresh must invalidate the snapshot.
     route: route ? snapshotClone(route) : null,
-    enhancementSignature: context.enhancement?.signature ?? null,
   });
   const frozenPayload = deepFreeze(payload);
   const frozenRoute = route ? deepFreeze(snapshotClone(route)) : undefined;
@@ -2403,8 +2433,8 @@ export function prepareRequest(
   const artifact = {
     version: 1 as const,
     kind: "prepared_request" as const,
-    mode: effectiveDraft.mode,
-    modelId: model?.id ?? effectiveDraft.model,
+    mode: draft.mode,
+    modelId: model?.id ?? draft.model,
     status: issues.length ? "blocked" as const : "ready" as const,
     phase: context.final ? "final" as const : "draft" as const,
     payload: frozenPayload,
@@ -2455,6 +2485,9 @@ export function productSystemInstruction(input: Omit<PromptEnhancementInput, "pr
     input.targetRoute
       ? `Resolved generation endpoint: ${input.targetRoute.providerName ?? input.targetRoute.providerSlug ?? "unverified"} (${input.targetRoute.routeId}); privacy metadata: ${JSON.stringify(input.targetRoute.privacy)}.`
       : "The generation endpoint is not yet verified; do not assume provider-specific capability or privacy behavior.",
+    input.directorContext?.trim()
+      ? `Read-only Director context: ${input.directorContext.trim()} Use this summary only to align the prompt; do not rewrite or mutate the Director plan.`
+      : "",
     profileInstruction(profile, input.workflow),
     "Numbered references are immutable input slots with authoritative semantic purposes.",
     "Do not invent inputs or options outside the selected model's declared capabilities.",
@@ -2527,6 +2560,7 @@ export function validateEnhancedPrompt(
 
 export async function enhancePrompt(input: PromptEnhancementInput, onActualCost?: ActualCostHandler): Promise<PromptEnhancementArtifact> {
   const profile = promptProfileForModel(input.mode, input.target.id);
+  const planner = promptModelDefinition(input.promptModel);
   const inheritedPlannerProvider = input.plannerProvider ?? (() => {
     const targetPrivacy = input.targetRoute?.privacy ?? {};
     return {
@@ -2558,8 +2592,8 @@ export async function enhancePrompt(input: PromptEnhancementInput, onActualCost?
     };
     try {
       response = await request("POST", "/chat/completions", {
-        model: input.promptModel,
-        reasoning: { effort: input.promptModel.endsWith("luna") ? "xhigh" : "high" },
+        model: planner.id,
+        reasoning: { effort: planner.reasoningEffort },
         response_format: PROMPT_PLAN_RESPONSE_FORMAT,
         provider: inheritedPlannerProvider,
         messages,
@@ -2587,7 +2621,7 @@ export async function enhancePrompt(input: PromptEnhancementInput, onActualCost?
         schemaVersion: 1,
         ...compiled,
         signature: input.signature,
-        plannerModel: input.promptModel,
+        plannerModel: planner.id,
         target: input.target,
         profileSources: profile.sources,
         repairAttempts,
