@@ -1,0 +1,351 @@
+{
+  "schemaVersion": 6,
+  "activeSessionId": "phase3-session-v6",
+  "promptModel": "openai/gpt-5.6-terra",
+  "defaultEnhancePrompt": false,
+  "generationPresets": [
+    {
+      "id": "phase3-v6-video-preset",
+      "name": "Production tracking shot",
+      "mode": "video",
+      "modelId": "google/veo-3.1",
+      "options": { "duration": 8, "resolution": "1080p" },
+      "providerJson": "{\"order\":[\"google\"]}",
+      "createdAt": "2026-08-31T09:00:00.000Z",
+      "updatedAt": "2026-08-31T09:00:00.000Z"
+    }
+  ],
+  "sessions": [
+    {
+      "id": "phase3-session-v6",
+      "name": "Phase 3 production workspace",
+      "createdAt": "2026-08-31T09:00:00.000Z",
+      "updatedAt": "2026-09-04T01:15:00.000Z",
+      "mode": "video",
+      "assets": [
+        {
+          "id": "phase3-source-frame",
+          "name": "source-frame.png",
+          "kind": "image",
+          "mimeType": "image/png",
+          "origin": "upload",
+          "createdAt": "2026-08-31T09:01:00.000Z",
+          "localPath": "{{FRUIT_TRUCK_HOME}}/assets/source-frame.png",
+          "width": 1920,
+          "height": 1080,
+          "byteSize": 81,
+          "fingerprint": "995e8cadfc8f2e204081aa2979175ba91dda19f2d44a6021ba93098099168147"
+        },
+        {
+          "id": "phase3-completed-poster",
+          "name": "completed-poster.png",
+          "kind": "image",
+          "mimeType": "image/png",
+          "origin": "edited",
+          "createdAt": "2026-09-01T10:30:00.000Z",
+          "localPath": "{{FRUIT_TRUCK_HOME}}/generated/completed-poster.png",
+          "width": 1920,
+          "height": 1080,
+          "byteSize": 100,
+          "fingerprint": "3ca59f024df106f445c438e6323672b11216d914dda425fcec7fcbcfc784f451",
+          "derivation": {
+            "kind": "resize_crop",
+            "sourceAssetId": "phase3-source-frame",
+            "resolution": "1080p",
+            "aspectRatio": "16:9",
+            "createdAt": "2026-09-01T10:30:00.000Z"
+          }
+        },
+        {
+          "id": "phase3-active-video-bytes",
+          "name": "active-video.mp4",
+          "kind": "video",
+          "mimeType": "video/mp4",
+          "origin": "generated",
+          "createdAt": "2026-09-04T01:14:00.000Z",
+          "localPath": "{{FRUIT_TRUCK_HOME}}/generated/active-video.mp4",
+          "jobId": "provider-video-job-phase3",
+          "duration": 8,
+          "byteSize": 120,
+          "fingerprint": "96efcd96508267df393b87fbc12ab6595e727a3de7e910bbac77f8c05f4b5ebc"
+        }
+      ],
+      "generationDefaults": {
+        "modelIds": {
+          "image": "google/gemini-2.5-flash-image",
+          "video": "google/veo-3.1"
+        },
+        "options": {
+          "image": { "quality": "high", "n": 1 },
+          "video": { "duration": 8, "resolution": "1080p" }
+        },
+        "providerJson": {
+          "image": "{\"order\":[\"google\"]}",
+          "video": "{\"order\":[\"google\"]}"
+        }
+      },
+      "threads": {
+        "image": [
+          {
+            "id": "phase3-image-thread",
+            "requestKey": "phase3-image-request",
+            "name": "Hero poster",
+            "mode": "image",
+            "createdAt": "2026-08-31T09:02:00.000Z",
+            "updatedAt": "2026-09-01T10:30:00.000Z",
+            "revision": 4,
+            "outputRole": "generated_image",
+            "modelOverrideId": "google/gemini-2.5-flash-image",
+            "optionOverrides": { "quality": "high", "n": 1 },
+            "providerJsonOverride": "{\"order\":[\"google\"]}",
+            "draft": {
+              "prompt": "Use @1 as the exact fruit truck identity in a roadside portrait.",
+              "references": [
+                { "assetId": "phase3-source-frame", "slot": 1, "role": "reference", "purpose": "subject_identity" }
+              ],
+              "options": {},
+              "providerJson": "",
+              "enhancePrompt": true,
+              "enhancedPrompt": "Use @1 as the exact red fruit truck identity, parked at a sunlit roadside market with legible painted produce signs.",
+              "enhancedPromptDirty": true,
+              "enhancedVisualCount": 1,
+              "enhancementArtifact": {
+                "schemaVersion": 1,
+                "signature": "phase3-enhancement-signature",
+                "plannerModel": "openai/gpt-5.6-terra",
+                "createdAt": "2026-09-01T10:20:00.000Z",
+                "prompt": "Use @1 as the exact red fruit truck identity, parked at a sunlit roadside market with legible painted produce signs.",
+                "negativePrompt": "blurred signage, altered truck identity",
+                "profileId": "image-default",
+                "profileVersion": "1",
+                "workflow": "image_edit",
+                "coveredSlots": [1],
+                "requiredSlots": [1],
+                "warnings": [],
+                "target": {
+                  "id": "google/gemini-2.5-flash-image",
+                  "name": "Gemini Image",
+                  "options": { "quality": "high" },
+                  "providerJson": "{\"order\":[\"google\"]}"
+                },
+                "profileSources": [],
+                "repairAttempts": 0,
+                "actualCostUsd": 0.007,
+                "plan": {
+                  "version": 1,
+                  "mode": "image",
+                  "workflow": "image_edit",
+                  "language": "en",
+                  "deliverable": "image",
+                  "intent": "Preserve the truck and improve the market portrait",
+                  "scene": ["sunlit roadside market"],
+                  "subjects": ["red fruit truck"],
+                  "action": [],
+                  "composition": ["hero three-quarter view"],
+                  "camera": [],
+                  "lighting": ["warm natural sunlight"],
+                  "color": [],
+                  "style": ["documentary commercial photography"],
+                  "materials": [],
+                  "exactText": ["painted produce signs"],
+                  "temporalBeats": [],
+                  "subjectMotion": [],
+                  "cameraMotion": [],
+                  "audio": [],
+                  "editChanges": ["improve roadside setting"],
+                  "preserve": ["truck identity"],
+                  "ambiguities": [],
+                  "constraints": [],
+                  "references": []
+                }
+              },
+              "imageEditMode": true,
+              "imageEditTarget": "@1",
+              "maskInstructions": "Keep the cab and painted logo unchanged.",
+              "maskStrokes": []
+            },
+            "attempts": [
+              {
+                "id": "phase3-image-attempt",
+                "requestKey": "phase3-image-request",
+                "status": "completed",
+                "backend": "openrouter",
+                "draftRevision": 4,
+                "requestedBy": "human",
+                "createdAt": "2026-09-01T10:20:00.000Z",
+                "updatedAt": "2026-09-01T10:30:00.000Z",
+                "submittedAt": "2026-09-01T10:21:00.000Z",
+                "completedAt": "2026-09-01T10:30:00.000Z",
+                "modelId": "google/gemini-2.5-flash-image",
+                "snapshot": {
+                  "mode": "image",
+                  "modelId": "google/gemini-2.5-flash-image",
+                  "outputRole": "generated_image",
+                  "prompt": "Use @1 as the exact fruit truck identity in a roadside portrait.",
+                  "enhancePrompt": true,
+                  "enhancedPrompt": "Use @1 as the exact red fruit truck identity, parked at a sunlit roadside market with legible painted produce signs.",
+                  "enhancedPromptDirty": false,
+                  "enhancedVisualCount": 1,
+                  "options": { "quality": "high", "n": 1 },
+                  "providerJson": "{\"order\":[\"google\"]}",
+                  "assetBindings": [
+                    { "assetId": "phase3-source-frame", "slot": 1, "role": "reference", "purpose": "subject_identity" }
+                  ],
+                  "imageEditMode": true,
+                  "imageEditTarget": "@1",
+                  "maskInstructions": "Keep the cab and painted logo unchanged.",
+                  "maskStrokes": []
+                },
+                "request": { "model": "google/gemini-2.5-flash-image", "n": 1 },
+                "inputAssetIds": ["phase3-source-frame"],
+                "assetIds": ["phase3-completed-poster"],
+                "resultSources": ["{{FRUIT_TRUCK_HOME}}/generated/completed-poster.png"],
+                "estimatedCostUsd": 0.05,
+                "actualCostUsd": 0.043,
+                "costRecordedAt": "2026-09-01T10:30:00.000Z"
+              }
+            ],
+            "enhancementAttempts": [
+              {
+                "id": "phase3-enhancement-completed",
+                "requestKey": "phase3-enhance-complete",
+                "status": "completed",
+                "threadRevision": 4,
+                "originalPrompt": "Use @1 as the exact fruit truck identity in a roadside portrait.",
+                "enhancedPrompt": "Use @1 as the exact red fruit truck identity, parked at a sunlit roadside market with legible painted produce signs.",
+                "createdAt": "2026-09-01T10:19:00.000Z",
+                "updatedAt": "2026-09-01T10:20:00.000Z",
+                "actualCostUsd": 0.007,
+                "costRecordedAt": "2026-09-01T10:20:00.000Z"
+              },
+              {
+                "id": "phase3-enhancement-uncertain",
+                "requestKey": "phase3-enhance-uncertain",
+                "status": "uncertain",
+                "threadRevision": 5,
+                "originalPrompt": "Add hand-painted peaches without changing the truck.",
+                "createdAt": "2026-09-04T00:55:00.000Z",
+                "updatedAt": "2026-09-04T00:56:00.000Z",
+                "errorCode": "planner_result_uncertain",
+                "errorAction": "check_status_or_retry"
+              }
+            ]
+          }
+        ],
+        "video": [
+          {
+            "id": "phase3-video-thread",
+            "requestKey": "phase3-video-request",
+            "name": "Market tracking shot",
+            "mode": "video",
+            "createdAt": "2026-09-03T23:45:00.000Z",
+            "updatedAt": "2026-09-04T01:15:00.000Z",
+            "revision": 2,
+            "outputRole": "generated_video",
+            "modelOverrideId": "google/veo-3.1",
+            "optionOverrides": { "duration": 8, "resolution": "1080p" },
+            "providerJsonOverride": "{\"order\":[\"google\"]}",
+            "draft": {
+              "prompt": "Track alongside @1 while the fruit truck rolls through the market.",
+              "references": [
+                { "assetId": "phase3-source-frame", "slot": 1, "role": "first_frame", "purpose": "first_frame" }
+              ],
+              "options": {},
+              "providerJson": "",
+              "enhancePrompt": false,
+              "enhancedPrompt": "",
+              "enhancedPromptDirty": false,
+              "enhancedVisualCount": 0,
+              "imageEditMode": false,
+              "imageEditTarget": "",
+              "maskInstructions": "",
+              "maskStrokes": []
+            },
+            "attempts": [
+              {
+                "id": "phase3-video-attempt-active",
+                "requestKey": "phase3-video-request",
+                "status": "in_progress",
+                "backend": "openrouter",
+                "draftRevision": 2,
+                "requestedBy": "human",
+                "createdAt": "2026-09-04T01:10:00.000Z",
+                "updatedAt": "2026-09-04T01:15:00.000Z",
+                "submittedAt": "2026-09-04T01:11:00.000Z",
+                "modelId": "google/veo-3.1",
+                "snapshot": {
+                  "mode": "video",
+                  "modelId": "google/veo-3.1",
+                  "outputRole": "generated_video",
+                  "prompt": "Track alongside @1 while the fruit truck rolls through the market.",
+                  "enhancePrompt": false,
+                  "enhancedPrompt": "",
+                  "options": { "duration": 8, "resolution": "1080p" },
+                  "providerJson": "{\"order\":[\"google\"]}",
+                  "assetBindings": [
+                    { "assetId": "phase3-source-frame", "slot": 1, "role": "first_frame", "purpose": "first_frame" }
+                  ],
+                  "imageEditMode": false,
+                  "imageEditTarget": "",
+                  "maskInstructions": "",
+                  "maskStrokes": []
+                },
+                "request": { "model": "google/veo-3.1", "duration": 8, "resolution": "1080p" },
+                "inputAssetIds": ["phase3-source-frame"],
+                "assetIds": [],
+                "jobId": "provider-video-job-phase3",
+                "progress": 42,
+                "pollAttempts": 3,
+                "lastPolledAt": "2026-09-04T01:15:00.000Z",
+                "nextPollAt": "2026-09-04T01:16:00.000Z",
+                "estimatedCostUsd": 1.2
+              }
+            ],
+            "enhancementAttempts": []
+          }
+        ]
+      },
+      "activeThreadIds": {
+        "image": "phase3-image-thread",
+        "video": "phase3-video-thread"
+      },
+      "costLedger": [
+        {
+          "id": "generation:phase3-image-attempt",
+          "category": "generation",
+          "actualCostUsd": 0.043,
+          "recordedAt": "2026-09-01T10:30:00.000Z"
+        },
+        {
+          "id": "prompt-enhancement:phase3-enhancement-completed",
+          "category": "prompt_enhancement",
+          "actualCostUsd": 0.007,
+          "recordedAt": "2026-09-01T10:20:00.000Z"
+        }
+      ],
+      "agent": {
+        "schemaVersion": 4,
+        "execution": {
+          "currentJobIds": ["provider-video-job-phase3"],
+          "generationCount": 2,
+          "costLedger": [
+            {
+              "id": "agent-generation:phase3-image-attempt",
+              "category": "generation",
+              "actualCostUsd": 0.043,
+              "recordedAt": "2026-09-01T10:30:00.000Z"
+            }
+          ],
+          "spentUsd": 0.05,
+          "retryCount": 0
+        },
+        "opaquePhase3Field": { "preserve": true, "values": [1, 2, 3] }
+      },
+      "agentBridge": false
+    }
+  ],
+  "opaqueRootField": {
+    "releaseFixture": "phase-3",
+    "mustRemain": true
+  }
+}

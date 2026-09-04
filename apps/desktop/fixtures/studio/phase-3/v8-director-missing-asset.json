@@ -1,0 +1,504 @@
+{
+  "schemaVersion": 8,
+  "activeSessionId": "phase3-session-v8",
+  "promptModel": "google/gemini-3.8-flash",
+  "generationPresets": [],
+  "directorPresets": [
+    {
+      "id": "phase3-director-preset",
+      "name": "Market tracking preset",
+      "plan": {
+        "schemaVersion": 1,
+        "enabled": true,
+        "canvas": {
+          "sourceWidth": 1920,
+          "sourceHeight": 1080
+        },
+        "cameraRig": {
+          "id": "phase3-camera-rig",
+          "sensorPreset": "cinema",
+          "lensPreset": "anamorphic",
+          "focalLengthMm": 40,
+          "aperture": 2.8,
+          "focusSubjectId": "phase3-director-subject",
+          "aspectRatio": "16:9"
+        },
+        "motions": [
+          {
+            "id": "phase3-director-motion",
+            "targetType": "subject",
+            "targetId": "phase3-director-subject",
+            "kind": "translate",
+            "path": [
+              {
+                "x": 0.18,
+                "y": 0.57
+              },
+              {
+                "x": 0.72,
+                "y": 0.54
+              }
+            ],
+            "direction": "right",
+            "intensity": 0.72,
+            "start": 0,
+            "end": 1,
+            "easing": "ease_in_out",
+            "order": 1,
+            "actionLabel": "Truck crosses the market"
+          },
+          {
+            "id": "phase3-camera-motion",
+            "targetType": "camera",
+            "targetId": "phase3-camera-rig",
+            "kind": "truck",
+            "direction": "right",
+            "intensity": 0.55,
+            "start": 0,
+            "end": 1,
+            "easing": "linear",
+            "order": 2,
+            "actionLabel": "Camera tracks with the truck"
+          }
+        ],
+        "shots": [
+          {
+            "id": "phase3-director-shot",
+            "order": 1,
+            "durationSeconds": 8,
+            "promptFragment": "Track the truck through the market without changing its identity.",
+            "motionIds": [
+              "phase3-director-motion",
+              "phase3-camera-motion"
+            ],
+            "keyframeIds": [
+              "phase3-keyframe-last"
+            ],
+            "speed": "linear"
+          }
+        ],
+        "updatedAt": "2026-09-04T02:00:00.000Z",
+        "futureProviderIndependentControl": {
+          "mode": "lossless",
+          "values": [
+            1,
+            2,
+            3
+          ]
+        }
+      },
+      "createdAt": "2026-09-04T02:00:00.000Z",
+      "updatedAt": "2026-09-04T02:00:00.000Z"
+    }
+  ],
+  "sessions": [
+    {
+      "id": "phase3-session-v8",
+      "name": "Phase 3 Director recovery workspace",
+      "createdAt": "2026-09-04T02:00:00.000Z",
+      "updatedAt": "2026-09-04T02:08:00.000Z",
+      "mode": "video",
+      "assets": [
+        {
+          "id": "phase3-v8-source-frame",
+          "name": "source-frame.png",
+          "kind": "image",
+          "mimeType": "image/png",
+          "origin": "upload",
+          "createdAt": "2026-09-04T02:00:00.000Z",
+          "localPath": "{{FRUIT_TRUCK_HOME}}/assets/source-frame.png",
+          "width": 1920,
+          "height": 1080,
+          "storageAvailability": "available"
+        },
+        {
+          "id": "phase3-v8-missing-result",
+          "name": "missing-output.mp4",
+          "kind": "video",
+          "mimeType": "video/mp4",
+          "origin": "generated",
+          "createdAt": "2026-09-04T02:08:00.000Z",
+          "localPath": "{{FRUIT_TRUCK_HOME}}/generated/missing-output.mp4",
+          "jobId": "phase3-v8-finished-job",
+          "duration": 8,
+          "storageAvailability": "missing"
+        }
+      ],
+      "generationDefaults": {
+        "modelIds": {
+          "image": "google/gemini-2.5-flash-image",
+          "video": "google/veo-3.1"
+        },
+        "options": {
+          "image": {},
+          "video": {
+            "duration": 8,
+            "resolution": "1080p"
+          }
+        },
+        "providerJson": {
+          "image": "",
+          "video": ""
+        }
+      },
+      "threads": {
+        "image": [
+          {
+            "id": "phase3-v8-image-thread",
+            "name": "Image 1",
+            "mode": "image",
+            "createdAt": "2026-09-04T02:00:00.000Z",
+            "updatedAt": "2026-09-04T02:00:00.000Z",
+            "revision": 0,
+            "optionOverrides": {},
+            "draft": {
+              "prompt": "",
+              "promptHistory": {
+                "schemaVersion": 1,
+                "entries": [
+                  {
+                    "id": "phase3-v8-image-prompt",
+                    "text": "",
+                    "kind": "manual",
+                    "createdAt": "2026-09-04T02:00:00.000Z"
+                  }
+                ],
+                "cursor": 0,
+                "enhancementLocked": false,
+                "editRevision": 0
+              },
+              "references": [],
+              "options": {},
+              "providerJson": "",
+              "imageEditMode": false,
+              "imageEditTarget": "",
+              "maskInstructions": "",
+              "maskStrokes": []
+            },
+            "attempts": []
+          }
+        ],
+        "video": [
+          {
+            "id": "phase3-v8-video-thread",
+            "name": "Director tracking shot",
+            "mode": "video",
+            "createdAt": "2026-09-04T02:00:00.000Z",
+            "updatedAt": "2026-09-04T02:08:00.000Z",
+            "revision": 3,
+            "optionOverrides": {
+              "duration": 8,
+              "resolution": "1080p"
+            },
+            "draft": {
+              "prompt": "Track the fruit truck through the market.",
+              "promptHistory": {
+                "schemaVersion": 1,
+                "entries": [
+                  {
+                    "id": "phase3-v8-video-prompt",
+                    "text": "Track the fruit truck through the market.",
+                    "kind": "manual",
+                    "createdAt": "2026-09-04T02:00:00.000Z"
+                  }
+                ],
+                "cursor": 0,
+                "enhancementLocked": false,
+                "editRevision": 0
+              },
+              "references": [
+                {
+                  "assetId": "phase3-v8-source-frame",
+                  "slot": 1,
+                  "role": "first_frame",
+                  "purpose": "first_frame"
+                }
+              ],
+              "options": {},
+              "providerJson": "",
+              "imageEditMode": false,
+              "imageEditTarget": "",
+              "maskInstructions": "",
+              "maskStrokes": [],
+              "directorPlan": {
+                "schemaVersion": 1,
+                "enabled": true,
+                "sourceAssetId": "phase3-v8-source-frame",
+                "canvas": {
+                  "sourceWidth": 1920,
+                  "sourceHeight": 1080
+                },
+                "cameraRig": {
+                  "id": "phase3-camera-rig",
+                  "sensorPreset": "cinema",
+                  "lensPreset": "anamorphic",
+                  "focalLengthMm": 40,
+                  "aperture": 2.8,
+                  "focusSubjectId": "phase3-director-subject",
+                  "aspectRatio": "16:9"
+                },
+                "subjects": [
+                  {
+                    "id": "phase3-director-subject",
+                    "label": "Fruit truck",
+                    "region": {
+                      "type": "box",
+                      "x": 0.12,
+                      "y": 0.28,
+                      "width": 0.44,
+                      "height": 0.51
+                    },
+                    "sourceAssetId": "phase3-v8-source-frame"
+                  }
+                ],
+                "motions": [
+                  {
+                    "id": "phase3-director-motion",
+                    "targetType": "subject",
+                    "targetId": "phase3-director-subject",
+                    "kind": "translate",
+                    "path": [
+                      {
+                        "x": 0.18,
+                        "y": 0.57
+                      },
+                      {
+                        "x": 0.72,
+                        "y": 0.54
+                      }
+                    ],
+                    "direction": "right",
+                    "intensity": 0.72,
+                    "start": 0,
+                    "end": 1,
+                    "easing": "ease_in_out",
+                    "order": 1,
+                    "actionLabel": "Truck crosses the market"
+                  },
+                  {
+                    "id": "phase3-camera-motion",
+                    "targetType": "camera",
+                    "targetId": "phase3-camera-rig",
+                    "kind": "truck",
+                    "direction": "right",
+                    "intensity": 0.55,
+                    "start": 0,
+                    "end": 1,
+                    "easing": "linear",
+                    "order": 2,
+                    "actionLabel": "Camera tracks with the truck"
+                  }
+                ],
+                "keyframes": [
+                  {
+                    "id": "phase3-keyframe-last",
+                    "assetId": "phase3-v8-missing-result",
+                    "role": "last",
+                    "time": 1
+                  }
+                ],
+                "shots": [
+                  {
+                    "id": "phase3-director-shot",
+                    "order": 1,
+                    "durationSeconds": 8,
+                    "promptFragment": "Track the truck through the market without changing its identity.",
+                    "motionIds": [
+                      "phase3-director-motion",
+                      "phase3-camera-motion"
+                    ],
+                    "keyframeIds": [
+                      "phase3-keyframe-last"
+                    ],
+                    "speed": "linear"
+                  }
+                ],
+                "updatedAt": "2026-09-04T02:00:00.000Z",
+                "futureProviderIndependentControl": {
+                  "mode": "lossless",
+                  "values": [
+                    1,
+                    2,
+                    3
+                  ]
+                }
+              }
+            },
+            "attempts": [
+              {
+                "id": "phase3-v8-director-attempt",
+                "status": "completed",
+                "draftRevision": 3,
+                "createdAt": "2026-09-04T02:01:00.000Z",
+                "updatedAt": "2026-09-04T02:08:00.000Z",
+                "completedAt": "2026-09-04T02:08:00.000Z",
+                "modelId": "google/veo-3.1",
+                "snapshot": {
+                  "mode": "video",
+                  "modelId": "google/veo-3.1",
+                  "prompt": "Track the fruit truck through the market.",
+                  "promptHistory": {
+                    "schemaVersion": 1,
+                    "entries": [
+                      {
+                        "id": "phase3-v8-video-prompt",
+                        "text": "Track the fruit truck through the market.",
+                        "kind": "manual",
+                        "createdAt": "2026-09-04T02:00:00.000Z"
+                      }
+                    ],
+                    "cursor": 0,
+                    "enhancementLocked": false,
+                    "editRevision": 0
+                  },
+                  "options": {
+                    "duration": 8,
+                    "resolution": "1080p"
+                  },
+                  "providerJson": "",
+                  "assetBindings": [
+                    {
+                      "assetId": "phase3-v8-source-frame",
+                      "slot": 1,
+                      "role": "first_frame",
+                      "purpose": "first_frame"
+                    }
+                  ],
+                  "imageEditMode": false,
+                  "imageEditTarget": "",
+                  "maskInstructions": "",
+                  "maskStrokes": [],
+                  "directorPlan": {
+                    "schemaVersion": 1,
+                    "enabled": true,
+                    "sourceAssetId": "phase3-v8-source-frame",
+                    "canvas": {
+                      "sourceWidth": 1920,
+                      "sourceHeight": 1080
+                    },
+                    "cameraRig": {
+                      "id": "phase3-camera-rig",
+                      "sensorPreset": "cinema",
+                      "lensPreset": "anamorphic",
+                      "focalLengthMm": 40,
+                      "aperture": 2.8,
+                      "focusSubjectId": "phase3-director-subject",
+                      "aspectRatio": "16:9"
+                    },
+                    "subjects": [
+                      {
+                        "id": "phase3-director-subject",
+                        "label": "Fruit truck",
+                        "region": {
+                          "type": "box",
+                          "x": 0.12,
+                          "y": 0.28,
+                          "width": 0.44,
+                          "height": 0.51
+                        },
+                        "sourceAssetId": "phase3-v8-source-frame"
+                      }
+                    ],
+                    "motions": [
+                      {
+                        "id": "phase3-director-motion",
+                        "targetType": "subject",
+                        "targetId": "phase3-director-subject",
+                        "kind": "translate",
+                        "path": [
+                          {
+                            "x": 0.18,
+                            "y": 0.57
+                          },
+                          {
+                            "x": 0.72,
+                            "y": 0.54
+                          }
+                        ],
+                        "direction": "right",
+                        "intensity": 0.72,
+                        "start": 0,
+                        "end": 1,
+                        "easing": "ease_in_out",
+                        "order": 1,
+                        "actionLabel": "Truck crosses the market"
+                      },
+                      {
+                        "id": "phase3-camera-motion",
+                        "targetType": "camera",
+                        "targetId": "phase3-camera-rig",
+                        "kind": "truck",
+                        "direction": "right",
+                        "intensity": 0.55,
+                        "start": 0,
+                        "end": 1,
+                        "easing": "linear",
+                        "order": 2,
+                        "actionLabel": "Camera tracks with the truck"
+                      }
+                    ],
+                    "keyframes": [
+                      {
+                        "id": "phase3-keyframe-last",
+                        "assetId": "phase3-v8-missing-result",
+                        "role": "last",
+                        "time": 1
+                      }
+                    ],
+                    "shots": [
+                      {
+                        "id": "phase3-director-shot",
+                        "order": 1,
+                        "durationSeconds": 8,
+                        "promptFragment": "Track the truck through the market without changing its identity.",
+                        "motionIds": [
+                          "phase3-director-motion",
+                          "phase3-camera-motion"
+                        ],
+                        "keyframeIds": [
+                          "phase3-keyframe-last"
+                        ],
+                        "speed": "linear"
+                      }
+                    ],
+                    "updatedAt": "2026-09-04T02:00:00.000Z",
+                    "futureProviderIndependentControl": {
+                      "mode": "lossless",
+                      "values": [
+                        1,
+                        2,
+                        3
+                      ]
+                    }
+                  }
+                },
+                "inputAssetIds": [
+                  "phase3-v8-source-frame"
+                ],
+                "assetIds": [
+                  "phase3-v8-missing-result"
+                ],
+                "jobId": "phase3-v8-finished-job",
+                "actualCostUsd": 1.1,
+                "costRecordedAt": "2026-09-04T02:08:00.000Z"
+              }
+            ],
+            "enhancementAttempts": []
+          }
+        ]
+      },
+      "activeThreadIds": {
+        "image": "phase3-v8-image-thread",
+        "video": "phase3-v8-video-thread"
+      },
+      "costLedger": [
+        {
+          "id": "generation:phase3-v8-director-attempt",
+          "category": "generation",
+          "actualCostUsd": 1.1,
+          "recordedAt": "2026-09-04T02:08:00.000Z"
+        }
+      ]
+    }
+  ]
+}

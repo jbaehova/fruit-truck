@@ -1,5 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
+const TINY_PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
 // A real, decodable 16×16 H.264 MP4 keeps browser/native media paths honest.
 const TINY_MP4_BASE64 = "AAAAIGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAAANdbW9vdgAAAGxtdmhkAAAAAAAAAAAAAAAAAAAD6AAAAHgAAQAAAQAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAAod0cmFrAAAAXHRraGQAAAADAAAAAAAAAAAAAAABAAAAAAAAAHgAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAABAAAAAQAAAAAAAkZWR0cwAAABxlbHN0AAAAAAAAAAEAAAB4AAAEAAABAAAAAAH/bWRpYQAAACBtZGhkAAAAAAAAAAAAAAAAAAAyAAAACABVxAAAAAAALWhkbHIAAAAAAAAAAHZpZGUAAAAAAAAAAAAAAABWaWRlb0hhbmRsZXIAAAABqm1pbmYAAAAUdm1oZAAAAAEAAAAAAAAAAAAAACRkaW5mAAAAHGRyZWYAAAAAAAAAAQAAAAx1cmwgAAAAAQAAAWpzdGJsAAAAvnN0c2QAAAAAAAAAAQAAAK5hdmMxAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAABAAEABIAAAASAAAAAAAAAABFUxhdmM2Mi4yOC4xMDAgbGlieDI2NAAAAAAAAAAAAAAAGP//AAAANGF2Y0MBZAAK/+EAF2dkAAqs2V7ARAAAAwAEAAADAMg8SJZYAQAGaOvjyyLA/fj4AAAAABBwYXNwAAAAAQAAAAEAAAAUYnRydAAAAAAAAL7iAAAAAAAAABhzdHRzAAAAAAAAAAEAAAADAAACAAAAABRzdHNzAAAAAAAAAAEAAAABAAAAKGN0dHMAAAAAAAAAAwAAAAEAAAQAAAAAAQAABgAAAAABAAACAAAAABxzdHNjAAAAAAAAAAEAAAABAAAAAwAAAAEAAAAgc3RzegAAAAAAAAAAAAAAAwAAAsUAAAAMAAAADAAAABRzdGNvAAAAAAAAAAEAAAONAAAAYnVkdGEAAABabWV0YQAAAAAAAAAhaGRscgAAAAAAAAAAbWRpcmFwcGwAAAAAAAAAAAAAAAAtaWxzdAAAACWpdG9vAAAAHWRhdGEAAAABAAAAAExhdmY2Mi4xMi4xMDAAAAAIZnJlZQAAAuVtZGF0AAACrgYF//+q3EXpvebZSLeWLNgg2SPu73gyNjQgLSBjb3JlIDE2NSByMzIyMiBiMzU2MDVhIC0gSC4yNjQvTVBFRy00IEFWQyBjb2RlYyAtIENvcHlsZWZ0IDIwMDMtMjAyNSAtIGh0dHA6Ly93d3cudmlkZW9sYW4ub3JnL3gyNjQuaHRtbCAtIG9wdGlvbnM6IGNhYmFjPTEgcmVmPTMgZGVibG9jaz0xOjA6MCBhbmFseXN0PTHh0zoweDExMyBtZT1oZXggc3VibWU9NyBwc3k9MSBwc3lfcmQ9MS4wMDowLjAwIG1peGVkX3JlZj0xIG1lX3JhbmdlPTE2IGNocm9tYV9tZT0xIHRyZWxsaXM9MSA4eDhkY3Q9MSBjcW09MCBkZWFkem9uZT0yMSwxMSBmYXN0X3Bza2lwPTEgY2hyb21hX3FwX29mZnNldD0tMiB0aHJlYWRzPTEgbG9va2FoZWFkX3RocmVhZHM9MSBzbGljZWRfdGhyZWFkcz0wIG5yPTAgZGVjaW1hdGU9MSBpbnRlcmxhY2VkPTAgYmx1cmF5X2NvbXBhdD0wIGNvbnN0cmFpbmVkX2ludHJhPTAgYmZyYW1lcz0zIGJfcHlyYW1pZD0yIGJfYWRhcHQ9MSBiX2JpYXM9MCBkaXJlY3Q9MSB3ZWlnaHRiPTEgb3Blbl9nb3A9MCB3ZWlnaHRwPTIga2V5aW50PTI1MCBrZXlpbnRfbWluPTI1IHNjZW5lY3V0PTQwIGludHJhX3JlZnJlc2g9MCByY19sb29rYWhlYWQ9NDAgcmM9Y3JmIG1idHJlZT0xIGNyZj0yMy4wIHFjb21wPTAuNjAgcXBtaW49MCBxcG1heD02OSBxcHN0ZXA9NCBpcF9yYXRpbz0xLjQwIGFxPTE6MS4wMACAAAAAD2WIhAAz//727L4FNhTIwQAAAAhBmiJsQr/+wAAAAAgBnkF5Cv/EgQ==";
 
@@ -47,7 +49,8 @@ function plannerPlan(mode: "image" | "video", workflow: string, hasReference = f
 async function mockWorkspaceApi(page: Page) {
   await page.route("https://openrouter.ai/api/v1/**", async (route) => {
     const request = route.request();
-    const path = new URL(request.url()).pathname;
+    const url = new URL(request.url());
+    const path = url.pathname;
     if (path === "/api/v1/key") {
       await route.fulfill({
         contentType: "application/json",
@@ -86,17 +89,42 @@ async function mockWorkspaceApi(page: Page) {
       await route.fulfill({ contentType: "application/json", body: JSON.stringify({ endpoints: [{ endpoint_id: "openai-route", provider_name: "OpenAI", provider_slug: "openai", supported_parameters: {}, pricing: [{ billable: "output_image", unit: "image", cost_usd: 0.08 }] }] }) });
       return;
     }
-    if (path === "/api/v1/videos/models" || path === "/api/v1/models") {
+    if (path === "/api/v1/videos/models") {
       await route.fulfill({
         contentType: "application/json",
         body: JSON.stringify({ data: [{
           id: "test/video",
           name: "Test video model",
+          input_reference_types: ["image"],
+          max_input_references: 4,
+          supported_frame_images: ["first_frame", "last_frame"],
           supported_durations: [5],
           supported_resolutions: ["720p"],
           supported_aspect_ratios: ["16:9"],
-          endpoints: [{ endpoint_id: "video-route", provider_name: "Test Video Provider", provider_slug: "test-video", supported_parameters: { duration: { type: "enum", values: [5] }, resolution: { type: "enum", values: ["720p"] }, aspect_ratio: { type: "enum", values: ["16:9"] } }, pricing_skus: { generation: "$0.20" }, privacy: { zdr: false, data_collection: "allow" } }],
+          reference_transports: { image: ["data_url"] },
+          endpoints: [{ endpoint_id: "video-route", provider_name: "Test Video Provider", provider_slug: "test-video", input_reference_types: ["image"], max_input_references: 4, supported_frame_images: ["first_frame", "last_frame"], reference_transports: { image: ["data_url"] }, supported_parameters: { duration: { type: "enum", values: [5] }, resolution: { type: "enum", values: ["720p"] }, aspect_ratio: { type: "enum", values: ["16:9"] } }, pricing_skus: { generation: "$0.20" }, privacy: { zdr: false, data_collection: "allow" } }],
         }] }),
+      });
+      return;
+    }
+    if (path === "/api/v1/models" && url.searchParams.has("output_modalities")) {
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({ data: [{
+          id: "test/video",
+          architecture: { input_modalities: ["text", "image"], output_modalities: ["video"] },
+        }] }),
+      });
+      return;
+    }
+    if (path === "/api/v1/models") {
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({ data: [
+          { id: "openai/gpt-5.6-sol", supported_parameters: ["reasoning", "structured_outputs"] },
+          { id: "anthropic/claude-opus-5", supported_parameters: ["reasoning", "structured_outputs"] },
+          { id: "google/gemini-3.8-flash", supported_parameters: ["reasoning", "structured_outputs"] },
+        ] }),
       });
       return;
     }
@@ -135,19 +163,70 @@ async function mockWorkspaceApi(page: Page) {
   });
 }
 
+async function startExplicitEnhancement(page: Page) {
+  const plannerRequest = page.waitForRequest((request) =>
+    request.method() === "POST" && new URL(request.url()).pathname === "/api/v1/chat/completions"
+  );
+  await page.getByRole("toolbar", { name: "Prompt enhancement" }).getByRole("button", { name: "Enhance Prompt" }).click();
+  const confirmation = page.getByRole("alertdialog");
+  await expect(confirmation).toContainText("separate paid planner request");
+  await confirmation.getByRole("button", { name: "Enhance Prompt", exact: true }).click();
+  return plannerRequest;
+}
+
+async function chooseInputRole(page: Page, assetName: string, role: "First frame" | "Last frame") {
+  const combobox = page.getByRole("combobox", { name: `Role for ${assetName}` });
+  await combobox.click();
+  await page.getByRole("option", { name: role, exact: true }).click();
+  const expectedRole = role === "First frame" ? "first_frame" : "last_frame";
+  await expect.poll(() => page.evaluate((name) => {
+    const state = JSON.parse(localStorage.getItem("fruit-truck.studio.v1") ?? "{}");
+    const session = state.sessions?.find((item: { id: string }) => item.id === state.activeSessionId);
+    const asset = session?.assets.find((item: { name: string }) => item.name === name);
+    const thread = session?.threads.video.find((item: { id: string }) => item.id === session.activeThreadIds.video);
+    return thread?.draft.references.find((reference: { assetId: string }) => reference.assetId === asset?.id)?.role;
+  }, assetName)).toBe(expectedRole);
+}
+
+async function activePromptState(page: Page) {
+  return page.evaluate(() => {
+    const state = JSON.parse(localStorage.getItem("fruit-truck.studio.v1") ?? "{}");
+    const session = state.sessions?.find((item: { id: string }) => item.id === state.activeSessionId);
+    const thread = session?.threads?.[session.mode]?.find((item: { id: string }) => (
+      item.id === session.activeThreadIds?.[session.mode]
+    ));
+    return thread ? {
+      prompt: thread.draft.prompt,
+      cursor: thread.draft.promptHistory.cursor,
+      entries: thread.draft.promptHistory.entries.map((entry: { id: string; text: string; kind: string }) => ({
+        id: entry.id,
+        text: entry.text,
+        kind: entry.kind,
+      })),
+    } : null;
+  });
+}
+
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => {
     localStorage.setItem("fruit-truck.dev-key", "sk-or-v1-workspace-e2e-key-1234567890");
     localStorage.setItem("fruit-truck.onboarding.complete.v1", "true");
     localStorage.setItem("fruit-truck.language", "en");
-    localStorage.removeItem("fruit-truck.studio.v1");
+    if (!sessionStorage.getItem("fruit-truck.workspace-e2e.initialized")) {
+      localStorage.removeItem("fruit-truck.studio.v1");
+      sessionStorage.setItem("fruit-truck.workspace-e2e.initialized", "true");
+    }
   });
   await mockWorkspaceApi(page);
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Test image model" })).toBeVisible();
 });
 
-test("full-window workspace has one flow and applies enhancement defaults everywhere", async ({ page }) => {
+test("full-window workspace has one flow and exposes the explicit enhancement editor", async ({ page }) => {
+  let plannerCalls = 0;
+  page.on("request", (request) => {
+    if (request.method() === "POST" && new URL(request.url()).pathname === "/api/v1/chat/completions") plannerCalls += 1;
+  });
   expect(await page.evaluate(() => [innerWidth, innerHeight])).toEqual([1920, 1080]);
   await expect(page.locator(".asset-library")).toBeVisible();
   await expect(page.locator(".asset-library-header")).toContainText("Asset library");
@@ -156,28 +235,34 @@ test("full-window workspace has one flow and applies enhancement defaults everyw
   await expect(page.getByText(/review queue/i)).toHaveCount(0);
 
   await page.getByRole("button", { name: "Settings" }).click();
-  const defaultSwitch = page.locator(".settings-switch-field [role=switch]");
-  await expect(defaultSwitch).toHaveAttribute("aria-checked", "true");
-  await defaultSwitch.click();
-  await expect(defaultSwitch).toHaveAttribute("aria-checked", "false");
+  const settings = page.getByRole("dialog", { name: "Settings" });
+  await expect(settings.getByText("Prompt enhancement by default", { exact: true })).toHaveCount(0);
+  const promptModelField = settings.locator(".settings-key-field").filter({ hasText: "Prompt enhancement model" });
+  await expect(promptModelField.locator(".base-select-value")).toHaveText("Gemini 3.8 Flash | High");
+  await promptModelField.getByRole("combobox").click();
+  const promptModelOptions = page.getByRole("listbox").getByRole("option");
+  await expect(promptModelOptions).toHaveCount(3);
+  await expect(promptModelOptions).toHaveText([
+    "GPT-5.6 Sol | High",
+    "Claude Opus 5 | High",
+    "Gemini 3.8 Flash | High",
+  ]);
+  await page.keyboard.press("Escape");
   await page.getByRole("button", { name: "Done" }).click();
+
+  const toolbar = page.getByRole("toolbar", { name: "Prompt enhancement" });
+  await expect(toolbar).toBeVisible();
+  await expect(toolbar).toContainText("Gemini 3.8 Flash | High");
+  await expect(page.getByRole("switch", { name: /Prompt enhancement/ })).toHaveCount(0);
+  expect(plannerCalls).toBe(0);
 
   await page.getByRole("button", { name: "New thread" }).click();
   await expect(page.locator(".thread-tab")).toHaveCount(2);
-  await expect.poll(() => page.evaluate(() => {
-    const state = JSON.parse(localStorage.getItem("fruit-truck.studio.v1") ?? "{}");
-    return state.sessions?.flatMap((session: { threads: { image: Array<{ draft: { enhancePrompt: boolean } }>; video: Array<{ draft: { enhancePrompt: boolean } }> } }) =>
-      [...session.threads.image, ...session.threads.video].map((thread) => thread.draft.enhancePrompt)
-    );
-  })).toEqual([false, false, false]);
+  expect(plannerCalls).toBe(0);
 
   await page.getByRole("button", { name: "Duplicate Image 2" }).click();
   await expect(page.locator(".thread-tab")).toHaveCount(3);
-  await expect.poll(() => page.evaluate(() => {
-    const state = JSON.parse(localStorage.getItem("fruit-truck.studio.v1") ?? "{}");
-    const session = state.sessions?.find((item: { id: string }) => item.id === state.activeSessionId);
-    return session?.threads.image.at(-1)?.draft.enhancePrompt;
-  })).toBe(false);
+  expect(plannerCalls).toBe(0);
 
   await page.locator(".thread-tab").filter({ hasText: "Image 2 copy" }).hover();
   await page.getByRole("button", { name: "Rename Image 2 copy" }).click();
@@ -193,20 +278,268 @@ test("full-window workspace has one flow and applies enhancement defaults everyw
 
   await page.getByRole("button", { name: "New session" }).click();
   await expect(page.getByText("2 total")).toBeVisible();
-  await expect.poll(() => page.evaluate(() => {
-    const state = JSON.parse(localStorage.getItem("fruit-truck.studio.v1") ?? "{}");
-    const session = state.sessions?.find((item: { id: string }) => item.id === state.activeSessionId);
-    return [session?.threads.image[0]?.draft.enhancePrompt, session?.threads.video[0]?.draft.enhancePrompt];
-  })).toEqual([false, false]);
+  expect(plannerCalls).toBe(0);
 
   await page.getByRole("combobox", { name: /^Prompt/ }).fill("A quiet fruit truck at dawn.");
   await page.getByRole("button", { name: "Prepare final request" }).click();
+  expect(plannerCalls).toBe(0);
   await expect(page.getByRole("button", { name: "Generate Image" })).toBeEnabled();
   await page.getByRole("button", { name: "Generate Image" }).click();
   await expect(page.getByText("Generation complete")).toBeVisible({ timeout: 15_000 });
   await expect(page.getByText("Saved to Asset library")).toBeVisible();
   await page.getByRole("button", { name: "Done" }).click();
   await expect(page.getByRole("status", { name: /Session spend: \$0\.04/ })).toBeVisible();
+  expect(plannerCalls).toBe(0);
+});
+
+test("Enhance Prompt replaces the visible prompt and history navigation stays local", async ({ page }) => {
+  const plannerBodies: Array<Record<string, unknown>> = [];
+  page.on("request", (request) => {
+    if (request.method() === "POST" && new URL(request.url()).pathname === "/api/v1/chat/completions") {
+      plannerBodies.push(request.postDataJSON() as Record<string, unknown>);
+    }
+  });
+
+  expect(plannerBodies).toHaveLength(0);
+  await page.getByRole("button", { name: "New thread" }).click();
+  await page.locator(".thread-tab").first().click();
+  expect(plannerBodies).toHaveLength(0);
+
+  const prompt = page.getByRole("combobox", { name: /^Prompt/ });
+  const originalPrompt = "A precise editorial fruit truck portrait.";
+  await prompt.fill(originalPrompt);
+  const toolbar = page.getByRole("toolbar", { name: "Prompt enhancement" });
+  const enhance = toolbar.getByRole("button", { name: "Enhance Prompt" });
+  await expect(enhance).toBeEnabled();
+  await startExplicitEnhancement(page);
+
+  await expect.poll(() => plannerBodies.length).toBe(1);
+  expect(plannerBodies[0]).toMatchObject({
+    model: "google/gemini-3.8-flash",
+    reasoning: { effort: "high" },
+  });
+  await expect(prompt).not.toHaveValue(originalPrompt);
+  const enhancedPrompt = await prompt.inputValue();
+  expect(enhancedPrompt.trim()).not.toBe("");
+  await expect(enhance).toBeDisabled();
+
+  await toolbar.getByRole("button", { name: "Undo prompt enhancement" }).click();
+  await expect(prompt).toHaveValue(originalPrompt);
+  await expect(enhance).toBeDisabled();
+  expect(plannerBodies).toHaveLength(1);
+  await toolbar.getByRole("button", { name: "Redo prompt enhancement" }).click();
+  await expect(prompt).toHaveValue(enhancedPrompt);
+  expect(plannerBodies).toHaveLength(1);
+
+  await prompt.fill(`${enhancedPrompt} Add a hand-painted sign.`);
+  await expect(enhance).toBeEnabled();
+  expect(plannerBodies).toHaveLength(1);
+});
+
+test("masked image editing preserves target, mask, and reference context in the planner request", async ({ page }) => {
+  const plannerBodies: Array<Record<string, unknown>> = [];
+  page.on("request", (request) => {
+    if (request.method() === "POST" && new URL(request.url()).pathname === "/api/v1/chat/completions") {
+      plannerBodies.push(request.postDataJSON() as Record<string, unknown>);
+    }
+  });
+
+  const fileChooserPromise = page.waitForEvent("filechooser");
+  await page.getByRole("button", { name: /Drop assets here or choose files/ }).click();
+  const fileChooser = await fileChooserPromise;
+  await fileChooser.setFiles({
+    name: "masked-edit-target.png",
+    mimeType: "image/png",
+    buffer: Buffer.from(TINY_PNG_BASE64, "base64"),
+  });
+  const tile = page.locator(".asset-tile").filter({ hasText: "masked-edit-target.png" });
+  await tile.getByRole("button", { name: "Edit on canvas" }).click();
+  await page.getByRole("button", { name: "Draw mask" }).click();
+  const maskCanvas = page.getByLabel("Mask drawing canvas");
+  await maskCanvas.focus();
+  await maskCanvas.press("Space");
+  await expect(page.getByText(/Mask ready/)).toBeVisible();
+  const maskInstructions = "Replace the selected door panel with brushed copper while preserving its edges.";
+  await page.getByRole("textbox", { name: "Mask instructions" }).fill(maskInstructions);
+
+  const originalPrompt = "Refinish the selected area of @1 only.";
+  const prompt = page.getByRole("combobox", { name: /^Prompt/ });
+  await prompt.fill(originalPrompt);
+  await startExplicitEnhancement(page);
+  await expect(prompt).not.toHaveValue(originalPrompt);
+  await expect.poll(() => plannerBodies.length).toBe(1);
+
+  const body = plannerBodies[0] as {
+    messages?: Array<{ content?: string | Array<{ type?: string; text?: string }> }>;
+  };
+  const plannerText = (body.messages ?? []).flatMap((message) => typeof message.content === "string"
+    ? [message.content]
+    : (message.content ?? []).flatMap((part) => part.text ?? [])).join("\n");
+  expect(plannerText).toContain('explicit edit target is "@1"');
+  expect(plannerText).toContain(`Mask instructions:\n${maskInstructions}`);
+  expect(plannerText).toContain("@1: masked-edit-target.png (image/png); transport role=reference; semantic purpose=edit_target");
+  expect(plannerText).toContain("Visual 1: @1 masked-edit-target.png (edit_target, reference)");
+  expect(plannerText).toContain("Visual 2: @1 masked-edit-target.png mask guide (mask_guide, reference)");
+  const visualParts = (body.messages ?? []).flatMap((message) => Array.isArray(message.content)
+    ? message.content.filter((part) => part.type === "image_url")
+    : []);
+  expect(visualParts).toHaveLength(2);
+});
+
+test("video enhancement sends one planner call with first and last frame context", async ({ page }) => {
+  const plannerBodies: Array<Record<string, unknown>> = [];
+  page.on("request", (request) => {
+    if (request.method() === "POST" && new URL(request.url()).pathname === "/api/v1/chat/completions") {
+      plannerBodies.push(request.postDataJSON() as Record<string, unknown>);
+    }
+  });
+
+  await page.getByRole("button", { name: "Video", exact: true }).click();
+  const fileChooserPromise = page.waitForEvent("filechooser");
+  await page.getByRole("button", { name: /Drop assets here or choose files/ }).click();
+  const fileChooser = await fileChooserPromise;
+  await fileChooser.setFiles([
+    { name: "planner-first-frame.png", mimeType: "image/png", buffer: Buffer.from(TINY_PNG_BASE64, "base64") },
+    { name: "planner-last-frame.png", mimeType: "image/png", buffer: Buffer.from(TINY_PNG_BASE64, "base64") },
+  ]);
+  await chooseInputRole(page, "planner-first-frame.png", "First frame");
+  await chooseInputRole(page, "planner-last-frame.png", "Last frame");
+
+  const originalPrompt = "Move smoothly from @1 to @2 over five seconds.";
+  const prompt = page.getByRole("combobox", { name: /^Prompt/ });
+  await prompt.fill(originalPrompt);
+  await startExplicitEnhancement(page);
+  await expect(prompt).not.toHaveValue(originalPrompt);
+  await expect.poll(() => plannerBodies.length).toBe(1);
+
+  const body = plannerBodies[0] as {
+    messages?: Array<{ content?: string | Array<{ type?: string; text?: string }> }>;
+  };
+  const plannerText = (body.messages ?? []).flatMap((message) => typeof message.content === "string"
+    ? [message.content]
+    : (message.content ?? []).flatMap((part) => part.text ?? [])).join("\n");
+  expect(plannerText).toContain("@1: planner-first-frame.png (image/png); transport role=first_frame; semantic purpose=first_frame");
+  expect(plannerText).toContain("@2: planner-last-frame.png (image/png); transport role=last_frame; semantic purpose=last_frame");
+  expect(plannerText).toContain("Visual 1: @1 planner-first-frame.png (reference, first_frame)");
+  expect(plannerText).toContain("Visual 2: @2 planner-last-frame.png (reference, last_frame)");
+  const visualParts = (body.messages ?? []).flatMap((message) => Array.isArray(message.content)
+    ? message.content.filter((part) => part.type === "image_url")
+    : []);
+  expect(visualParts).toHaveLength(2);
+  expect(plannerBodies).toHaveLength(1);
+});
+
+test("prompt history cursor and Undo or Redo availability survive reload", async ({ page }) => {
+  let plannerCalls = 0;
+  page.on("request", (request) => {
+    if (request.method() === "POST" && new URL(request.url()).pathname === "/api/v1/chat/completions") plannerCalls += 1;
+  });
+  const prompt = page.getByRole("combobox", { name: /^Prompt/ });
+  const originalPrompt = "A durable fruit truck prompt history.";
+  await prompt.fill(originalPrompt);
+  await startExplicitEnhancement(page);
+  await expect(prompt).not.toHaveValue(originalPrompt);
+  const enhancedPrompt = await prompt.inputValue();
+  const toolbar = page.getByRole("toolbar", { name: "Prompt enhancement" });
+  await toolbar.getByRole("button", { name: "Undo prompt enhancement" }).click();
+  await expect(prompt).toHaveValue(originalPrompt);
+  await expect(toolbar.getByRole("button", { name: "Undo prompt enhancement" })).toBeEnabled();
+  await expect(toolbar.getByRole("button", { name: "Redo prompt enhancement" })).toBeEnabled();
+
+  await expect.poll(async () => (await activePromptState(page))?.prompt).toBe(originalPrompt);
+  const beforeReload = await activePromptState(page);
+  expect(beforeReload?.cursor).toBeGreaterThan(0);
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Test image model" })).toBeVisible();
+  const restoredToolbar = page.getByRole("toolbar", { name: "Prompt enhancement" });
+  await expect(page.getByRole("combobox", { name: /^Prompt/ })).toHaveValue(originalPrompt);
+  await expect(restoredToolbar.getByRole("button", { name: "Undo prompt enhancement" })).toBeEnabled();
+  await expect(restoredToolbar.getByRole("button", { name: "Redo prompt enhancement" })).toBeEnabled();
+  expect(await activePromptState(page)).toEqual(beforeReload);
+
+  await restoredToolbar.getByRole("button", { name: "Redo prompt enhancement" }).click();
+  await expect(page.getByRole("combobox", { name: /^Prompt/ })).toHaveValue(enhancedPrompt);
+  expect(plannerCalls).toBe(1);
+});
+
+test("an enhancement response never overwrites an edit made while it is in flight", async ({ page }) => {
+  let releaseResponse: (() => void) | undefined;
+  const responseGate = new Promise<void>((resolve) => {
+    releaseResponse = resolve;
+  });
+  await page.route("https://openrouter.ai/api/v1/chat/completions", async (route) => {
+    await responseGate;
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        choices: [{ message: { content: JSON.stringify(plannerPlan("image", "text_to_image")) } }],
+        usage: { cost: 0.01 },
+      }),
+    });
+  });
+
+  const prompt = page.getByRole("combobox", { name: /^Prompt/ });
+  await prompt.fill("Enhance this fruit truck composition.");
+  const toolbar = page.getByRole("toolbar", { name: "Prompt enhancement" });
+  await startExplicitEnhancement(page);
+  await expect(toolbar.getByRole("button", { name: "Enhancing" })).toBeDisabled();
+  await expect(toolbar.getByRole("button", { name: "Undo prompt enhancement" })).toBeDisabled();
+  await expect(toolbar.getByRole("button", { name: "Redo prompt enhancement" })).toBeDisabled();
+
+  const editedWhileWaiting = "The user changed this prompt while the planner was working.";
+  await prompt.fill(editedWhileWaiting);
+  releaseResponse?.();
+  await expect(prompt).toHaveValue(editedWhileWaiting);
+  await expect(toolbar).toContainText("Result ready");
+  await expect(toolbar.getByRole("button", { name: "Redo prompt enhancement" })).toBeEnabled();
+});
+
+test("an unavailable saved Gemini planner remains selected without fallback", async ({ page }) => {
+  await page.route("https://openrouter.ai/api/v1/models", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ data: [
+        { id: "openai/gpt-5.6-sol", supported_parameters: ["reasoning", "structured_outputs"] },
+        { id: "anthropic/claude-opus-5", supported_parameters: ["reasoning", "structured_outputs"] },
+      ] }),
+    });
+  });
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Test image model" })).toBeVisible();
+
+  const toolbar = page.getByRole("toolbar", { name: "Prompt enhancement" });
+  await expect(toolbar).toContainText("Gemini 3.8 Flash | High");
+  await expect(toolbar).toContainText("Unavailable");
+  await page.getByRole("combobox", { name: /^Prompt/ }).fill("A fruit truck in soft morning light.");
+  await expect(toolbar.getByRole("button", { name: "Enhance Prompt" })).toBeDisabled();
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  const settings = page.getByRole("dialog", { name: "Settings" });
+  const promptModelField = settings.locator(".settings-key-field").filter({ hasText: "Prompt enhancement model" });
+  await expect(promptModelField.locator(".base-select-value")).toHaveText("Gemini 3.8 Flash | High (Unavailable)");
+});
+
+test("a reported planner charge keeps failed delivery uncertain before retry", async ({ page }) => {
+  await page.route("https://openrouter.ai/api/v1/chat/completions", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        choices: [{ message: { content: "not a valid prompt plan" } }],
+        usage: { cost: 0.01 },
+      }),
+    });
+  });
+
+  const toolbar = page.getByRole("toolbar", { name: "Prompt enhancement" });
+  await page.getByRole("combobox", { name: /^Prompt/ }).fill("A paid planner response that cannot be compiled.");
+  await startExplicitEnhancement(page);
+  await expect(toolbar.getByRole("button", { name: "Enhance Prompt" })).toBeEnabled();
+  await expect(page.getByRole("status", { name: /Session spend: \$0\.02/ })).toBeVisible();
+
+  await toolbar.getByRole("button", { name: "Enhance Prompt" }).click();
+  const warning = page.getByRole("alertdialog");
+  await expect(warning).toContainText("Check account activity before repeating this paid request");
+  await expect(warning).toContainText("duplicate charge");
 });
 
 test("model comparison stays local and exposes contract differences before request preparation", async ({ page }) => {
@@ -233,8 +566,10 @@ test("model comparison stays local and exposes contract differences before reque
 
 test("attempt history preserves exact replay settings and duplicates without submitting", async ({ page }) => {
   let paidImageRequests = 0;
+  let plannerCalls = 0;
   page.on("request", (request) => {
     if (request.method() === "POST" && new URL(request.url()).pathname === "/api/v1/images") paidImageRequests += 1;
+    if (request.method() === "POST" && new URL(request.url()).pathname === "/api/v1/chat/completions") plannerCalls += 1;
   });
   const prompt = "A replayable fruit truck portrait.";
   await page.getByRole("combobox", { name: /^Prompt/ }).fill(prompt);
@@ -247,13 +582,14 @@ test("attempt history preserves exact replay settings and duplicates without sub
   await page.locator(".attempt-history-trigger").click();
   const history = page.locator(".attempt-history-popover");
   await expect(history).toContainText("Generation · actual");
-  await expect(history).toContainText("Prompt planner · actual");
+  await expect(history).not.toContainText(/Prompt planner.*actual/);
   await expect(history.getByText("Exact request snapshot")).toBeVisible();
   await history.getByRole("button", { name: "Duplicate to new thread" }).click();
   await expect(page.getByText("Attempt settings copied to a new thread. Review the final request before generating.")).toBeVisible();
   await expect(page.locator(".thread-tab")).toHaveCount(2);
   await expect(page.getByRole("combobox", { name: /^Prompt/ })).toHaveValue(prompt);
   expect(paidImageRequests).toBe(1);
+  expect(plannerCalls).toBe(0);
 });
 
 test("paid image materialization failures retain cost and a visible recovery payload", async ({ page }) => {
@@ -272,7 +608,7 @@ test("paid image materialization failures retain cost and a visible recovery pay
   await page.getByRole("combobox", { name: /^Prompt/ }).fill("A recoverable fruit truck image.");
   await page.getByRole("button", { name: "Prepare final request" }).click();
   await page.getByRole("button", { name: "Generate Image" }).click();
-  await expect(page.getByRole("status", { name: /Session spend: \$0\.04/ })).toBeVisible();
+  await expect(page.getByRole("status", { name: /Session spend: \$0\.037/ })).toBeVisible();
   await page.locator(".attempt-history-trigger").click();
   const history = page.locator(".attempt-history-popover");
   await expect(history).toContainText("Retained recovery payload");
@@ -306,13 +642,34 @@ test("stopping an image response is honest about possible remote billing", async
 test("video generation completes in the same workspace and records session cost", async ({ page }) => {
   await page.getByRole("button", { name: "Video", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Test video model" })).toBeVisible();
+  await expect(page.getByRole("toolbar", { name: "Prompt enhancement" })).toBeVisible();
   await page.getByRole("combobox", { name: /^Prompt/ }).fill("A five second tracking shot of a fruit truck.");
   await page.getByRole("button", { name: "Prepare final request" }).click();
   await expect(page.getByRole("button", { name: "Generate Video" })).toBeEnabled();
   await page.getByRole("button", { name: "Generate Video" }).click();
   await expect(page.getByText("Generation complete")).toBeVisible({ timeout: 8_000 });
   await expect(page.getByText("Saved to Asset library")).toBeVisible();
-  await expect(page.getByRole("status", { name: /Session spend: \$0\.28/ })).toBeVisible();
+  await expect(page.getByRole("status", { name: /Session spend: \$0\.27/ })).toBeVisible();
+});
+
+test("routing a generated image into Director invalidates the prior video enhancement", async ({ page }) => {
+  await page.getByRole("button", { name: "Video", exact: true }).click();
+  const videoToolbar = page.getByRole("toolbar", { name: "Prompt enhancement" });
+  await page.getByRole("combobox", { name: /^Prompt/ }).fill("A fruit truck rolls through a quiet market.");
+  await startExplicitEnhancement(page);
+  await expect(videoToolbar.getByRole("button", { name: "Enhance Prompt" })).toBeDisabled();
+
+  await page.getByRole("button", { name: "Image", exact: true }).click();
+  await page.getByRole("combobox", { name: /^Prompt/ }).fill("A clean fruit truck keyframe.");
+  await page.getByRole("button", { name: "Prepare final request" }).click();
+  await page.getByRole("button", { name: "Generate Image" }).click();
+  const result = page.locator(".generation-result-dialog");
+  await expect(result).toContainText("Generation complete", { timeout: 15_000 });
+  await result.getByRole("button", { name: "Use in video" }).click();
+
+  await expect(page.getByRole("heading", { name: "Test video model" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Close Director" })).toBeVisible();
+  await expect(page.getByRole("toolbar", { name: "Prompt enhancement" }).getByRole("button", { name: "Enhance Prompt" })).toBeEnabled();
 });
 
 test("the reviewed final payload is the exact payload submitted after enhancement", async ({ page }) => {
@@ -320,7 +677,13 @@ test("the reviewed final payload is the exact payload submitted after enhancemen
   page.on("request", (request) => {
     if (new URL(request.url()).pathname === "/api/v1/chat/completions") plannerCalls += 1;
   });
-  await page.getByRole("combobox", { name: /^Prompt/ }).fill("A precise editorial fruit truck portrait.");
+  const prompt = page.getByRole("combobox", { name: /^Prompt/ });
+  const originalPrompt = "A precise editorial fruit truck portrait.";
+  await prompt.fill(originalPrompt);
+  await startExplicitEnhancement(page);
+  await expect.poll(() => plannerCalls).toBe(1);
+  await expect(prompt).not.toHaveValue(originalPrompt);
+  const enhancedPrompt = await prompt.inputValue();
   await page.getByRole("button", { name: "Prepare final request" }).click();
   await expect(page.getByRole("button", { name: "Generate Image" })).toBeEnabled();
 
@@ -328,6 +691,12 @@ test("the reviewed final payload is the exact payload submitted after enhancemen
   await expect(page.locator(".request-readiness")).toContainText("Final · ready to send");
   const reviewedPayload = JSON.parse(await page.locator(".request-dialog-body pre").textContent() ?? "{}");
   expect(reviewedPayload.stream).toBe(true);
+  expect(reviewedPayload.prompt).toBe(enhancedPrompt);
+  expect(reviewedPayload.negative_prompt).toContain("avoid watermark");
+  const disclosure = page.locator(".request-disclosure");
+  await expect(disclosure).toContainText("Prompt enhancement sends your prompt");
+  await expect(disclosure).toContainText("google/gemini-3.8-flash");
+  await expect(disclosure).toContainText("$0.01");
   await page.getByRole("button", { name: "Close request preview" }).click();
 
   const paidRequest = page.waitForRequest((request) =>
@@ -339,7 +708,7 @@ test("the reviewed final payload is the exact payload submitted after enhancemen
   expect(plannerCalls).toBe(1);
 });
 
-test("reference purpose, coverage mapping, and separate exclusions stay visible in the request", async ({ page }) => {
+test("reference purpose and coverage mapping stay visible after explicit enhancement", async ({ page }) => {
   const fileChooserPromise = page.waitForEvent("filechooser");
   await page.getByRole("button", { name: /Drop assets here or choose files/ }).click();
   const fileChooser = await fileChooserPromise;
@@ -352,13 +721,11 @@ test("reference purpose, coverage mapping, and separate exclusions stay visible 
   await expect(page.locator(".reference-row strong", { hasText: "style-reference.png" })).toBeVisible();
   await page.getByRole("combobox", { name: "Reference purpose for style-reference.png" }).click();
   await page.getByRole("option", { name: "Style", exact: true }).click();
-  await page.getByRole("combobox", { name: /^Prompt/ }).fill("Optionally use @1 for a restrained editorial finish.");
-  await page.locator(".enhance-row").getByRole("button", { name: "Preview", exact: true }).click();
-
-  await page.getByText("Enhanced prompt · inspect or edit").click();
-  const exclusions = page.getByRole("textbox", { name: "Exclusions sent separately" });
-  await expect(exclusions).toHaveValue("avoid watermark");
-  await exclusions.fill("watermark; extra logo");
+  const prompt = page.getByRole("combobox", { name: /^Prompt/ });
+  await prompt.fill("Optionally use @1 for a restrained editorial finish.");
+  await startExplicitEnhancement(page);
+  await expect(prompt).not.toHaveValue("Optionally use @1 for a restrained editorial finish.");
+  await expect(prompt).toHaveValue(/clean unmarked finish/);
 
   await page.getByRole("button", { name: "Request", exact: true }).click();
   await expect(page.getByRole("alert")).toHaveCount(0);
@@ -367,7 +734,7 @@ test("reference purpose, coverage mapping, and separate exclusions stay visible 
   const mapping = page.locator(".request-mapping");
   await expect(mapping).toContainText("Style");
   await expect(mapping).toContainText("mapped");
-  await expect(page.locator(".request-dialog-body pre")).toContainText('"negative_prompt": "watermark; extra logo"');
+  await expect(page.locator(".request-dialog-body pre")).toContainText("clean unmarked finish");
   await expect(page.locator(".request-dialog-body pre")).toContainText("Image 1");
 });
 
@@ -392,6 +759,11 @@ test("an imported asset can be previewed, reused, exported, edited, and explicit
   await expect(page.locator(".reference-row strong", { hasText: "lifecycle.png" })).toBeVisible();
   await tile.getByRole("button", { name: "Edit on canvas" }).click();
   await expect(page.getByText("Image edit", { exact: true })).toBeVisible();
+  const toolbar = page.getByRole("toolbar", { name: "Prompt enhancement" });
+  await expect(toolbar).toBeVisible();
+  await page.getByRole("combobox", { name: /^Prompt/ }).fill("Give @1 a brighter painted finish.");
+  await startExplicitEnhancement(page);
+  await expect(toolbar.getByRole("button", { name: "Enhance Prompt" })).toBeDisabled();
 
   const downloadPromise = page.waitForEvent("download");
   await tile.getByRole("button", { name: "Export" }).click();
@@ -405,6 +777,7 @@ test("an imported asset can be previewed, reused, exported, edited, and explicit
   await confirmation.getByRole("button", { name: "Delete assets" }).click();
   await expect(tile).toHaveCount(0);
   await expect(page.locator(".reference-row strong", { hasText: "lifecycle.png" })).toHaveCount(0);
+  await expect(toolbar.getByRole("button", { name: "Enhance Prompt" })).toBeEnabled();
 });
 
 test("invalid provider passthrough is blocked and explained before submission", async ({ page }) => {

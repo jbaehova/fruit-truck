@@ -13,6 +13,19 @@ import {
   type ReferencePurpose,
 } from "./prompting/index.ts";
 import { migrateLegacyInputMentions } from "./inputMentions.ts";
+import {
+  DEFAULT_PROMPT_MODEL,
+  isPromptModel,
+  migrateLegacyPromptModel,
+  type PromptModel,
+} from "./promptModels.ts";
+import {
+  initialPromptHistory,
+  invalidatePromptEnhancement,
+  trimPromptHistory,
+  type PromptCheckpoint,
+  type PromptHistory,
+} from "./promptHistory.ts";
 import type { DirectorPlan } from "./director/types.ts";
 import {
   cloneDirectorPlan,
@@ -22,8 +35,11 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 
 export type AssetKind = "image" | "video" | "audio";
 export type AssetOrigin = "upload" | "generated" | "edited";
-export type PromptModel = "openai/gpt-5.6-luna" | "openai/gpt-5.6-terra";
 export type VideoWorkflow = "generate" | "edit";
+
+export { DEFAULT_PROMPT_MODEL, PROMPT_MODELS } from "./promptModels.ts";
+export type { PromptModel, PromptModelDefinition } from "./promptModels.ts";
+export type { PromptCheckpoint, PromptCheckpointKind, PromptHistory } from "./promptHistory.ts";
 
 export type SessionAssetDerivation = {
   /** The original asset remains immutable; this describes a separately stored derivative. */
@@ -82,14 +98,10 @@ export type MaskStroke = {
 
 export type GenerationDraftState = {
   prompt: string;
+  promptHistory: PromptHistory;
   references: DraftReference[];
   options: DraftOptions;
   providerJson: string;
-  enhancePrompt: boolean;
-  enhancedPrompt: string;
-  enhancedPromptDirty: boolean;
-  enhancedVisualCount: number;
-  enhancementArtifact?: PromptEnhancementArtifact;
   imageEditMode: boolean;
   imageEditTarget: string;
   maskInstructions: string;
@@ -133,9 +145,7 @@ export type GenerationAttemptSnapshot = {
   /** Retained from the v5 snapshot contract; v6 derives this from mode. */
   outputRole?: string;
   prompt: string;
-  enhancePrompt: boolean;
-  enhancedPrompt: string;
-  enhancementArtifact?: PromptEnhancementArtifact;
+  promptHistory: PromptHistory;
   options: DraftOptions;
   providerJson: string;
   assetBindings: DraftReference[];
@@ -191,6 +201,8 @@ export type PromptEnhancementAttempt = {
   requestKey: string;
   status: "in_progress" | "completed" | "failed" | "uncertain";
   threadRevision: number;
+  editRevision?: number;
+  contextSignature?: string;
   originalPrompt: string;
   enhancedPrompt?: string;
   error?: string;
@@ -278,7 +290,6 @@ export type StudioState = {
   schemaVersion: 8;
   activeSessionId: string;
   promptModel: PromptModel;
-  defaultEnhancePrompt: boolean;
   sessions: StudioSession[];
   generationPresets?: GenerationPreset[];
   directorPresets: DirectorPreset[];
@@ -367,7 +378,11 @@ export type ManagedAssetReconciliation = {
   duplicateFiles: SessionAsset[];
 };
 
-/** Export the current metadata without ephemeral recovery diagnostics or history truncation. */
+export type ManagedAssetPathObservation = {
+  localPath: string;
+};
+
+/** Export the current metadata without ephemeral recovery diagnostics. */
 export type StudioStateExport = {
   schemaVersion: 8;
   json: string;
@@ -479,12 +494,7 @@ export function restoreDraftFromAttemptSnapshot(
   return {
     ...currentDraft,
     prompt: snapshot.prompt,
-    enhancePrompt: snapshot.enhancePrompt,
-    enhancedPrompt: snapshot.enhancedPrompt,
-    enhancedPromptDirty: false,
-    enhancementArtifact: snapshot.enhancementArtifact
-      ? structuredClone(snapshot.enhancementArtifact)
-      : undefined,
+    promptHistory: structuredClone(snapshot.promptHistory),
     references: structuredClone(snapshot.assetBindings),
     options: structuredClone(snapshot.options),
     providerJson: snapshot.providerJson,
@@ -585,26 +595,6 @@ export function recordSessionCost(session: StudioSession, entry: SessionCostEntr
   return { ...session, costLedger };
 }
 
-export function applyDefaultEnhancePrompt(state: StudioState, enabled: boolean): StudioState {
-  return {
-    ...state,
-    defaultEnhancePrompt: enabled,
-    sessions: state.sessions.map((session) => ({
-      ...session,
-      threads: {
-        image: session.threads.image.map((thread) => ({
-          ...thread,
-          draft: { ...thread.draft, enhancePrompt: enabled },
-        })),
-        video: session.threads.video.map((thread) => ({
-          ...thread,
-          draft: { ...thread.draft, enhancePrompt: enabled },
-        })),
-      },
-    })),
-  };
-}
-
 export const STUDIO_STORAGE_KEY = "fruit-truck.studio.v1";
 export const STUDIO_LAST_KNOWN_GOOD_KEY = `${STUDIO_STORAGE_KEY}.last-known-good`;
 export const STUDIO_BACKUP_KEY_PREFIX = `${STUDIO_STORAGE_KEY}.backup.`;
@@ -632,26 +622,13 @@ export type NativeManagedAsset = {
   byteSize: number;
 };
 
-export const PROMPT_MODELS: Array<{
-  id: PromptModel;
-  label: string;
-  effort: "xhigh" | "high";
-}> = [
-  { id: "openai/gpt-5.6-luna", label: "GPT-5.6 Luna", effort: "xhigh" },
-  { id: "openai/gpt-5.6-terra", label: "GPT-5.6 Terra", effort: "high" },
-];
-
-export function emptyDraft(enhancePrompt = true): GenerationDraftState {
+export function emptyDraft(): GenerationDraftState {
   return {
     prompt: "",
+    promptHistory: initialPromptHistory(""),
     references: [],
     options: {},
     providerJson: "",
-    enhancePrompt,
-    enhancedPrompt: "",
-    enhancedPromptDirty: false,
-    enhancedVisualCount: 0,
-    enhancementArtifact: undefined,
     imageEditMode: false,
     imageEditTarget: "",
     maskInstructions: "",
@@ -696,10 +673,7 @@ export function beginGeneratedImageEdit(draft: GenerationDraftState, assetId: st
     imageEditTarget: "@1",
     maskInstructions: "",
     maskStrokes: [],
-    enhancedPrompt: "",
-    enhancedPromptDirty: false,
-    enhancedVisualCount: 0,
-    enhancementArtifact: undefined,
+    promptHistory: invalidatePromptEnhancement(draft.promptHistory),
   };
 }
 
@@ -743,12 +717,11 @@ export function effectiveThreadModelId(session: StudioSession, thread: Generatio
 export function createSiblingGenerationThread(
   source: GenerationThread,
   index: number,
-  defaultEnhancePrompt = true,
 ): GenerationThread {
   const next = createGenerationThread(
     source.mode,
     index,
-    emptyDraft(defaultEnhancePrompt),
+    emptyDraft(),
   );
   if (source.modelOverrideId) next.modelOverrideId = source.modelOverrideId;
   return next;
@@ -790,10 +763,10 @@ export function activeVideoJobsFromAttempts(session: Pick<StudioSession, "thread
   }));
 }
 
-export function createSession(name = "Untitled session", defaultEnhancePrompt = true): StudioSession {
+export function createSession(name = "Untitled session"): StudioSession {
   const now = new Date().toISOString();
-  const imageThread = createGenerationThread("image", 1, emptyDraft(defaultEnhancePrompt));
-  const videoThread = createGenerationThread("video", 1, emptyDraft(defaultEnhancePrompt));
+  const imageThread = createGenerationThread("image", 1, emptyDraft());
+  const videoThread = createGenerationThread("video", 1, emptyDraft());
   return {
     id: crypto.randomUUID(),
     name,
@@ -941,11 +914,192 @@ function createInitialStudioState(): StudioState {
   return {
     schemaVersion: STUDIO_SCHEMA_VERSION,
     activeSessionId: session.id,
-    promptModel: "openai/gpt-5.6-luna",
-    defaultEnhancePrompt: true,
+    promptModel: DEFAULT_PROMPT_MODEL,
     generationPresets: [],
     directorPresets: [],
     sessions: [session],
+  };
+}
+
+const PROMPT_HISTORY_MIGRATION_TIMESTAMP = new Date(0).toISOString();
+const LEGACY_ENHANCEMENT_FIELDS = [
+  "enhancePrompt",
+  "enhancedPrompt",
+  "enhancedPromptDirty",
+  "enhancedVisualCount",
+  "enhancementArtifact",
+] as const;
+
+function hasLegacyEnhancementFields(value: JsonRecord): boolean {
+  return LEGACY_ENHANCEMENT_FIELDS.some((field) => field in value);
+}
+
+function migrationCheckpointId(kind: "manual" | "enhancement-result", text: string): string {
+  const input = `${kind}\u0000${text}`;
+  let first = 0x811c9dc5;
+  let second = 0x9e3779b9;
+  for (let index = 0; index < input.length; index += 1) {
+    const code = input.charCodeAt(index);
+    first = Math.imul(first ^ code, 0x01000193) >>> 0;
+    second = Math.imul(second ^ code, 0x85ebca6b) >>> 0;
+  }
+  return `phase2-${kind}-${first.toString(16).padStart(8, "0")}${second.toString(16).padStart(8, "0")}`;
+}
+
+function normalizeEnhancementArtifact(
+  value: unknown,
+  label: string,
+): PromptEnhancementArtifact | undefined {
+  if (value === undefined || value === null) return undefined;
+  const artifact = asRecord(value, label);
+  if (artifact.schemaVersion !== 1) throw new Error(`${label}.schemaVersion is unsupported.`);
+  asString(artifact.prompt, `${label}.prompt`);
+  asString(artifact.plannerModel, `${label}.plannerModel`);
+  asString(artifact.createdAt, `${label}.createdAt`);
+  optionalString(artifact.negativePrompt, `${label}.negativePrompt`);
+  optionalFiniteNumber(artifact.actualCostUsd, `${label}.actualCostUsd`);
+  return structuredClone(artifact) as PromptEnhancementArtifact;
+}
+
+function normalizePromptCheckpoint(
+  value: unknown,
+  index: number,
+  label: string,
+  mapLegacyPlanner = false,
+): PromptCheckpoint {
+  const checkpoint = asRecord(value, `${label}.entries[${index}]`);
+  if (checkpoint.kind !== "manual"
+    && checkpoint.kind !== "before_enhancement"
+    && checkpoint.kind !== "enhancement_result") {
+    throw new Error(`${label}.entries[${index}].kind is unknown.`);
+  }
+  const plannerModel = checkpoint.plannerModel === undefined || checkpoint.plannerModel === null
+    ? undefined
+    : mapLegacyPlanner
+      ? migrateLegacyPromptModel(checkpoint.plannerModel)
+      : isPromptModel(checkpoint.plannerModel)
+        ? checkpoint.plannerModel
+        : (() => { throw new Error(`${label}.entries[${index}].plannerModel is unknown.`); })();
+  if (checkpoint.reasoningEffort !== undefined
+    && checkpoint.reasoningEffort !== null
+    && checkpoint.reasoningEffort !== "high") {
+    throw new Error(`${label}.entries[${index}].reasoningEffort is unsupported.`);
+  }
+  const actualCostUsd = optionalFiniteNumber(
+    checkpoint.actualCostUsd,
+    `${label}.entries[${index}].actualCostUsd`,
+  );
+  if (actualCostUsd !== undefined && actualCostUsd < 0) {
+    throw new Error(`${label}.entries[${index}].actualCostUsd must be non-negative.`);
+  }
+  return {
+    ...checkpoint,
+    id: asString(checkpoint.id, `${label}.entries[${index}].id`),
+    text: asString(checkpoint.text, `${label}.entries[${index}].text`),
+    kind: checkpoint.kind,
+    createdAt: asString(checkpoint.createdAt, `${label}.entries[${index}].createdAt`),
+    enhancementAttemptId: optionalString(
+      checkpoint.enhancementAttemptId,
+      `${label}.entries[${index}].enhancementAttemptId`,
+    ),
+    plannerModel,
+    reasoningEffort: checkpoint.reasoningEffort === "high" ? "high" : undefined,
+    inputHash: optionalString(checkpoint.inputHash, `${label}.entries[${index}].inputHash`),
+    outputHash: optionalString(checkpoint.outputHash, `${label}.entries[${index}].outputHash`),
+    negativePrompt: optionalString(checkpoint.negativePrompt, `${label}.entries[${index}].negativePrompt`),
+    enhancementArtifact: normalizeEnhancementArtifact(
+      checkpoint.enhancementArtifact,
+      `${label}.entries[${index}].enhancementArtifact`,
+    ),
+    actualCostUsd,
+  } as PromptCheckpoint;
+}
+
+function normalizePromptHistory(
+  value: unknown,
+  label: string,
+  mapLegacyPlanner = false,
+): PromptHistory {
+  const history = asRecord(value, label);
+  if (history.schemaVersion !== 1) throw new Error(`${label}.schemaVersion is unsupported.`);
+  if (!Array.isArray(history.entries) || history.entries.length === 0) {
+    throw new Error(`${label}.entries must be a non-empty array.`);
+  }
+  const entries = history.entries.map((entry, index) =>
+    normalizePromptCheckpoint(entry, index, label, mapLegacyPlanner));
+  const cursor = asFiniteNumber(history.cursor, `${label}.cursor`);
+  if (!Number.isInteger(cursor) || cursor < 0 || cursor >= entries.length) {
+    throw new Error(`${label}.cursor must select a checkpoint.`);
+  }
+  if (typeof history.enhancementLocked !== "boolean") {
+    throw new Error(`${label}.enhancementLocked must be a boolean.`);
+  }
+  const editRevision = asFiniteNumber(history.editRevision, `${label}.editRevision`);
+  if (!Number.isInteger(editRevision) || editRevision < 0) {
+    throw new Error(`${label}.editRevision must be a non-negative integer.`);
+  }
+  return {
+    ...history,
+    schemaVersion: 1,
+    entries,
+    cursor,
+    enhancementLocked: history.enhancementLocked,
+    editRevision,
+  };
+}
+
+function migrateLegacyDraftPrompt(
+  draft: JsonRecord,
+  prompt: string,
+  legacyEnhanceDefault: boolean,
+): { prompt: string; promptHistory: PromptHistory } {
+  const enhancePrompt = draft.enhancePrompt === undefined || draft.enhancePrompt === null
+    ? legacyEnhanceDefault
+    : typeof draft.enhancePrompt === "boolean"
+      ? draft.enhancePrompt
+      : (() => { throw new Error("draft.enhancePrompt must be a boolean."); })();
+  const enhancedPrompt = draft.enhancedPrompt === undefined || draft.enhancedPrompt === null
+    ? ""
+    : asString(draft.enhancedPrompt, "draft.enhancedPrompt");
+  if (draft.enhancedPromptDirty !== undefined
+    && draft.enhancedPromptDirty !== null
+    && typeof draft.enhancedPromptDirty !== "boolean") {
+    throw new Error("draft.enhancedPromptDirty must be a boolean.");
+  }
+  if (draft.enhancedVisualCount !== undefined && draft.enhancedVisualCount !== null) {
+    asFiniteNumber(draft.enhancedVisualCount, "draft.enhancedVisualCount");
+  }
+  const artifact = normalizeEnhancementArtifact(draft.enhancementArtifact, "draft.enhancementArtifact");
+  const entries: PromptCheckpoint[] = [{
+    id: migrationCheckpointId("manual", prompt),
+    text: prompt,
+    kind: "manual",
+    createdAt: PROMPT_HISTORY_MIGRATION_TIMESTAMP,
+  }];
+  let cursor = 0;
+  if (enhancedPrompt.trim()) {
+    entries.push({
+      id: migrationCheckpointId("enhancement-result", enhancedPrompt),
+      text: enhancedPrompt,
+      kind: "enhancement_result",
+      createdAt: artifact?.createdAt ?? PROMPT_HISTORY_MIGRATION_TIMESTAMP,
+      plannerModel: migrateLegacyPromptModel(artifact?.plannerModel),
+      reasoningEffort: "high",
+      negativePrompt: artifact?.negativePrompt,
+      enhancementArtifact: artifact,
+      actualCostUsd: artifact?.actualCostUsd,
+    });
+    if (enhancePrompt) cursor = 1;
+  }
+  return {
+    prompt: entries[cursor].text,
+    promptHistory: {
+      schemaVersion: 1,
+      entries,
+      cursor,
+      enhancementLocked: cursor > 0,
+      editRevision: 0,
+    },
   };
 }
 
@@ -973,7 +1127,8 @@ function validEnvelope(value: unknown): value is JsonRecord & {
 function validCurrentState(value: unknown): value is StudioState {
   if (!validEnvelope(value)
     || value.schemaVersion !== STUDIO_SCHEMA_VERSION
-    || typeof value.defaultEnhancePrompt !== "boolean"
+    || !isPromptModel(value.promptModel)
+    || "defaultEnhancePrompt" in value
     || !Array.isArray(value.directorPresets)) return false;
   return value.sessions.every((session) => {
     const threads = session.threads;
@@ -1001,12 +1156,19 @@ function validCurrentState(value: unknown): value is StudioState {
       }
       try {
         normalizeDirectorPlan(thread.draft.directorPlan, `thread ${thread.id}.draft.directorPlan`);
+        normalizePromptHistory(thread.draft.promptHistory, `thread ${thread.id}.draft.promptHistory`);
+        if (hasLegacyEnhancementFields(thread.draft)) return false;
         return thread.attempts.every((attempt) => {
           if (!isRecord(attempt)
             || typeof attempt.id !== "string"
             || typeof attempt.status !== "string"
             || !CURRENT_ATTEMPT_STATUSES.has(attempt.status as GenerationAttemptStatus)) return false;
           if (isRecord(attempt.snapshot)) {
+            normalizePromptHistory(
+              attempt.snapshot.promptHistory,
+              `thread ${thread.id}.attempt ${attempt.id}.snapshot.promptHistory`,
+            );
+            if (hasLegacyEnhancementFields(attempt.snapshot)) return false;
             normalizeDirectorPlan(
               attempt.snapshot.directorPlan,
               `thread ${thread.id}.attempt ${attempt.id}.snapshot.directorPlan`,
@@ -1028,6 +1190,27 @@ function validCurrentState(value: unknown): value is StudioState {
   })();
 }
 
+function isLegacyPhase2CurrentState(value: JsonRecord): boolean {
+  if ("defaultEnhancePrompt" in value
+    || value.promptModel === "openai/gpt-5.6-luna"
+    || value.promptModel === "openai/gpt-5.6-terra") return true;
+  return (value.sessions as unknown[]).some((sessionValue) => {
+    if (!isRecord(sessionValue) || !isRecord(sessionValue.threads)) return false;
+    return [sessionValue.threads.image, sessionValue.threads.video].some((threads) =>
+      Array.isArray(threads) && threads.some((threadValue) => {
+        if (!isRecord(threadValue)) return false;
+        if (isRecord(threadValue.draft)
+          && (threadValue.draft.promptHistory === undefined || hasLegacyEnhancementFields(threadValue.draft))) {
+          return true;
+        }
+        return Array.isArray(threadValue.attempts) && threadValue.attempts.some((attempt) =>
+          isRecord(attempt)
+          && isRecord(attempt.snapshot)
+          && (attempt.snapshot.promptHistory === undefined || hasLegacyEnhancementFields(attempt.snapshot)));
+      }));
+  });
+}
+
 function normalizeReference(value: unknown, index: number): DraftReference {
   const reference = asRecord(value, `reference ${index}`);
   const role = asString(reference.role, `reference ${index}.role`) as ReferenceRole;
@@ -1038,7 +1221,13 @@ function normalizeReference(value: unknown, index: number): DraftReference {
   return { ...reference, assetId, slot, role, ...(purpose ? { purpose } : {}) } as DraftReference;
 }
 
-function normalizeDraft(value: unknown, defaultEnhancePrompt: boolean, migrateLegacyMentions = false): GenerationDraftState {
+function normalizeDraft(
+  value: unknown,
+  legacyEnhanceDefault: boolean,
+  migrateLegacyMentions = false,
+  allowLegacyEnhancement = true,
+  mapLegacyPlanner = false,
+): GenerationDraftState {
   const draft = value === undefined || value === null ? {} : asRecord(value, "draft");
   const references = draft.references === undefined || draft.references === null
     ? []
@@ -1050,9 +1239,6 @@ function normalizeDraft(value: unknown, defaultEnhancePrompt: boolean, migrateLe
     const normalized = text === undefined || text === null ? "" : asString(text, label);
     return migrateLegacyMentions ? migrateLegacyInputMentions(normalized, slots) : normalized;
   };
-  const count = draft.enhancedVisualCount === undefined || draft.enhancedVisualCount === null
-    ? 0
-    : asFiniteNumber(draft.enhancedVisualCount, "draft.enhancedVisualCount");
   const options = draft.options === undefined || draft.options === null
     ? {}
     : isRecord(draft.options)
@@ -1071,32 +1257,40 @@ function normalizeDraft(value: unknown, defaultEnhancePrompt: boolean, migrateLe
         } as MaskStroke;
       })
       : (() => { throw new Error("draft.maskStrokes must be an array."); })();
-  const enhancePrompt = draft.enhancePrompt === undefined || draft.enhancePrompt === null
-    ? defaultEnhancePrompt
-    : typeof draft.enhancePrompt === "boolean"
-      ? draft.enhancePrompt
-      : (() => { throw new Error("draft.enhancePrompt must be a boolean."); })();
-  const enhancedPromptDirty = draft.enhancedPromptDirty === undefined || draft.enhancedPromptDirty === null
-    ? false
-    : typeof draft.enhancedPromptDirty === "boolean"
-      ? draft.enhancedPromptDirty
-      : (() => { throw new Error("draft.enhancedPromptDirty must be a boolean."); })();
   const imageEditMode = draft.imageEditMode === undefined || draft.imageEditMode === null
     ? false
     : typeof draft.imageEditMode === "boolean"
       ? draft.imageEditMode
       : (() => { throw new Error("draft.imageEditMode must be a boolean."); })();
+  const originalPrompt = migrate(draft.prompt, "draft.prompt");
+  const promptState = draft.promptHistory === undefined || draft.promptHistory === null
+    ? allowLegacyEnhancement
+      ? migrateLegacyDraftPrompt({
+        ...draft,
+        enhancedPrompt: migrate(draft.enhancedPrompt, "draft.enhancedPrompt"),
+      }, originalPrompt, legacyEnhanceDefault)
+      : (() => { throw new Error("draft.promptHistory is required."); })()
+    : {
+      prompt: originalPrompt,
+      promptHistory: normalizePromptHistory(draft.promptHistory, "draft.promptHistory", mapLegacyPlanner),
+    };
+  const {
+    enhancePrompt: _enhancePrompt,
+    enhancedPrompt: _enhancedPrompt,
+    enhancedPromptDirty: _enhancedPromptDirty,
+    enhancedVisualCount: _enhancedVisualCount,
+    enhancementArtifact: _enhancementArtifact,
+    promptHistory: _promptHistory,
+    ...currentDraft
+  } = draft;
   return {
-    ...emptyDraft(defaultEnhancePrompt),
-    ...draft,
-    prompt: migrate(draft.prompt, "draft.prompt"),
+    ...emptyDraft(),
+    ...currentDraft,
+    prompt: promptState.prompt,
+    promptHistory: promptState.promptHistory,
     references,
     options,
     providerJson: draft.providerJson === undefined || draft.providerJson === null ? "" : asString(draft.providerJson, "draft.providerJson"),
-    enhancePrompt,
-    enhancedPrompt: migrate(draft.enhancedPrompt, "draft.enhancedPrompt"),
-    enhancedPromptDirty,
-    enhancedVisualCount: count > 0 ? Math.floor(count) : 0,
     imageEditMode,
     imageEditTarget: migrate(draft.imageEditTarget, "draft.imageEditTarget"),
     maskInstructions: migrate(draft.maskInstructions, "draft.maskInstructions"),
@@ -1173,30 +1367,49 @@ function normalizeAsset(value: unknown, index: number): SessionAsset {
   } as SessionAsset;
 }
 
-function normalizeSnapshot(value: unknown, defaultMode: GenerationMode, defaultEnhancePrompt: boolean, migrateLegacyMentions: boolean): GenerationAttemptSnapshot | undefined {
+function normalizeSnapshot(
+  value: unknown,
+  defaultMode: GenerationMode,
+  legacyEnhanceDefault: boolean,
+  migrateLegacyMentions: boolean,
+  allowLegacyEnhancement = true,
+  mapLegacyPlanner = false,
+): GenerationAttemptSnapshot | undefined {
   if (value === undefined || value === null) return undefined;
   const snapshot = asRecord(value, "attempt.snapshot");
   const mode = snapshot.mode === "video" ? "video" : snapshot.mode === "image" ? "image" : defaultMode;
   const normalizedDraft = normalizeDraft({
     prompt: snapshot.prompt,
+    promptHistory: snapshot.promptHistory,
     references: snapshot.assetBindings,
     options: snapshot.options,
     providerJson: snapshot.providerJson,
     enhancePrompt: snapshot.enhancePrompt,
     enhancedPrompt: snapshot.enhancedPrompt,
+    enhancedPromptDirty: snapshot.enhancedPromptDirty,
+    enhancedVisualCount: snapshot.enhancedVisualCount,
+    enhancementArtifact: snapshot.enhancementArtifact,
     imageEditMode: snapshot.imageEditMode,
     imageEditTarget: snapshot.imageEditTarget,
     maskInstructions: snapshot.maskInstructions,
     maskStrokes: snapshot.maskStrokes,
     directorPlan: snapshot.directorPlan,
-  }, defaultEnhancePrompt, migrateLegacyMentions);
+  }, legacyEnhanceDefault, migrateLegacyMentions, allowLegacyEnhancement, mapLegacyPlanner);
+  const {
+    enhancePrompt: _enhancePrompt,
+    enhancedPrompt: _enhancedPrompt,
+    enhancedPromptDirty: _enhancedPromptDirty,
+    enhancedVisualCount: _enhancedVisualCount,
+    enhancementArtifact: _enhancementArtifact,
+    promptHistory: _promptHistory,
+    ...currentSnapshot
+  } = snapshot;
   return {
-    ...snapshot,
+    ...currentSnapshot,
     mode,
     modelId: asString(snapshot.modelId, "attempt.snapshot.modelId", ""),
     prompt: normalizedDraft.prompt,
-    enhancePrompt: normalizedDraft.enhancePrompt,
-    enhancedPrompt: normalizedDraft.enhancedPrompt,
+    promptHistory: normalizedDraft.promptHistory,
     options: normalizedDraft.options,
     providerJson: normalizedDraft.providerJson,
     assetBindings: normalizedDraft.references,
@@ -1238,7 +1451,14 @@ function normalizeAttemptRecovery(value: unknown, label: string): GenerationAtte
   };
 }
 
-function normalizeAttempt(value: unknown, mode: GenerationMode, defaultEnhancePrompt: boolean, migrateLegacyMentions: boolean): GenerationAttempt {
+function normalizeAttempt(
+  value: unknown,
+  mode: GenerationMode,
+  legacyEnhanceDefault: boolean,
+  migrateLegacyMentions: boolean,
+  allowLegacyEnhancement = true,
+  mapLegacyPlanner = false,
+): GenerationAttempt {
   const attempt = asRecord(value, "attempt");
   // These paid-result recovery fields were added while v5 workspaces were
   // still in the wild. Validate them without rebuilding the object so their
@@ -1290,7 +1510,14 @@ function normalizeAttempt(value: unknown, mode: GenerationMode, defaultEnhancePr
         ? attempt.workflow
         : (() => { throw new Error("attempt.workflow is unknown."); })(),
     recovery: normalizeAttemptRecovery(attempt.recovery, "attempt.recovery"),
-    snapshot: normalizeSnapshot(attempt.snapshot, mode, defaultEnhancePrompt, migrateLegacyMentions),
+    snapshot: normalizeSnapshot(
+      attempt.snapshot,
+      mode,
+      legacyEnhanceDefault,
+      migrateLegacyMentions,
+      allowLegacyEnhancement,
+      mapLegacyPlanner,
+    ),
   };
   if (status === "uncertain" && (attempt.status === "queued" || attempt.status === "awaiting_host" || attempt.status === "pending")) {
     normalized.errorCode = normalized.errorCode ?? "submission_uncertain";
@@ -1307,12 +1534,20 @@ function normalizeEnhancementAttempt(value: unknown): PromptEnhancementAttempt {
     throw new Error("enhancement attempt.status is unknown or missing.");
   }
   const status = attempt.status;
+  const editRevision = attempt.editRevision === undefined || attempt.editRevision === null
+    ? undefined
+    : asFiniteNumber(attempt.editRevision, "enhancement attempt.editRevision");
+  if (editRevision !== undefined && (!Number.isInteger(editRevision) || editRevision < 0)) {
+    throw new Error("enhancement attempt.editRevision must be a non-negative integer.");
+  }
   return {
     ...attempt,
     id: asString(attempt.id, "enhancement attempt.id"),
     requestKey: asString(attempt.requestKey, "enhancement attempt.requestKey", ""),
     status,
     threadRevision: typeof attempt.threadRevision === "number" && Number.isFinite(attempt.threadRevision) ? attempt.threadRevision : 0,
+    editRevision,
+    contextSignature: optionalString(attempt.contextSignature, "enhancement attempt.contextSignature"),
     originalPrompt: asString(attempt.originalPrompt, "enhancement attempt.originalPrompt", ""),
     enhancedPrompt: typeof attempt.enhancedPrompt === "string" ? attempt.enhancedPrompt : undefined,
     createdAt,
@@ -1330,9 +1565,164 @@ function hasDraftContent(draft: GenerationDraftState | undefined): boolean {
   return Boolean(draft && (draft.prompt.trim() || draft.references.length || Object.keys(draft.options).length || draft.providerJson.trim()));
 }
 
-function normalizeThread(value: unknown, mode: GenerationMode, defaultEnhancePrompt: boolean, migrateLegacyMentions: boolean, assetKinds: Map<string, AssetKind>): GenerationThread {
+function linkMigratedPromptHistory(
+  history: PromptHistory,
+  attempts: PromptEnhancementAttempt[] | undefined,
+  legacyContainerValue: unknown,
+  threadRevision: number,
+): PromptHistory {
+  if (!attempts?.length) return history;
+  const legacyContainer = isRecord(legacyContainerValue) ? legacyContainerValue : undefined;
+  const legacyArtifact = legacyContainer && isRecord(legacyContainer.enhancementArtifact)
+    ? legacyContainer.enhancementArtifact
+    : undefined;
+  const originalPrompt = typeof legacyContainer?.prompt === "string"
+    ? legacyContainer.prompt
+    : undefined;
+  const artifactPrompt = typeof legacyArtifact?.prompt === "string"
+    ? legacyArtifact.prompt
+    : undefined;
+  const artifactSignature = typeof legacyArtifact?.signature === "string"
+    ? legacyArtifact.signature
+    : undefined;
+  const artifactCreatedAt = typeof legacyArtifact?.createdAt === "string"
+    ? legacyArtifact.createdAt
+    : undefined;
+  const artifactCost = typeof legacyArtifact?.actualCostUsd === "number"
+    && Number.isFinite(legacyArtifact.actualCostUsd)
+    ? legacyArtifact.actualCostUsd
+    : undefined;
+  const dirty = legacyContainer?.enhancedPromptDirty === true;
+  const completed = attempts.map((attempt, index) => ({ attempt, index }))
+    .filter(({ attempt }) => attempt.status === "completed");
+
+  const pickLatestRelated = (
+    candidates: Array<{ attempt: PromptEnhancementAttempt; index: number }>,
+  ): PromptEnhancementAttempt | undefined => {
+    if (!candidates.length) return undefined;
+    let narrowed = candidates;
+    if (artifactCost !== undefined) {
+      const sameCost = narrowed.filter(({ attempt }) => attempt.actualCostUsd === artifactCost);
+      if (sameCost.length) narrowed = sameCost;
+    }
+    const artifactTime = artifactCreatedAt === undefined ? Number.NaN : Date.parse(artifactCreatedAt);
+    if (Number.isFinite(artifactTime)) {
+      const surrounding = narrowed.filter(({ attempt }) => {
+        const startedAt = Date.parse(attempt.createdAt);
+        const finishedAt = Date.parse(attempt.updatedAt);
+        return Number.isFinite(startedAt)
+          && Number.isFinite(finishedAt)
+          && startedAt <= artifactTime
+          && artifactTime <= finishedAt;
+      });
+      if (surrounding.length) narrowed = surrounding;
+      else {
+        const dated = narrowed.map((candidate) => ({
+          ...candidate,
+          distance: Math.abs(Date.parse(candidate.attempt.updatedAt) - artifactTime),
+        })).filter((candidate) => Number.isFinite(candidate.distance));
+        if (dated.length) {
+          const nearest = Math.min(...dated.map(({ distance }) => distance));
+          narrowed = dated.filter(({ distance }) => distance === nearest);
+        }
+      }
+    }
+    const revisionOrdered = narrowed.filter(({ attempt }) => attempt.threadRevision <= threadRevision);
+    if (revisionOrdered.length) {
+      const closestRevision = Math.max(...revisionOrdered.map(({ attempt }) => attempt.threadRevision));
+      narrowed = revisionOrdered.filter(({ attempt }) => attempt.threadRevision === closestRevision);
+    }
+    const dated = narrowed.map((candidate) => ({
+      ...candidate,
+      updatedAt: Date.parse(candidate.attempt.updatedAt),
+    })).filter((candidate) => Number.isFinite(candidate.updatedAt));
+    if (dated.length) {
+      const target = Number.isFinite(artifactTime)
+        ? Math.min(...dated.map(({ updatedAt }) => Math.abs(updatedAt - artifactTime)))
+        : Math.max(...dated.map(({ updatedAt }) => updatedAt));
+      narrowed = dated.filter(({ updatedAt }) => Number.isFinite(artifactTime)
+        ? Math.abs(updatedAt - artifactTime) === target
+        : updatedAt === target);
+    }
+    return narrowed.at(-1)?.attempt;
+  };
+
+  const matchingAttempt = (entry: PromptCheckpoint): PromptEnhancementAttempt | undefined => {
+    const exactVisible = completed.filter(({ attempt }) => attempt.enhancedPrompt === entry.text);
+    const sameOriginal = completed.filter(({ attempt }) =>
+      originalPrompt !== undefined && attempt.originalPrompt === originalPrompt);
+    const sameArtifactPrompt = completed.filter(({ attempt }) =>
+      artifactPrompt !== undefined && attempt.enhancedPrompt === artifactPrompt);
+    const sameArtifactRequest = completed.filter(({ attempt }) =>
+      artifactSignature !== undefined && attempt.requestKey === artifactSignature);
+    const intersection = (
+      first: Array<{ attempt: PromptEnhancementAttempt; index: number }>,
+      ...rest: Array<Array<{ attempt: PromptEnhancementAttempt; index: number }>>
+    ) => first.filter((candidate) => rest.every((group) => group.some(({ index }) => index === candidate.index)));
+    // A dirty legacy result owns its edited visible text, while the immutable
+    // attempt output remains in artifact.prompt. Prefer that provenance over a
+    // coincidental exact-text match and never rewrite either stored prompt.
+    const tiers = dirty
+      ? [
+        intersection(sameArtifactRequest, sameArtifactPrompt, sameOriginal),
+        intersection(sameArtifactRequest, sameArtifactPrompt),
+        intersection(sameArtifactPrompt, sameOriginal),
+        intersection(sameArtifactRequest, sameOriginal),
+        intersection(exactVisible, sameOriginal),
+        exactVisible,
+      ]
+      : [
+        intersection(exactVisible, sameArtifactRequest, sameOriginal),
+        intersection(exactVisible, sameOriginal),
+        intersection(exactVisible, sameArtifactRequest),
+        exactVisible,
+        intersection(sameArtifactRequest, sameArtifactPrompt, sameOriginal),
+        intersection(sameArtifactPrompt, sameOriginal),
+      ];
+    const strongest = tiers.find((tier) => tier.length > 0);
+    if (strongest) return pickLatestRelated(strongest);
+    return dirty && sameOriginal.length === 1
+      ? sameOriginal[0].attempt
+      : undefined;
+  };
+
+  let changed = false;
+  const entries = history.entries.map((entry) => {
+    if (entry.kind !== "enhancement_result"
+      || !entry.id.startsWith("phase2-enhancement-result-")
+      || entry.enhancementAttemptId) return entry;
+    const attempt = matchingAttempt(entry);
+    if (!attempt) return entry;
+    changed = true;
+    return {
+      ...entry,
+      enhancementAttemptId: attempt.id,
+      createdAt: entry.createdAt === PROMPT_HISTORY_MIGRATION_TIMESTAMP
+        ? attempt.updatedAt
+        : entry.createdAt,
+      actualCostUsd: entry.actualCostUsd ?? attempt.actualCostUsd,
+    };
+  });
+  return changed ? { ...history, entries } : history;
+}
+
+function normalizeThread(
+  value: unknown,
+  mode: GenerationMode,
+  legacyEnhanceDefault: boolean,
+  migrateLegacyMentions: boolean,
+  assetKinds: Map<string, AssetKind>,
+  allowLegacyEnhancement = true,
+  mapLegacyPlanner = false,
+): GenerationThread {
   const thread = asRecord(value, "thread");
-  const draft = normalizeDraft(thread.draft, defaultEnhancePrompt, migrateLegacyMentions);
+  const draft = normalizeDraft(
+    thread.draft,
+    legacyEnhanceDefault,
+    migrateLegacyMentions,
+    allowLegacyEnhancement,
+    mapLegacyPlanner,
+  );
   const references = draft.references.map((reference) => {
     const isEditTarget = mode === "image" && draft.imageEditMode && `@${reference.slot}` === draft.imageEditTarget;
     const normalized: DraftReference = {
@@ -1344,7 +1734,14 @@ function normalizeThread(value: unknown, mode: GenerationMode, defaultEnhancePro
   const attempts = thread.attempts === undefined || thread.attempts === null
     ? []
     : Array.isArray(thread.attempts)
-      ? thread.attempts.map((attempt) => normalizeAttempt(attempt, mode, defaultEnhancePrompt, migrateLegacyMentions))
+      ? thread.attempts.map((attempt) => normalizeAttempt(
+        attempt,
+        mode,
+        legacyEnhanceDefault,
+        migrateLegacyMentions,
+        allowLegacyEnhancement,
+        mapLegacyPlanner,
+      ))
       : (() => { throw new Error("thread.attempts must be an array."); })();
   const normalizedThread: GenerationThread = {
     ...thread,
@@ -1362,6 +1759,36 @@ function normalizeThread(value: unknown, mode: GenerationMode, defaultEnhancePro
   if (thread.enhancementAttempts !== undefined && thread.enhancementAttempts !== null) {
     if (!Array.isArray(thread.enhancementAttempts)) throw new Error("thread.enhancementAttempts must be an array.");
     normalizedThread.enhancementAttempts = thread.enhancementAttempts.map(normalizeEnhancementAttempt);
+    normalizedThread.draft = {
+      ...normalizedThread.draft,
+      promptHistory: linkMigratedPromptHistory(
+        normalizedThread.draft.promptHistory,
+        normalizedThread.enhancementAttempts,
+        thread.draft,
+        normalizedThread.revision,
+      ),
+    };
+    normalizedThread.attempts = normalizedThread.attempts.map((attempt, index) => {
+      if (!attempt.snapshot) return attempt;
+      const legacyAttempt = Array.isArray(thread.attempts) && isRecord(thread.attempts[index])
+        ? thread.attempts[index]
+        : undefined;
+      const legacySnapshot = legacyAttempt && isRecord(legacyAttempt.snapshot)
+        ? legacyAttempt.snapshot
+        : undefined;
+      return {
+        ...attempt,
+        snapshot: {
+          ...attempt.snapshot,
+          promptHistory: linkMigratedPromptHistory(
+            attempt.snapshot.promptHistory,
+            normalizedThread.enhancementAttempts,
+            legacySnapshot,
+            attempt.draftRevision,
+          ),
+        },
+      };
+    });
   }
   return normalizedThread;
 }
@@ -1614,60 +2041,105 @@ function migrateV5ToV6(value: JsonRecord): JsonRecord {
   return { ...value, schemaVersion: 6, defaultEnhancePrompt, sessions };
 }
 
-/**
- * Phase 2 is intentionally not implemented in this release. Keep v6 bytes
- * intact while reserving the v7 migration boundary required by the update
- * chain, then let the v7 to v8 step add only Director-owned fields.
- */
-function migrateV6ToV7(value: JsonRecord): JsonRecord {
-  return { ...value, schemaVersion: 7 };
-}
-
-function migrateV7ToV8(value: JsonRecord): JsonRecord {
-  const sessions = (value.sessions as unknown[]).map((sessionValue) => {
+function migratePhase2Sessions(value: JsonRecord, legacyEnhanceDefault: boolean): StudioSession[] {
+  return (value.sessions as unknown[]).map((sessionValue) => {
     const session = asRecord(sessionValue, "session");
+    const assets = Array.isArray(session.assets) ? session.assets.map(normalizeAsset) : [];
+    const assetKinds = new Map(assets.map((asset) => [asset.id, asset.kind]));
     const rawThreads = asRecord(session.threads, "session.threads");
-    const mapThreads = (threads: unknown, label: string) => {
+    const mapThreads = (threads: unknown, mode: GenerationMode, label: string) => {
       if (!Array.isArray(threads)) throw new Error(`${label} must be an array.`);
-      return threads.map((threadValue, index) => {
-        const thread = asRecord(threadValue, `${label}[${index}]`);
-        const draft = asRecord(thread.draft, `${label}[${index}].draft`);
-        return {
-          ...thread,
-          draft: {
-            ...draft,
-            directorPlan: draft.directorPlan,
-          },
-        };
-      });
+      return threads.map((thread) => normalizeThread(
+        thread,
+        mode,
+        legacyEnhanceDefault,
+        false,
+        assetKinds,
+        true,
+        true,
+      ));
     };
     return {
       ...session,
       threads: {
         ...rawThreads,
-        image: mapThreads(rawThreads.image, "session.threads.image"),
-        video: mapThreads(rawThreads.video, "session.threads.video"),
+        image: mapThreads(rawThreads.image, "image", "session.threads.image"),
+        video: mapThreads(rawThreads.video, "video", "session.threads.video"),
+      },
+    } as StudioSession;
+  });
+}
+
+function migrateV6ToV7(value: JsonRecord): JsonRecord {
+  const legacyEnhanceDefault = typeof value.defaultEnhancePrompt === "boolean"
+    ? value.defaultEnhancePrompt
+    : true;
+  const { defaultEnhancePrompt: _defaultEnhancePrompt, ...current } = value;
+  return {
+    ...current,
+    schemaVersion: 7,
+    promptModel: migrateLegacyPromptModel(value.promptModel),
+    sessions: migratePhase2Sessions(value, legacyEnhanceDefault),
+  };
+}
+
+function migrateV7ToV8(value: JsonRecord): JsonRecord {
+  const sessions = migratePhase2Sessions(value, true).map((session) => {
+    const rawThreads = session.threads;
+    const mapThreads = (threads: GenerationThread[]) => threads.map((thread) => ({
+      ...thread,
+      draft: {
+        ...thread.draft,
+        directorPlan: thread.draft.directorPlan,
+      },
+    }));
+    return {
+      ...session,
+      threads: {
+        ...rawThreads,
+        image: mapThreads(rawThreads.image),
+        video: mapThreads(rawThreads.video),
       },
     };
   });
+  const { defaultEnhancePrompt: _defaultEnhancePrompt, ...current } = value;
   return {
-    ...value,
+    ...current,
     schemaVersion: STUDIO_SCHEMA_VERSION,
+    promptModel: migrateLegacyPromptModel(value.promptModel),
     sessions,
     directorPresets: value.directorPresets ?? [],
   };
 }
 
-function normalizeCurrentState(value: JsonRecord): StudioState {
-  const defaultEnhancePrompt = value.defaultEnhancePrompt as boolean;
+function normalizeCurrentState(value: JsonRecord, allowLegacyEnhancement = false): StudioState {
+  const legacyEnhanceDefault = typeof value.defaultEnhancePrompt === "boolean"
+    ? value.defaultEnhancePrompt
+    : true;
   const sessions = (value.sessions as unknown[]).map((sessionValue) => {
     const session = asRecord(sessionValue, "session");
     const assets = Array.isArray(session.assets) ? session.assets.map(normalizeAsset) : [];
     const assetKinds = new Map(assets.map((asset) => [asset.id, asset.kind]));
     const rawThreads = asRecord(session.threads, "session.threads");
     const threads = {
-      image: (rawThreads.image as unknown[]).map((thread) => normalizeThread(thread, "image", defaultEnhancePrompt, false, assetKinds)),
-      video: (rawThreads.video as unknown[]).map((thread) => normalizeThread(thread, "video", defaultEnhancePrompt, false, assetKinds)),
+      image: (rawThreads.image as unknown[]).map((thread) => normalizeThread(
+        thread,
+        "image",
+        legacyEnhanceDefault,
+        false,
+        assetKinds,
+        allowLegacyEnhancement,
+        allowLegacyEnhancement,
+      )),
+      video: (rawThreads.video as unknown[]).map((thread) => normalizeThread(
+        thread,
+        "video",
+        legacyEnhanceDefault,
+        false,
+        assetKinds,
+        allowLegacyEnhancement,
+        allowLegacyEnhancement,
+      )),
     };
     const activeThreadIds = asRecord(session.activeThreadIds, "session.activeThreadIds");
     return {
@@ -1687,12 +2159,16 @@ function normalizeCurrentState(value: JsonRecord): StudioState {
       costLedger: sessionCostLedger(session, threads),
     } as StudioSession;
   });
+  const { defaultEnhancePrompt: _defaultEnhancePrompt, ...current } = value;
   return {
-    ...value,
+    ...current,
     schemaVersion: STUDIO_SCHEMA_VERSION,
     activeSessionId: typeof value.activeSessionId === "string" && sessions.some((session) => session.id === value.activeSessionId) ? value.activeSessionId : sessions[0].id,
-    promptModel: PROMPT_MODELS.some((model) => model.id === value.promptModel) ? value.promptModel : "openai/gpt-5.6-luna",
-    defaultEnhancePrompt,
+    promptModel: allowLegacyEnhancement
+      ? migrateLegacyPromptModel(value.promptModel)
+      : isPromptModel(value.promptModel)
+        ? value.promptModel
+        : (() => { throw new Error("promptModel is unknown."); })(),
     generationPresets: normalizeGenerationPresets(value.generationPresets),
     directorPresets: normalizeDirectorPresets(value.directorPresets),
     sessions,
@@ -1857,7 +2333,14 @@ function assertDirectorPersistenceState(state: StudioState): void {
   for (const session of state.sessions) {
     for (const thread of [...session.threads.image, ...session.threads.video]) {
       normalizeDirectorPlan(thread.draft.directorPlan, `thread ${thread.id}.draft.directorPlan`);
+      normalizePromptHistory(thread.draft.promptHistory, `thread ${thread.id}.draft.promptHistory`);
       for (const attempt of thread.attempts) {
+        if (attempt.snapshot) {
+          normalizePromptHistory(
+            attempt.snapshot.promptHistory,
+            `thread ${thread.id}.attempt ${attempt.id}.snapshot.promptHistory`,
+          );
+        }
         normalizeDirectorPlan(
           attempt.snapshot?.directorPlan,
           `thread ${thread.id}.attempt ${attempt.id}.snapshot.directorPlan`,
@@ -1870,23 +2353,49 @@ function assertDirectorPersistenceState(state: StudioState): void {
 function serializedState(state: StudioState, boundHistory: boolean): string {
   assertDirectorPersistenceState(state);
   const { recovery: _recovery, ...persistedState } = state;
-  const bounded = {
+  const serializedPayload = boundHistory ? {
     ...persistedState,
     sessions: persistedState.sessions.map((session) => ({
       ...session,
-      threads: Object.fromEntries(Object.entries(session.threads).map(([mode, threads]) => [mode, threads.map((thread) => ({
-        ...thread,
-        attempts: boundHistory
-          ? thread.attempts.filter((attempt) => !TERMINAL_ATTEMPT_STATUSES.has(attempt.status)).concat(thread.attempts.filter((attempt) => TERMINAL_ATTEMPT_STATUSES.has(attempt.status)).slice(-100))
-          : thread.attempts,
-        enhancementAttempts: boundHistory && thread.enhancementAttempts
-          ? thread.enhancementAttempts.filter((attempt) => attempt.status === "in_progress").concat(thread.enhancementAttempts.filter((attempt) => attempt.status !== "in_progress").slice(-100))
-          : thread.enhancementAttempts,
-      }))])) as StudioSession["threads"],
-      costLedger: boundHistory ? session.costLedger.slice(-500) : session.costLedger,
+      threads: Object.fromEntries(Object.entries(session.threads).map(([mode, threads]) => [mode, threads.map((thread) => {
+        const protectedAttemptIds = new Set([
+          ...thread.attempts
+            .filter((attempt) => attempt.status === "enhancing" || attempt.status === "uncertain")
+            .map((attempt) => attempt.id),
+          ...(thread.enhancementAttempts ?? [])
+            .filter((attempt) => attempt.status === "in_progress" || attempt.status === "uncertain")
+            .map((attempt) => attempt.id),
+        ]);
+        const attempts = thread.attempts
+          .filter((attempt) => !TERMINAL_ATTEMPT_STATUSES.has(attempt.status) || attempt.status === "uncertain")
+          .concat(thread.attempts.filter((attempt) =>
+            TERMINAL_ATTEMPT_STATUSES.has(attempt.status) && attempt.status !== "uncertain").slice(-100))
+          .map((attempt) => !attempt.snapshot ? attempt : {
+            ...attempt,
+            snapshot: {
+              ...attempt.snapshot,
+              promptHistory: trimPromptHistory(attempt.snapshot.promptHistory, protectedAttemptIds),
+            },
+          });
+        return {
+          ...thread,
+          draft: {
+            ...thread.draft,
+            promptHistory: trimPromptHistory(thread.draft.promptHistory, protectedAttemptIds),
+          },
+          attempts,
+          enhancementAttempts: thread.enhancementAttempts
+            ? thread.enhancementAttempts
+              .filter((attempt) => attempt.status === "in_progress" || attempt.status === "uncertain")
+              .concat(thread.enhancementAttempts.filter((attempt) =>
+                attempt.status !== "in_progress" && attempt.status !== "uncertain").slice(-100))
+            : thread.enhancementAttempts,
+        };
+      })])) as StudioSession["threads"],
+      costLedger: session.costLedger.slice(-500),
     })),
-  };
-  const serialized = JSON.stringify(bounded);
+  } : persistedState;
+  const serialized = JSON.stringify(serializedPayload);
   if (/(?:"(?:externalUrl|localPath)"\s*:\s*"data:(?:image|video|audio)\/)/i.test(serialized) || /;base64,/i.test(serialized)) throw new Error("Media data URLs cannot be written to studio metadata.");
   return serialized;
 }
@@ -2004,8 +2513,10 @@ function recoveryStateFallback(
     try {
       const parsed = JSON.parse(knownGoodRaw) as unknown;
       if (validEnvelope(parsed)) {
+        const legacyCurrent = parsed.schemaVersion === STUDIO_SCHEMA_VERSION
+          && isLegacyPhase2CurrentState(parsed);
         const migrated = parsed.schemaVersion === STUDIO_SCHEMA_VERSION
-          ? { state: normalizeCurrentState(parsed), report: undefined }
+          ? { state: normalizeCurrentState(parsed, legacyCurrent), report: undefined }
           : migrateState(parsed);
         if (validCurrentState(migrated.state)) {
           const reconciled = reconcileStartupAttempts(migrated.state, now);
@@ -2073,16 +2584,27 @@ export function loadStudioStateWithRecovery(options: StudioLoadOptions = {}): St
     return recoveryStateFallback(storage, source, "unsupported", new Error("Studio state has an unsupported or incompatible shape."), options.now?.() ?? new Date());
   }
   const sourceVersion = parsed.schemaVersion;
+  const legacyCurrent = sourceVersion === STUDIO_SCHEMA_VERSION
+    && isLegacyPhase2CurrentState(parsed);
   // A current envelope with malformed required fields is corrupt, not an empty
   // workspace. Give the last-known-good snapshot a chance before reporting
   // recovery-required to the caller.
-  if (sourceVersion === STUDIO_SCHEMA_VERSION && !validCurrentState(parsed)) {
+  if (sourceVersion === STUDIO_SCHEMA_VERSION && !legacyCurrent && !validCurrentState(parsed)) {
     return recoveryStateFallback(storage, source, "corrupt", new Error("Current studio state failed schema validation."), options.now?.() ?? new Date());
+  }
+  if (sourceVersion === STUDIO_SCHEMA_VERSION && legacyCurrent) {
+    try {
+      if (!validCurrentState(normalizeCurrentState(parsed, true))) {
+        throw new Error("Legacy-shaped current studio state failed Phase 2 normalization.");
+      }
+    } catch (error) {
+      return recoveryStateFallback(storage, source, "corrupt", error, options.now?.() ?? new Date());
+    }
   }
   try {
     let migrated: { state: StudioState; report?: StudioMigrationReport };
     if (sourceVersion === STUDIO_SCHEMA_VERSION) {
-      migrated = { state: normalizeCurrentState(parsed) };
+      migrated = { state: normalizeCurrentState(parsed, legacyCurrent) };
     } else if (isLegacySchemaVersion(sourceVersion)) {
       migrated = migrateState(parsed);
     } else {
@@ -2091,7 +2613,10 @@ export function loadStudioStateWithRecovery(options: StudioLoadOptions = {}): St
     const reconciled = reconcileStartupAttempts(migrated.state, options.now?.() ?? new Date());
     const state = reconciled.state;
     if (!validCurrentState(state)) throw new Error("Studio state failed validation after startup reconciliation.");
-    const needsWrite = sourceVersion !== STUDIO_SCHEMA_VERSION || source.key !== STORAGE_KEY || reconciled.changed;
+    const needsWrite = sourceVersion !== STUDIO_SCHEMA_VERSION
+      || source.key !== STORAGE_KEY
+      || legacyCurrent
+      || reconciled.changed;
     let durable: { backupKey?: string; lastKnownGoodKey?: string } = {};
     if (needsWrite) {
       let previousCurrentRaw: string | null = null;
@@ -2697,6 +3222,27 @@ export function reconcileManagedAssetIndex(
     relinkedCount,
     recoveredCount: recovered.length,
     duplicateFiles,
+  };
+}
+
+/**
+ * Observe managed-file presence after native post-update byte verification.
+ * Update boot must not mutate metadata, recover files, or schedule cleanup.
+ */
+export function reconcileVerifiedUpdateAssetIndex(
+  state: StudioState,
+  scannedAssets: readonly ManagedAssetPathObservation[],
+): ManagedAssetReconciliation {
+  const scannedPaths = new Set(scannedAssets.map((asset) => asset.localPath));
+  const missingCount = state.sessions.reduce((count, session) =>
+    count + session.assets.filter((asset) =>
+      asset.localPath && !scannedPaths.has(asset.localPath)).length, 0);
+  return {
+    state,
+    missingCount,
+    relinkedCount: 0,
+    recoveredCount: 0,
+    duplicateFiles: [],
   };
 }
 

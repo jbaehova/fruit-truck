@@ -6,6 +6,7 @@ import { useI18n, type MessageKey } from "@/i18n";
 import { formatUsd } from "@/openrouter";
 import { localizedAttemptAction, localizedAttemptMessage } from "@/attemptPresentation";
 import type { GenerationAttempt } from "@/studio";
+import { currentPromptCheckpoint } from "@/promptHistory";
 
 const STATUS_KEYS: Record<string, MessageKey> = {
   enhancing: "statusInProgress",
@@ -59,7 +60,9 @@ export function AttemptHistoryPopover({
               {attempts.length ? attempts.toReversed().map((attempt) => {
                 const missingInputIds = attempt.inputAssetIds.filter((id) => !availableAssetIds.has(id));
                 const missingResultIds = attempt.assetIds.filter((id) => !availableAssetIds.has(id));
-                const plannerCostUsd = attempt.snapshot?.enhancementArtifact?.actualCostUsd;
+                const plannerCostUsd = attempt.snapshot
+                  ? currentPromptCheckpoint(attempt.snapshot.prompt, attempt.snapshot.promptHistory)?.enhancementArtifact?.actualCostUsd
+                  : undefined;
                 const canRecheck = Boolean(attempt.jobId && ["in_progress", "uncertain", "failed"].includes(attempt.status) && !missingResultIds.length);
                 const canRecoverResults = Boolean(missingResultIds.length && (attempt.jobId || attempt.resultSources?.length));
                 const displayedError = localizedAttemptMessage(attempt, t);

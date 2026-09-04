@@ -81,8 +81,18 @@ function snapshotFixture(plan: DirectorPlan): GenerationAttemptSnapshot {
     mode: "video",
     modelId: "video/example",
     prompt: "A fruit truck follows the road",
-    enhancePrompt: false,
-    enhancedPrompt: "",
+    promptHistory: {
+      schemaVersion: 1,
+      entries: [{
+        id: "snapshot-prompt",
+        text: "A fruit truck follows the road",
+        kind: "manual",
+        createdAt: "2026-09-04T00:00:00.000Z",
+      }],
+      cursor: 0,
+      enhancementLocked: false,
+      editRevision: 0,
+    },
     options: { duration: 5 },
     providerJson: "{}",
     assetBindings: [],
@@ -176,6 +186,14 @@ test("v7 to v8 preserves complete Director drafts and attempt snapshots", () => 
   const snapshotPlan = migratedThread.attempts[0].snapshot?.directorPlan as typeof plan;
 
   assert.deepEqual(result.migration?.steps, ["v7→v8"]);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(migratedThread.draft.promptHistory)),
+    thread.draft.promptHistory,
+  );
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(migratedThread.attempts[0].snapshot?.promptHistory)),
+    thread.attempts[0].snapshot?.promptHistory,
+  );
   assert.deepEqual(migratedPlan, plan);
   assert.deepEqual(snapshotPlan, plan);
   assert.deepEqual(migratedPlan.futureControl, plan.futureControl);
@@ -236,8 +254,7 @@ test("Director presets omit assets, rebind on apply, persist, and delete", () =>
   const state: StudioState = {
     schemaVersion: 8,
     activeSessionId: session.id,
-    promptModel: "openai/gpt-5.6-luna",
-    defaultEnhancePrompt: true,
+    promptModel: "google/gemini-3.8-flash",
     sessions: [session],
     directorPresets: [],
   };
@@ -291,8 +308,7 @@ test("oversized Director plans cannot replace durable Studio metadata", () => {
   const state: StudioState = {
     schemaVersion: 8,
     activeSessionId: session.id,
-    promptModel: "openai/gpt-5.6-luna",
-    defaultEnhancePrompt: true,
+    promptModel: "google/gemini-3.8-flash",
     sessions: [session],
     directorPresets: [],
   };

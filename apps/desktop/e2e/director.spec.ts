@@ -119,7 +119,8 @@ const PROMPT_DIRECTOR_MODEL = {
 async function mockDirectorApi(page: Page) {
   await page.route("https://openrouter.ai/api/v1/**", async (route) => {
     const request = route.request();
-    const path = new URL(request.url()).pathname;
+    const url = new URL(request.url());
+    const path = url.pathname;
     if (path === "/api/v1/key") {
       await route.fulfill({
         contentType: "application/json",
@@ -151,10 +152,28 @@ async function mockDirectorApi(page: Page) {
       });
       return;
     }
-    if (path === "/api/v1/videos/models" || path === "/api/v1/models") {
+    if (path === "/api/v1/videos/models") {
       await route.fulfill({
         contentType: "application/json",
         body: JSON.stringify({ data: [NATIVE_DIRECTOR_MODEL, PROMPT_DIRECTOR_MODEL] }),
+      });
+      return;
+    }
+    if (path === "/api/v1/models" && url.searchParams.has("output_modalities")) {
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({ data: [NATIVE_DIRECTOR_MODEL, PROMPT_DIRECTOR_MODEL] }),
+      });
+      return;
+    }
+    if (path === "/api/v1/models") {
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({ data: [
+          { id: "openai/gpt-5.6-sol", supported_parameters: ["reasoning", "structured_outputs"] },
+          { id: "anthropic/claude-opus-5", supported_parameters: ["reasoning", "structured_outputs"] },
+          { id: "google/gemini-3.8-flash", supported_parameters: ["reasoning", "structured_outputs"] },
+        ] }),
       });
       return;
     }
@@ -247,6 +266,7 @@ test.beforeEach(async ({ page }) => {
     localStorage.setItem("fruit-truck.dev-key", "sk-or-v1-director-e2e-key-1234567890");
     localStorage.setItem("fruit-truck.onboarding.complete.v1", "true");
     localStorage.setItem("fruit-truck.language", "en");
+    localStorage.setItem("fruit-truck.prompt-enhancement-notice.v1", "true");
     if (!sessionStorage.getItem("fruit-truck.director-e2e.initialized")) {
       localStorage.removeItem("fruit-truck.studio.v1");
       localStorage.removeItem("fruit-truck.studio.v1.last-known-good");
@@ -261,8 +281,10 @@ test.beforeEach(async ({ page }) => {
 test("Director builds a local shot, discloses compilation, and survives a model change", async ({ page }) => {
   test.setTimeout(60_000);
   let paidVideoRequests = 0;
+  let plannerCalls = 0;
   page.on("request", (request) => {
     if (request.method() === "POST" && new URL(request.url()).pathname === "/api/v1/videos") paidVideoRequests += 1;
+    if (request.method() === "POST" && new URL(request.url()).pathname === "/api/v1/chat/completions") plannerCalls += 1;
   });
 
   expect(await page.evaluate(() => [innerWidth, innerHeight])).toEqual([1920, 1080]);
@@ -273,8 +295,8 @@ test("Director builds a local shot, discloses compilation, and survives a model 
   await chooseInputRole(page, "director-first-frame.png", "First frame");
   await chooseInputRole(page, "director-last-frame.png", "Last frame");
   await page.getByRole("combobox", { name: /^Prompt/ }).fill("A fruit truck crosses the frame while the camera follows its path.");
-  await page.getByRole("switch", { name: /Prompt enhancement/ }).click();
-  await expect(page.getByRole("switch", { name: /Prompt enhancement/ })).toHaveAttribute("aria-checked", "false");
+  await expect(page.getByRole("toolbar", { name: "Prompt enhancement" })).toBeVisible();
+  await expect(page.getByRole("switch", { name: /Prompt enhancement/ })).toHaveCount(0);
 
   await page.getByRole("button", { name: "Open Director", exact: true }).click();
   const director = page.getByRole("region", { name: "Direct the shot" });
@@ -353,6 +375,12 @@ test("Director builds a local shot, discloses compilation, and survives a model 
   const interiorKeyframes = director.locator(".director-keyframe-row");
   await expect(interiorKeyframes).toHaveCount(2);
   await expect(director.getByText("4 of 4 keyframes")).toBeVisible();
+  const keyframeMarkers = director.locator(".director-keyframe-marker");
+  await expect(keyframeMarkers).toHaveCount(4);
+  await expect(keyframeMarkers.filter({ hasText: "F" })).toHaveAttribute("aria-label", "First frame: 0.0s");
+  await expect(keyframeMarkers.filter({ hasText: "M" })).toHaveAttribute("aria-label", "Middle frame: 1.8s");
+  await expect(keyframeMarkers.filter({ hasText: "T" })).toHaveAttribute("aria-label", "Timed frame: 3.5s");
+  await expect(keyframeMarkers.filter({ hasText: "L" })).toHaveAttribute("aria-label", "Last frame: 5.0s");
   const keyframesBeforeMove = await savedDirectorPlan(page) as { shots: Array<{ keyframeIds: string[] }> };
   await interiorKeyframes.first().getByRole("button", { name: "Move keyframe later" }).click();
   await expect.poll(async () => (await savedDirectorPlan(page) as { shots: Array<{ keyframeIds: string[] }> }).shots[0]!.keyframeIds)
@@ -471,6 +499,7 @@ test("Director builds a local shot, discloses compilation, and survives a model 
   await director.getByRole("button", { name: "Close Director" }).click();
   await page.getByRole("button", { name: "Prepare final request" }).click();
   await expect(page.getByRole("button", { name: "Generate Video" })).toBeEnabled();
+  expect(plannerCalls).toBe(0);
   await page.getByRole("button", { name: "Request", exact: true }).click();
   const finalDialog = page.getByRole("dialog", { name: "Request Preview" });
   await expect(finalDialog.locator(".request-readiness")).toContainText("Final");
@@ -499,6 +528,7 @@ test("Director builds a local shot, discloses compilation, and survives a model 
     expect.objectContaining({ frame_type: "last_frame" }),
   ]));
   expect(paidVideoRequests).toBe(1);
+  expect(plannerCalls).toBe(0);
 
   const attemptedDirectorPlan = await savedAttemptDirectorPlan(page);
   expect(attemptedDirectorPlan).toEqual(beforeModelChange);
@@ -517,6 +547,107 @@ test("Director builds a local shot, discloses compilation, and survives a model 
   expect(paidVideoRequests).toBe(1);
 });
 
+test("Director supports keyboard path editing and relinks a missing source without losing the plan", async ({ page }) => {
+  test.setTimeout(45_000);
+
+  expect(await page.evaluate(() => [innerWidth, innerHeight])).toEqual([1920, 1080]);
+  await page.getByRole("button", { name: "Video", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Runway Director Native" })).toBeVisible();
+  await importFramePair(page);
+  await chooseInputRole(page, "director-first-frame.png", "First frame");
+  await chooseInputRole(page, "director-last-frame.png", "Last frame");
+
+  await page.getByRole("button", { name: "Open Director", exact: true }).click();
+  const director = page.getByRole("region", { name: "Direct the shot" });
+  const canvas = director.getByRole("application", { name: "Director motion canvas" });
+
+  await director.getByRole("button", { name: "Mark subject", exact: true }).click();
+  await canvas.focus();
+  await canvas.press(" ");
+  await canvas.press("Shift+ArrowRight");
+  await canvas.press("Shift+ArrowRight");
+  await canvas.press("Shift+ArrowDown");
+  await canvas.press("Enter");
+  await expect(director.getByRole("button", { name: "Subject 1: Subject 1", exact: true })).toBeVisible();
+  await expect(director.getByRole("button", { name: "Object path", exact: true })).toHaveAttribute("aria-pressed", "true");
+
+  await canvas.focus();
+  await canvas.press(" ");
+  await canvas.press("Shift+ArrowRight");
+  await canvas.press("Shift+ArrowRight");
+  await canvas.press("Shift+ArrowUp");
+  await canvas.press("Enter");
+  const objectPath = director.getByRole("button", { name: /^Object path 1:/ });
+  await expect(objectPath).toBeVisible();
+  await expect.poll(async () => (await savedDirectorPlan(page) as { motions?: unknown[] })?.motions?.length).toBe(1);
+
+  const beforeNudge = await savedDirectorPlan(page) as {
+    motions: Array<{ path: Array<{ x: number; y: number }> }>;
+  };
+  const pathStartBeforeNudge = beforeNudge.motions[0]!.path[0]!;
+  await objectPath.focus();
+  await objectPath.press("Shift+ArrowRight");
+  await expect.poll(async () => {
+    const plan = await savedDirectorPlan(page) as { motions: Array<{ path: Array<{ x: number; y: number }> }> };
+    return plan.motions[0]!.path[0]!.x;
+  }).toBeCloseTo(pathStartBeforeNudge.x + 0.05, 5);
+
+  const nudgedPlan = await savedDirectorPlan(page) as {
+    sourceAssetId: string;
+    subjects: Array<{ sourceAssetId: string }>;
+    motions: unknown[];
+    keyframes: Array<{ role: string; assetId: string }>;
+    shots: unknown[];
+  };
+  await objectPath.press("Delete");
+  await expect(objectPath).toHaveCount(0);
+  await director.getByRole("button", { name: "Undo Director edit" }).click();
+  await expect(director.getByRole("button", { name: /^Object path 1:/ })).toBeVisible();
+  await expect.poll(async () => (await savedDirectorPlan(page) as { motions: unknown[] }).motions).toEqual(nudgedPlan.motions);
+
+  const originalSourceAssetId = nudgedPlan.sourceAssetId;
+  await page.evaluate(() => {
+    const state = JSON.parse(localStorage.getItem("fruit-truck.studio.v1") ?? "{}");
+    const session = state.sessions?.find((item: { id: string }) => item.id === state.activeSessionId);
+    const thread = session?.threads.video.find((item: { id: string }) => item.id === session.activeThreadIds.video);
+    const plan = thread?.draft.directorPlan;
+    if (!plan?.sourceAssetId) throw new Error("The keyboard Director plan has no source to mark missing.");
+    const priorSourceAssetId = plan.sourceAssetId;
+    const missingSourceAssetId = "missing-director-source-e2e";
+    plan.sourceAssetId = missingSourceAssetId;
+    plan.subjects = plan.subjects.map((subject: { sourceAssetId: string }) => subject.sourceAssetId === priorSourceAssetId
+      ? { ...subject, sourceAssetId: missingSourceAssetId }
+      : subject);
+    plan.keyframes = plan.keyframes.map((keyframe: { role: string; assetId: string }) => keyframe.role === "first"
+      ? { ...keyframe, assetId: missingSourceAssetId }
+      : keyframe);
+    localStorage.setItem("fruit-truck.studio.v1", JSON.stringify(state));
+  });
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Runway Director Native" })).toBeVisible();
+  await page.getByRole("button", { name: "Open Director", exact: true }).click();
+
+  const missingDirector = page.getByRole("region", { name: "Direct the shot" });
+  const missingAssetAlert = missingDirector.getByRole("alert").filter({
+    hasText: "A Director asset is missing. Relink it to continue without losing the plan.",
+  });
+  await expect(missingAssetAlert).toContainText(
+    "A Director asset is missing. Relink it to continue without losing the plan.",
+  );
+  await expect.poll(async () => (await savedDirectorPlan(page) as { motions: unknown[] }).motions).toEqual(nudgedPlan.motions);
+  await missingDirector.getByRole("combobox", { name: "Relink asset" }).selectOption(originalSourceAssetId);
+  await expect(missingAssetAlert).toHaveCount(0);
+  await expect.poll(async () => (await savedDirectorPlan(page) as { sourceAssetId?: string }).sourceAssetId).toBe(originalSourceAssetId);
+
+  const relinkedPlan = await savedDirectorPlan(page) as typeof nudgedPlan;
+  expect(relinkedPlan.sourceAssetId).toBe(originalSourceAssetId);
+  expect(relinkedPlan.subjects).toEqual(nudgedPlan.subjects);
+  expect(relinkedPlan.motions).toEqual(nudgedPlan.motions);
+  expect(relinkedPlan.keyframes).toHaveLength(nudgedPlan.keyframes.length);
+  expect(relinkedPlan.keyframes).toEqual(expect.arrayContaining(nudgedPlan.keyframes));
+  expect(relinkedPlan.shots).toEqual(nudgedPlan.shots);
+});
+
 test("Director sends the source and rasterized Visual guide as separate reviewed references", async ({ page }) => {
   test.setTimeout(45_000);
   let paidVideoRequests = 0;
@@ -530,7 +661,7 @@ test("Director sends the source and rasterized Visual guide as separate reviewed
   await chooseInputRole(page, "director-first-frame.png", "First frame");
   await chooseInputRole(page, "director-last-frame.png", "Last frame");
   await page.getByRole("combobox", { name: /^Prompt/ }).fill("The truck follows the drawn curve.");
-  await page.getByRole("switch", { name: /Prompt enhancement/ }).click();
+  await expect(page.getByRole("toolbar", { name: "Prompt enhancement" })).toBeVisible();
 
   await page.getByRole("button", { name: "Open Director", exact: true }).click();
   const director = page.getByRole("region", { name: "Direct the shot" });

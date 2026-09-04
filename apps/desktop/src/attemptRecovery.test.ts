@@ -80,8 +80,13 @@ function attempt(overrides: Partial<GenerationAttempt> = {}): GenerationAttempt 
       mode: "video",
       modelId: "provider/video",
       prompt: "secret prompt",
-      enhancePrompt: false,
-      enhancedPrompt: "",
+      promptHistory: {
+        schemaVersion: 1,
+        entries: [{ id: "snapshot-prompt", text: "secret prompt", kind: "manual", createdAt: NOW }],
+        cursor: 0,
+        enhancementLocked: false,
+        editRevision: 0,
+      },
       options: {},
       providerJson: "",
       assetBindings: [],
@@ -100,8 +105,7 @@ function stateWithAttempts(attempts: GenerationAttempt[]): StudioState {
   return {
     schemaVersion: 8,
     activeSessionId: session.id,
-    promptModel: "openai/gpt-5.6-luna",
-    defaultEnhancePrompt: true,
+    promptModel: "google/gemini-3.8-flash",
     sessions: [session],
     directorPresets: [],
   };

@@ -3,7 +3,6 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
   activeGenerationAttempt,
-  applyDefaultEnhancePrompt,
   beginGeneratedImageEdit,
   markReferenceAsEditTarget,
   restoreReferenceAfterEditTarget,
@@ -24,6 +23,7 @@ import {
   preferredCatalogModel,
   readStudioBackup,
   reconcileManagedAssetIndex,
+  reconcileVerifiedUpdateAssetIndex,
   reconcileStartupAttempts,
   recordSessionCost,
   requestedImageDimensions,
@@ -37,6 +37,7 @@ import {
   type StudioStorage,
   type StudioState,
 } from "./studio.ts";
+import type { PromptEnhancementArtifact } from "./prompting/index.ts";
 
 function enhancementArtifactFixture() {
   return {
@@ -74,7 +75,7 @@ function enhancementArtifactFixture() {
       constraints: [],
       references: [],
     },
-  } as unknown as NonNullable<GenerationDraftState["enhancementArtifact"]>;
+  } as unknown as PromptEnhancementArtifact;
 }
 
 function withLocalStorage(run: (writes: Map<string, string>) => void) {
@@ -338,7 +339,7 @@ test("migrates every legacy schema version sequentially without dropping workspa
       ]);
       assert.equal(state.schemaVersion, 8);
       assert.equal(state.activeSessionId, "legacy-session");
-      assert.equal(state.promptModel, "openai/gpt-5.6-terra");
+      assert.equal(state.promptModel, "google/gemini-3.8-flash");
       const session = state.sessions[0];
       assert.equal(session.name, "Recovered legacy workspace");
       assert.deepEqual(session.assets.map((asset) => asset.id), ["asset-image", "asset-video"]);
@@ -348,7 +349,14 @@ test("migrates every legacy schema version sequentially without dropping workspa
       assert.equal(session.generationDefaults.modelIds.image, "image/legacy-model");
       assert.equal(session.generationDefaults.modelIds.video, "video/legacy-model");
       assert.equal(session.threads.image[0].draft.prompt, "Use @1 as the truck subject");
-      assert.equal(session.threads.image[0].draft.enhancePrompt, false);
+      assert.equal(session.threads.image[0].draft.promptHistory.cursor, 0);
+      assert.deepEqual(
+        session.threads.image[0].draft.promptHistory.entries.map(({ text, kind }) => ({ text, kind })),
+        [
+          { text: "Use @1 as the truck subject", kind: "manual" },
+          { text: "Use @1 as the truck subject (enhanced)", kind: "enhancement_result" },
+        ],
+      );
       assert.deepEqual(effectiveThreadDraft(session, session.threads.image[0]).options, { quality: "high", seed: 7 });
       assert.equal(effectiveThreadDraft(session, session.threads.image[0]).providerJson, '{"provider":"legacy","seed":7}');
       assert.ok(session.threads.video.length >= 1);
@@ -413,7 +421,20 @@ test("migrates the serialized v0.6.2 schema-v5 production fixture losslessly", (
     { id: "v062-result", localPath: "/Users/example/.fruit-truck/generated/fruit-truck-result.mp4", jobId: "v062-job" },
   ]);
   assert.deepEqual(session.activeThreadIds, { image: "v062-image-thread", video: "v062-video-thread" });
-  assert.equal(session.threads.image[0].draft.prompt, "Use @1 as the truck identity.");
+  assert.equal(session.threads.image[0].draft.prompt, "A faithful fruit truck portrait using @1.");
+  assert.deepEqual(
+    session.threads.image[0].draft.promptHistory.entries.map(({ text, kind }) => ({ text, kind })),
+    [
+      { text: "Use @1 as the truck identity.", kind: "manual" },
+      { text: "A faithful fruit truck portrait using @1.", kind: "enhancement_result" },
+    ],
+  );
+  assert.equal(
+    session.threads.image[0].draft.promptHistory.entries[1].enhancementAttemptId,
+    "v062-enhancement-attempt",
+  );
+  assert.equal(session.threads.image[0].draft.promptHistory.entries[1].actualCostUsd, 0.006);
+  assert.equal(session.threads.image[0].attempts[0].snapshot?.prompt, "A faithful fruit truck portrait using @1.");
   assert.equal(session.threads.image[0].attempts[0].actualCostUsd, 0.042);
   assert.equal(session.threads.video[0].attempts[0].jobId, "v062-job");
   assert.deepEqual(session.threads.video[0].attempts[0].assetIds, ["v062-result"]);
@@ -428,6 +449,336 @@ test("migrates the serialized v0.6.2 schema-v5 production fixture losslessly", (
   assert.ok(backupKey);
   assert.equal(writes.get(backupKey), original);
   assert.equal(writes.get(STUDIO_LAST_KNOWN_GOOD_KEY), original);
+});
+
+test("v6 to v7 migrates every draft and snapshot with deterministic history", () => {
+  const session = createSession("Phase 2 migration");
+  session.assets.push({
+    id: "asset-kept",
+    name: "kept.png",
+    kind: "image",
+    mimeType: "image/png",
+    origin: "upload",
+    createdAt: LEGACY_CREATED_AT,
+    localPath: "/managed/kept.png",
+  });
+  session.costLedger.push({
+    id: "cost-kept",
+    category: "prompt_enhancement",
+    actualCostUsd: 0.07,
+    recordedAt: LEGACY_CREATED_AT,
+  });
+  const plannerResult = "planner enhanced image prompt";
+  const artifact = {
+    ...enhancementArtifactFixture(),
+    signature: "signature-kept",
+    prompt: plannerResult,
+    createdAt: "2025-06-01T00:01:00.000Z",
+  };
+  const legacyImageDraft = {
+    ...legacyDraft("original image prompt"),
+    enhancePrompt: true,
+    enhancedPrompt: "edited enhanced image prompt",
+    enhancedPromptDirty: true,
+    enhancementArtifact: artifact,
+  };
+  const legacyVideoDraft = {
+    ...legacyDraft("original video prompt"),
+    enhancePrompt: false,
+    enhancedPrompt: "saved enhanced video prompt",
+  };
+  const attemptBase = {
+    id: "attempt-kept",
+    status: "completed",
+    draftRevision: 2,
+    createdAt: LEGACY_CREATED_AT,
+    updatedAt: LEGACY_CREATED_AT,
+    inputAssetIds: ["asset-kept"],
+    assetIds: [],
+    snapshot: {
+      mode: "image",
+      modelId: "image/model",
+      prompt: "original image prompt",
+      enhancePrompt: true,
+      enhancedPrompt: "edited enhanced image prompt",
+      enhancedPromptDirty: true,
+      enhancementArtifact: artifact,
+      options: {},
+      providerJson: "",
+      assetBindings: [],
+      imageEditMode: false,
+      imageEditTarget: "",
+      maskInstructions: "",
+      maskStrokes: [],
+    },
+  };
+  const rawState = {
+    schemaVersion: 6,
+    activeSessionId: session.id,
+    promptModel: "openai/gpt-5.6-terra",
+    defaultEnhancePrompt: false,
+    sessions: [{
+      ...session,
+      threads: {
+        image: [{
+          ...session.threads.image[0],
+          draft: legacyImageDraft,
+          attempts: [attemptBase],
+          enhancementAttempts: [{
+            id: "enhancement-kept",
+            requestKey: "signature-kept",
+            status: "completed",
+            threadRevision: 2,
+            originalPrompt: "original image prompt",
+            enhancedPrompt: plannerResult,
+            createdAt: "2025-06-01T00:00:30.000Z",
+            updatedAt: "2025-06-01T00:01:00.000Z",
+            actualCostUsd: 0.07,
+          }, {
+            id: "enhancement-decoy",
+            requestKey: "different-signature",
+            status: "completed",
+            threadRevision: 2,
+            originalPrompt: "original image prompt",
+            enhancedPrompt: "edited enhanced image prompt",
+            createdAt: "2025-06-01T00:02:00.000Z",
+            updatedAt: "2025-06-01T00:03:00.000Z",
+            actualCostUsd: 0.09,
+          }],
+        }],
+        video: [{ ...session.threads.video[0], draft: legacyVideoDraft }],
+      },
+    }],
+  };
+  const original = JSON.stringify(rawState);
+  const migrate = () => {
+    const writes = new Map<string, string>([[STUDIO_STORAGE_KEY, original]]);
+    return loadStudioStateWithRecovery({
+      storage: mapStorage(writes),
+      now: () => new Date("2026-09-04T00:00:00.000Z"),
+    });
+  };
+  const first = migrate();
+  const second = migrate();
+  const image = first.state.sessions[0].threads.image[0];
+  const video = first.state.sessions[0].threads.video[0];
+  const snapshot = image.attempts[0].snapshot!;
+
+  assert.deepEqual(first.migration?.steps, ["v6→v7", "v7→v8"]);
+  assert.equal(first.state.promptModel, "google/gemini-3.8-flash");
+  assert.equal((first.state as unknown as Record<string, unknown>).defaultEnhancePrompt, undefined);
+  assert.equal(image.draft.prompt, "edited enhanced image prompt");
+  assert.equal(video.draft.prompt, "original video prompt");
+  assert.equal(snapshot.prompt, "edited enhanced image prompt");
+  assert.deepEqual(image.draft.promptHistory.entries.map((entry) => entry.id),
+    second.state.sessions[0].threads.image[0].draft.promptHistory.entries.map((entry) => entry.id));
+  assert.equal(image.draft.promptHistory.entries[1].plannerModel, "google/gemini-3.8-flash");
+  assert.equal(image.draft.promptHistory.entries[1].enhancementArtifact?.plannerModel, "test-planner");
+  assert.equal(snapshot.promptHistory.entries[1].enhancementArtifact?.plannerModel, "test-planner");
+  assert.equal(snapshot.promptHistory.entries[1].enhancementAttemptId, "enhancement-kept");
+  assert.equal(snapshot.promptHistory.entries[1].actualCostUsd, 0.07);
+  assert.equal(image.draft.promptHistory.entries[1].enhancementAttemptId, "enhancement-kept");
+  assert.equal(image.draft.promptHistory.entries[1].actualCostUsd, 0.07);
+  assert.equal(image.draft.promptHistory.entries[1].text, "edited enhanced image prompt");
+  assert.equal(image.draft.promptHistory.entries[1].enhancementArtifact?.prompt, plannerResult);
+  assert.notEqual(
+    image.draft.promptHistory.entries[1].text,
+    image.draft.promptHistory.entries[1].enhancementArtifact?.prompt,
+  );
+  assert.equal(image.draft.promptHistory.entries[1].negativePrompt, "blur");
+  assert.equal(first.state.sessions[0].assets[0].id, "asset-kept");
+  assert.equal(first.state.sessions[0].costLedger[0].id, "cost-kept");
+  assert.equal(image.attempts[0].id, "attempt-kept");
+  assert.equal(image.enhancementAttempts?.[0].id, "enhancement-kept");
+  for (const value of [image.draft, video.draft, snapshot] as unknown as Record<string, unknown>[]) {
+    assert.equal(value.enhancePrompt, undefined);
+    assert.equal(value.enhancedPrompt, undefined);
+    assert.equal(value.enhancementArtifact, undefined);
+  }
+});
+
+test("legacy-shaped schema v8 workspaces normalize and rewrite durably", () => {
+  const session = createSession("Legacy v8");
+  const legacy = legacyDraft("legacy current prompt");
+  legacy.enhancePrompt = true;
+  legacy.enhancedPrompt = "legacy visible result";
+  const raw = JSON.stringify({
+    schemaVersion: 8,
+    activeSessionId: session.id,
+    promptModel: "openai/gpt-5.6-luna",
+    defaultEnhancePrompt: true,
+    directorPresets: [],
+    sessions: [{
+      ...session,
+      threads: {
+        ...session.threads,
+        image: [{ ...session.threads.image[0], draft: legacy }],
+      },
+    }],
+  });
+  const writes = new Map<string, string>([[STUDIO_STORAGE_KEY, raw]]);
+  const result = loadStudioStateWithRecovery({ storage: mapStorage(writes) });
+  const persisted = writes.get(STUDIO_STORAGE_KEY)!;
+
+  assert.equal(result.recovery.kind, "migrated");
+  assert.equal(result.state.promptModel, "google/gemini-3.8-flash");
+  assert.equal(result.state.sessions[0].threads.image[0].draft.prompt, "legacy visible result");
+  assert.notEqual(persisted, raw);
+  assert.doesNotMatch(persisted, /defaultEnhancePrompt|enhancedPromptDirty|enhancedVisualCount/);
+  assert.match(persisted, /promptHistory/);
+});
+
+test("malformed current prompt history is treated as corrupt", () => {
+  const session = createSession("Malformed history");
+  session.threads.image[0].draft.promptHistory.cursor = 12;
+  const raw = JSON.stringify({
+    schemaVersion: 8,
+    activeSessionId: session.id,
+    promptModel: "google/gemini-3.8-flash",
+    directorPresets: [],
+    sessions: [session],
+  });
+  const writes = new Map<string, string>([[STUDIO_STORAGE_KEY, raw]]);
+  const result = loadStudioStateWithRecovery({ storage: mapStorage(writes) });
+
+  assert.equal(result.recovery.kind, "corrupt");
+  assert.equal(result.recovery.requiresUserAction, true);
+  assert.equal(writes.get(STUDIO_STORAGE_KEY), raw);
+});
+
+test("current prompt history rejects negative checkpoint costs", () => {
+  const session = createSession("Negative checkpoint cost");
+  session.threads.image[0].draft.promptHistory.entries[0].actualCostUsd = -0.01;
+  const state: StudioState = {
+    schemaVersion: 8,
+    activeSessionId: session.id,
+    promptModel: "google/gemini-3.8-flash",
+    directorPresets: [],
+    sessions: [session],
+  };
+  assert.throws(() => exportStudioState(state), /actualCostUsd must be non-negative/);
+  const raw = JSON.stringify(state);
+  const writes = new Map<string, string>([[STUDIO_STORAGE_KEY, raw]]);
+  const result = loadStudioStateWithRecovery({ storage: mapStorage(writes) });
+
+  assert.equal(result.recovery.kind, "corrupt");
+  assert.equal(writes.get(STUDIO_STORAGE_KEY), raw);
+});
+
+test("durable saves trim prompt histories while protecting uncertain attempt checkpoints", () => {
+  const session = createSession("Bounded history");
+  const thread = session.threads.image[0];
+  const historyArtifact = {
+    ...enhancementArtifactFixture(),
+    prompt: "prompt 1",
+    actualCostUsd: 0.017,
+  };
+  const entries = Array.from({ length: 60 }, (_, index) => ({
+    id: `checkpoint-${index}`,
+    text: `prompt ${index}`,
+    kind: index === 1 ? "enhancement_result" as const : index === 0 ? "before_enhancement" as const : "manual" as const,
+    createdAt: `2026-09-04T00:00:${String(index).padStart(2, "0")}.000Z`,
+    ...(index < 2 ? {
+      enhancementAttemptId: "uncertain-enhancement",
+      plannerModel: "google/gemini-3.8-flash" as const,
+      reasoningEffort: "high" as const,
+    } : {}),
+    ...(index === 1 ? {
+      negativePrompt: "blur, watermark",
+      enhancementArtifact: historyArtifact,
+      actualCostUsd: 0.017,
+    } : {}),
+  }));
+  thread.draft.prompt = "prompt 59";
+  thread.draft.promptHistory = {
+    schemaVersion: 1,
+    entries,
+    cursor: 59,
+    enhancementLocked: false,
+    editRevision: 3,
+  };
+  thread.enhancementAttempts = [{
+    id: "uncertain-enhancement",
+    requestKey: "uncertain-signature",
+    status: "uncertain",
+    threadRevision: 3,
+    originalPrompt: "prompt 0",
+    createdAt: LEGACY_CREATED_AT,
+    updatedAt: LEGACY_CREATED_AT,
+  }];
+  thread.attempts = [{
+    id: "generation-with-snapshot",
+    status: "completed",
+    draftRevision: 3,
+    createdAt: LEGACY_CREATED_AT,
+    updatedAt: LEGACY_CREATED_AT,
+    inputAssetIds: [],
+    assetIds: [],
+    snapshot: {
+      mode: "image",
+      modelId: "image/model",
+      prompt: "prompt 59",
+      promptHistory: structuredClone(thread.draft.promptHistory),
+      options: {},
+      providerJson: "",
+      assetBindings: [],
+      imageEditMode: false,
+      imageEditTarget: "",
+      maskInstructions: "",
+      maskStrokes: [],
+    },
+  }];
+  const state: StudioState = {
+    schemaVersion: 8,
+    activeSessionId: session.id,
+    promptModel: "google/gemini-3.8-flash",
+    directorPresets: [],
+    sessions: [session],
+  };
+  const exactDraftHistory = structuredClone(thread.draft.promptHistory);
+  const exactSnapshotHistory = structuredClone(thread.attempts[0].snapshot!.promptHistory);
+  const exported = JSON.parse(exportStudioState(state).json) as {
+    sessions: Array<{
+      threads: {
+        image: Array<{
+          draft: GenerationDraftState;
+          attempts: Array<{ snapshot?: { promptHistory: GenerationDraftState["promptHistory"] } }>;
+        }>;
+      };
+    }>;
+  };
+  const exportedThread = exported.sessions[0].threads.image[0];
+  assert.equal(exportedThread.draft.promptHistory.entries.length, 60);
+  assert.deepEqual(exportedThread.draft.promptHistory, exactDraftHistory);
+  assert.deepEqual(exportedThread.attempts[0].snapshot?.promptHistory, exactSnapshotHistory);
+  assert.equal(exportedThread.draft.promptHistory.entries[1].actualCostUsd, 0.017);
+  assert.deepEqual(
+    exportedThread.draft.promptHistory.entries[1].enhancementArtifact,
+    historyArtifact,
+  );
+
+  const exportedWrites = new Map<string, string>([[STUDIO_STORAGE_KEY, JSON.stringify(exported)]]);
+  const exportedRoundTrip = loadStudioStateWithRecovery({
+    storage: mapStorage(exportedWrites),
+  }).state.sessions[0].threads.image[0];
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(exportedRoundTrip.draft.promptHistory)),
+    exactDraftHistory,
+  );
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(exportedRoundTrip.attempts[0].snapshot?.promptHistory)),
+    exactSnapshotHistory,
+  );
+
+  const writes = new Map<string, string>();
+  saveStudioState(state, { storage: mapStorage(writes) });
+  const loaded = loadStudioStateWithRecovery({ storage: mapStorage(writes) }).state.sessions[0].threads.image[0];
+
+  assert.equal(loaded.draft.promptHistory.entries.length, 50);
+  assert.equal(loaded.attempts[0].snapshot?.promptHistory.entries.length, 50);
+  assert.equal(loaded.draft.promptHistory.entries.some((entry) => entry.id === "checkpoint-0"), true);
+  assert.equal(loaded.draft.promptHistory.entries.some((entry) => entry.id === "checkpoint-1"), true);
+  assert.equal(loaded.draft.promptHistory.entries.some((entry) => entry.id === "checkpoint-59"), true);
 });
 
 test("migration write failures preserve the source and require explicit recovery", () => {
@@ -460,8 +811,7 @@ test("last-known-good recovery does not overwrite corrupt primary state", () => 
     const firstState: StudioState = {
       schemaVersion: 8,
       activeSessionId: first.id,
-      promptModel: "openai/gpt-5.6-luna",
-      defaultEnhancePrompt: true,
+      promptModel: "google/gemini-3.8-flash",
       directorPresets: [],
       sessions: [first],
     };
@@ -502,8 +852,7 @@ test("startup reconciliation classifies resumable jobs, uncertain submissions, a
   const state: StudioState = {
     schemaVersion: 8,
     activeSessionId: session.id,
-    promptModel: "openai/gpt-5.6-luna",
-    defaultEnhancePrompt: true,
+    promptModel: "google/gemini-3.8-flash",
     directorPresets: [],
     sessions: [session],
   };
@@ -538,8 +887,7 @@ test("state export and managed-asset references omit ephemeral recovery diagnost
   const state: StudioState = {
     schemaVersion: 8,
     activeSessionId: session.id,
-    promptModel: "openai/gpt-5.6-luna",
-    defaultEnhancePrompt: true,
+    promptModel: "google/gemini-3.8-flash",
     directorPresets: [],
     sessions: [session],
     recovery: {
@@ -575,28 +923,16 @@ test("state export and managed-asset references omit ephemeral recovery diagnost
   }]);
 });
 
-test("prompt enhancement default applies to every thread and future work", () => {
+test("new sessions and sibling threads start with unlocked prompt history", () => {
   const first = createSession("First");
   first.threads.image.push(createSiblingGenerationThread(first.threads.image[0], 2));
   const second = createSession("Second");
-  const state: StudioState = {
-    schemaVersion: 8,
-    activeSessionId: first.id,
-    promptModel: "openai/gpt-5.6-luna",
-    defaultEnhancePrompt: true,
-    directorPresets: [],
-    sessions: [first, second],
-  };
-
-  const disabled = applyDefaultEnhancePrompt(state, false);
-  assert.equal(disabled.defaultEnhancePrompt, false);
-  for (const session of disabled.sessions) {
+  for (const session of [first, second]) {
     for (const thread of [...session.threads.image, ...session.threads.video]) {
-      assert.equal(thread.draft.enhancePrompt, false);
+      assert.equal(thread.draft.promptHistory.enhancementLocked, false);
+      assert.equal(thread.draft.promptHistory.entries.length, 1);
     }
   }
-  assert.equal(createSession("Future", disabled.defaultEnhancePrompt).threads.image[0].draft.enhancePrompt, false);
-  assert.equal(createSiblingGenerationThread(first.threads.image[0], 3, disabled.defaultEnhancePrompt).draft.enhancePrompt, false);
 });
 
 test("session cost ledger records generation and enhancement once per id", () => {
@@ -632,21 +968,19 @@ test("session cost ledger records generation and enhancement once per id", () =>
   assert.equal(corrected.costLedger.reduce((sum, entry) => sum + entry.actualCostUsd, 0), 0.28);
 });
 
-test("current v8 metadata preserves its global enhancement preference", () => {
+test("current v8 metadata omits the removed global enhancement preference", () => {
   withLocalStorage((writes) => {
-    const session = createSession("Current", false);
+    const session = createSession("Current");
     const state: StudioState = {
       schemaVersion: 8,
       activeSessionId: session.id,
-      promptModel: "openai/gpt-5.6-luna",
-      defaultEnhancePrompt: false,
+      promptModel: "google/gemini-3.8-flash",
       directorPresets: [],
       sessions: [session],
     };
     saveStudioState(state);
-    assert.equal(loadStudioState().defaultEnhancePrompt, false);
-    assert.equal(loadStudioState().sessions[0].threads.image[0].draft.enhancePrompt, false);
-    assert.match(writes.get("fruit-truck.studio.v1") ?? "", /defaultEnhancePrompt/);
+    assert.equal((loadStudioState() as unknown as Record<string, unknown>).defaultEnhancePrompt, undefined);
+    assert.doesNotMatch(writes.get("fruit-truck.studio.v1") ?? "", /defaultEnhancePrompt/);
   });
 });
 
@@ -656,8 +990,7 @@ test("named generation presets survive a durable state round trip", () => {
     const state: StudioState = {
       schemaVersion: 8,
       activeSessionId: session.id,
-      promptModel: "openai/gpt-5.6-luna",
-      defaultEnhancePrompt: true,
+      promptModel: "google/gemini-3.8-flash",
       directorPresets: [],
       sessions: [session],
       generationPresets: [{
@@ -689,12 +1022,26 @@ test("current metadata preserves reference purposes and enhancement artifacts", 
       role: "reference",
       purpose: "style",
     }];
-    thread.draft.enhancementArtifact = artifact;
+    thread.draft.prompt = artifact.prompt;
+    thread.draft.promptHistory = {
+      schemaVersion: 1,
+      entries: [{
+        id: "result",
+        text: artifact.prompt,
+        kind: "enhancement_result",
+        createdAt: artifact.createdAt,
+        plannerModel: "google/gemini-3.8-flash",
+        reasoningEffort: "high",
+        enhancementArtifact: artifact,
+      }],
+      cursor: 0,
+      enhancementLocked: true,
+      editRevision: 0,
+    };
     const state: StudioState = {
       schemaVersion: 8,
       activeSessionId: session.id,
-      promptModel: "openai/gpt-5.6-luna",
-      defaultEnhancePrompt: true,
+      promptModel: "google/gemini-3.8-flash",
       directorPresets: [],
       sessions: [session],
     };
@@ -703,7 +1050,7 @@ test("current metadata preserves reference purposes and enhancement artifacts", 
 
     const loadedThread = loadStudioState().sessions[0].threads.image[0];
     assert.deepEqual(loadedThread.draft.references, thread.draft.references);
-    assert.deepEqual(loadedThread.draft.enhancementArtifact, artifact);
+    assert.deepEqual(loadedThread.draft.promptHistory.entries[0].enhancementArtifact, artifact);
   });
 });
 
@@ -719,8 +1066,7 @@ test("load supplies semantic purposes for saved references from before purpose p
     const state: StudioState = {
       schemaVersion: 8,
       activeSessionId: session.id,
-      promptModel: "openai/gpt-5.6-luna",
-      defaultEnhancePrompt: true,
+      promptModel: "google/gemini-3.8-flash",
       directorPresets: [],
       sessions: [session],
     };
@@ -774,7 +1120,7 @@ test("generated-result editing starts with only that image as input one", () => 
   const draft = session.threads.image[0].draft;
   draft.references = [{ assetId: "old", role: "reference", purpose: "context", slot: 1 }];
   draft.maskInstructions = "old mask";
-  draft.enhancementArtifact = enhancementArtifactFixture();
+  draft.promptHistory.enhancementLocked = true;
   const edit = beginGeneratedImageEdit(draft, "generated-result");
   assert.deepEqual(edit.references, [{
     assetId: "generated-result",
@@ -785,7 +1131,7 @@ test("generated-result editing starts with only that image as input one", () => 
   }]);
   assert.equal(edit.imageEditTarget, "@1");
   assert.equal(edit.maskInstructions, "");
-  assert.equal(edit.enhancementArtifact, undefined);
+  assert.equal(edit.promptHistory.enhancementLocked, false);
 });
 
 test("edit targets restore their prior semantic purpose", () => {
@@ -881,7 +1227,7 @@ test("managed-file reconciliation marks missing assets, repairs moved paths, and
     { id: "moved", name: "moved.png", kind: "image", mimeType: "image/png", origin: "upload", createdAt: "2026-01-01T00:00:00.000Z", localPath: "/managed/old.png", fingerprint: "moved:2:image/png" },
     { id: "missing", name: "missing.png", kind: "image", mimeType: "image/png", origin: "upload", createdAt: "2026-01-01T00:00:00.000Z", localPath: "/managed/missing.png", fingerprint: "missing:3:image/png" },
   ];
-  const studio: StudioState = { schemaVersion: 8, activeSessionId: state.id, sessions: [state], defaultEnhancePrompt: true, promptModel: "openai/gpt-5.6-luna", directorPresets: [] };
+  const studio: StudioState = { schemaVersion: 8, activeSessionId: state.id, sessions: [state], promptModel: "google/gemini-3.8-flash", directorPresets: [] };
   const result = reconcileManagedAssetIndex(studio, [
     { id: "scan-exact", name: "exact.png", kind: "image", mimeType: "image/png", origin: "upload", createdAt: "2026-01-02T00:00:00.000Z", localPath: "/managed/exact.png", byteSize: 1, fingerprint: "exact:1:image/png" },
     { id: "scan-moved", name: "moved.png", kind: "image", mimeType: "image/png", origin: "upload", createdAt: "2026-01-02T00:00:00.000Z", localPath: "/managed/new.png", byteSize: 2, fingerprint: "moved:2:image/png" },
@@ -894,6 +1240,125 @@ test("managed-file reconciliation marks missing assets, repairs moved paths, and
   assert.equal(assets.find((asset) => asset.id === "missing")?.storageAvailability, "missing");
   assert.equal(assets.find((asset) => asset.id === "orphan")?.localPath, "/managed/orphan.png");
   assert.deepEqual({ missing: result.missingCount, relinked: result.relinkedCount, recovered: result.recoveredCount, duplicates: result.duplicateFiles.length }, { missing: 1, relinked: 1, recovered: 1, duplicates: 1 });
+});
+
+test("update verification reconciliation leaves all workspace assets untouched", () => {
+  const session = createSession("Verified update assets");
+  const protectedAsset = {
+    id: "protected-asset",
+    name: "original-name.png",
+    kind: "image" as const,
+    mimeType: "image/png",
+    origin: "edited" as const,
+    createdAt: "2025-12-31T23:59:59.000Z",
+    localPath: "/managed/generated/original-name.png",
+    blobKey: "legacy-protected-blob",
+    externalUrl: "https://provider.example/original",
+    jobId: "provider-job-protected",
+    duration: 2.5,
+    width: 1920,
+    height: 1080,
+    fps: 24,
+    codec: "png",
+    facePresence: "present" as const,
+    byteSize: 321,
+    fingerprint: "3c6b18e60a81d64e2b2b8a2f7f755d008a8171a7c0ff1c8ad768ec896dded8b3",
+    bridgeAvailability: "desktop_only" as const,
+    storageAvailability: "available" as const,
+    sourceUrl: "https://provider.example/source",
+    sourcePageUrl: "https://provider.example/page",
+    license: "fixture-license",
+    derivation: {
+      kind: "resize_crop" as const,
+      sourceAssetId: "source-asset",
+      resolution: "1080p",
+      aspectRatio: "16:9",
+      createdAt: "2025-12-31T23:59:58.000Z",
+    },
+  };
+  const missingAsset = {
+    id: "missing-after-update",
+    name: "missing.png",
+    kind: "image" as const,
+    mimeType: "image/png",
+    origin: "upload" as const,
+    createdAt: LEGACY_CREATED_AT,
+    localPath: "/managed/assets/missing.png",
+    fingerprint: "missing-sha256",
+  };
+  session.assets = [protectedAsset, missingAsset];
+  const studio: StudioState = {
+    schemaVersion: 8,
+    activeSessionId: session.id,
+    sessions: [session],
+    promptModel: "google/gemini-3.8-flash",
+    directorPresets: [],
+  };
+  const scanExact = {
+    id: "scan-exact",
+    name: "scanner-renamed.mp4",
+    kind: "video" as const,
+    mimeType: "video/mp4",
+    origin: "generated" as const,
+    createdAt: "2026-09-04T02:00:00.000Z",
+    localPath: protectedAsset.localPath,
+    byteSize: protectedAsset.byteSize,
+    fingerprint: "scanner-name-size-mime-fingerprint",
+    width: 640,
+    height: 360,
+    duration: 10,
+    codec: "h264",
+  };
+  const duplicateExact = {
+    ...scanExact,
+    id: "duplicate-exact",
+    localPath: "/managed/generated/original-name-copy.png",
+  };
+  const orphanPrimary = {
+    id: "orphan-primary",
+    name: "orphan.png",
+    kind: "image" as const,
+    mimeType: "image/png",
+    origin: "upload" as const,
+    createdAt: "2026-09-04T02:00:00.000Z",
+    localPath: "/managed/assets/a-orphan.png",
+    byteSize: 12,
+    fingerprint: "orphan-scan-fingerprint",
+  };
+  const orphanDuplicate = {
+    ...orphanPrimary,
+    id: "orphan-duplicate",
+    localPath: "/managed/assets/z-orphan-copy.png",
+  };
+
+  const result = reconcileVerifiedUpdateAssetIndex(studio, [
+    { localPath: orphanDuplicate.localPath },
+    { localPath: duplicateExact.localPath },
+    { localPath: scanExact.localPath },
+    { localPath: orphanPrimary.localPath },
+  ]);
+  const protectedAfter = result.state.sessions[0].assets.find((asset) =>
+    asset.id === protectedAsset.id);
+
+  assert.equal(result.state, studio);
+  assert.deepEqual(protectedAfter, protectedAsset);
+  assert.deepEqual(result.state.sessions[0].assets, [protectedAsset, missingAsset]);
+  assert.equal(result.relinkedCount, 0);
+  assert.equal(result.missingCount, 1);
+  assert.equal(result.recoveredCount, 0);
+  assert.deepEqual(result.duplicateFiles, []);
+  assert.equal(result.state.sessions[0].assets.some((asset) =>
+    asset.id === orphanPrimary.id || asset.id === orphanDuplicate.id), false);
+  const reordered = reconcileVerifiedUpdateAssetIndex(studio, [
+    { localPath: orphanPrimary.localPath },
+    { localPath: scanExact.localPath },
+    { localPath: duplicateExact.localPath },
+    { localPath: orphanDuplicate.localPath },
+  ]);
+  assert.equal(reordered.state, studio);
+  assert.deepEqual(reordered.state.sessions[0].assets, [protectedAsset, missingAsset]);
+  assert.deepEqual(reordered.duplicateFiles, []);
+  assert.equal(reordered.missingCount, 1);
 });
 
 test("media helpers and generated session names remain stable", () => {

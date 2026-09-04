@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "createdAtMs": 1788483600000,
+  "entries": [
+    {
+      "assetId": "phase3-active-video-bytes",
+      "kind": "video",
+      "origin": "generated",
+      "relativePath": "generated/active-video.mp4",
+      "byteSize": 120,
+      "sha256": "96efcd96508267df393b87fbc12ab6595e727a3de7e910bbac77f8c05f4b5ebc"
+    },
+    {
+      "assetId": "phase3-completed-poster",
+      "kind": "image",
+      "origin": "edited",
+      "relativePath": "generated/completed-poster.png",
+      "byteSize": 100,
+      "sha256": "3ca59f024df106f445c438e6323672b11216d914dda425fcec7fcbcfc784f451"
+    },
+    {
+      "assetId": "phase3-source-frame",
+      "kind": "image",
+      "origin": "upload",
+      "relativePath": "assets/source-frame.png",
+      "byteSize": 81,
+      "sha256": "995e8cadfc8f2e204081aa2979175ba91dda19f2d44a6021ba93098099168147"
+    }
+  ]
+}

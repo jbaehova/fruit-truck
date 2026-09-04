@@ -6,11 +6,10 @@ import { Check, Download, ExternalLink as ExternalLinkIcon, Pencil, RefreshCw, S
 import { ExternalLink } from "@/components/ExternalLink";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Switch } from "@/components/ui/switch";
+import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select";
 import { useI18n, type Language } from "@/i18n";
 import type { CredentialStatus, CredentialValidationStatus } from "@/openrouter";
-import { PROMPT_MODELS, type PromptModel } from "@/studio";
+import { PROMPT_MODELS, type PromptModel } from "@/promptModels";
 
 type Props = {
   open: boolean;
@@ -21,8 +20,7 @@ type Props = {
   onRemove: () => Promise<void>;
   promptModel: PromptModel;
   onPromptModelChange: (model: PromptModel) => void;
-  defaultEnhancePrompt: boolean;
-  onDefaultEnhancePromptChange: (enabled: boolean) => void;
+  promptModelAvailability: Record<PromptModel, "checking" | "available" | "unavailable" | "unknown">;
   onExportSupport: () => void;
   onExportWorkspace: () => void;
   onImportWorkspace: () => void;
@@ -40,8 +38,7 @@ export function SettingsDialog({
   onRemove,
   promptModel,
   onPromptModelChange,
-  defaultEnhancePrompt,
-  onDefaultEnhancePromptChange,
+  promptModelAvailability,
   onExportSupport,
   onExportWorkspace,
   onImportWorkspace,
@@ -55,6 +52,29 @@ export function SettingsDialog({
   const [busy, setBusy] = useState(false);
   const [keyError, setKeyError] = useState<string | null>(null);
   const [updateState, setUpdateState] = useState<{ status?: string; lastCheckedAt?: number | null }>({});
+  const isCheckingForUpdates = updateState.status === "checking";
+  const selectedPromptModel = PROMPT_MODELS.find((model) => model.id === promptModel) ?? PROMPT_MODELS[0];
+  const selectedPromptModelAvailability = promptModelAvailability[promptModel];
+  const promptModelAvailabilityLabel = {
+    checking: t("promptModelAvailabilityChecking"),
+    available: t("promptModelAvailabilityAvailable"),
+    unavailable: t("promptModelAvailabilityUnavailable"),
+    unknown: t("promptModelAvailabilityUnknown"),
+  }[selectedPromptModelAvailability];
+  const updateStatusLabel = (() => {
+    switch (updateState.status) {
+      case "checking": return t("checkingForUpdates");
+      case "available": return t("updateAvailableStatus");
+      case "current": return t("appUpToDate");
+      case "offline": return t("updateCheckOffline");
+      case "error": return t("updateCheckUnavailable");
+      case "idle":
+      default: return updateState.lastCheckedAt ? t("updateCheckComplete") : t("updateNotChecked");
+    }
+  })();
+  const updateStatusText = isCheckingForUpdates || !updateState.lastCheckedAt
+    ? updateStatusLabel
+    : `${t("lastUpdateCheck")}: ${new Date(updateState.lastCheckedAt).toLocaleString(language === "ko" ? "ko-KR" : "en-US")} | ${updateStatusLabel}`;
 
   useEffect(() => {
     if (!open) return;
@@ -168,16 +188,28 @@ export function SettingsDialog({
               <Field.Root className="settings-key-field">
                 <Field.Label className="settings-field-label" nativeLabel={false} render={<div />}>{t("promptModel")}</Field.Label>
                 <Select value={promptModel} onValueChange={(value) => value && onPromptModelChange(value as PromptModel)}>
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>{PROMPT_MODELS.map((model) => <SelectItem key={model.id} value={model.id}>{model.label} · {model.effort}</SelectItem>)}</SelectContent>
+                  <SelectTrigger>
+                    <span className="base-select-value">
+                      {selectedPromptModel.label} | {t("promptReasoningEffortHigh")}
+                      {selectedPromptModelAvailability === "unavailable" ? ` (${t("promptModelAvailabilityUnavailable")})` : ""}
+                    </span>
+                  </SelectTrigger>
+                  <SelectContent>
+                    {PROMPT_MODELS.map((model) => {
+                      const availability = promptModelAvailability[model.id];
+                      return (
+                        <SelectItem key={model.id} value={model.id}>
+                          {model.label} | {t("promptReasoningEffortHigh")}
+                          {availability === "unavailable" ? ` (${t("promptModelAvailabilityUnavailable")})` : ""}
+                        </SelectItem>
+                      );
+                    })}
+                  </SelectContent>
                 </Select>
+                <p className="prompt-model-availability" role="status" aria-live="polite" data-status={selectedPromptModelAvailability}>
+                  {t("selectedPromptModelStatus", { status: promptModelAvailabilityLabel })}
+                </p>
                 <Field.Description>{t("promptModelHint")}</Field.Description>
-              </Field.Root>
-              <Field.Root className="settings-key-field settings-switch-field">
-                <Field.Label className="settings-field-label" nativeLabel={false} render={<div />}>
-                  <span><strong>{t("defaultPromptEnhancement")}</strong><small>{t("defaultPromptEnhancementHint")}</small></span>
-                </Field.Label>
-                <Switch checked={defaultEnhancePrompt} onCheckedChange={onDefaultEnhancePromptChange} />
               </Field.Root>
               <Field.Root className="settings-key-field">
                 <Field.Label className="settings-field-label">{t("sessionBudget")}</Field.Label>
@@ -200,8 +232,17 @@ export function SettingsDialog({
                 <Button type="button" variant="outline" size="sm" onClick={onImportWorkspace}><Upload /> {t("importWorkspace")}</Button>
               </div>
               <div className="settings-update-check">
-                <Button type="button" variant="outline" size="sm" onClick={() => window.dispatchEvent(new Event("fruit-truck:check-update"))}><RefreshCw /> {t("checkForUpdates")}</Button>
-                <small>{updateState.lastCheckedAt ? `${t("lastUpdateCheck")}: ${new Date(updateState.lastCheckedAt).toLocaleString(language === "ko" ? "ko-KR" : "en-US")} · ${updateState.status ?? "unknown"}` : t("updateNotChecked")}</small>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={isCheckingForUpdates}
+                  aria-busy={isCheckingForUpdates}
+                  onClick={() => window.dispatchEvent(new Event("fruit-truck:check-update"))}
+                >
+                  <RefreshCw /> {isCheckingForUpdates ? t("checkingForUpdates") : t("checkForUpdates")}
+                </Button>
+                <small role="status" aria-live="polite">{updateStatusText}</small>
               </div>
               <Button type="button" variant="outline" size="sm" onClick={onExportSupport}><Download /> {t("exportDiagnostics")}</Button>
             </div>

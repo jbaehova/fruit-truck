@@ -1,0 +1,444 @@
+{
+  "schemaVersion": 7,
+  "activeSessionId": "phase3-session-v7",
+  "promptModel": "google/gemini-3.8-flash",
+  "generationPresets": [],
+  "sessions": [
+    {
+      "id": "phase3-session-v7",
+      "name": "Phase 3 fifty-checkpoint workspace",
+      "createdAt": "2026-09-01T00:00:00.000Z",
+      "updatedAt": "2026-09-09T01:00:00.000Z",
+      "mode": "image",
+      "assets": [],
+      "generationDefaults": {
+        "modelIds": {
+          "image": "google/gemini-2.5-flash-image",
+          "video": "google/veo-3.1"
+        },
+        "options": {
+          "image": {
+            "quality": "high"
+          },
+          "video": {
+            "duration": 8
+          }
+        },
+        "providerJson": {
+          "image": "",
+          "video": ""
+        }
+      },
+      "threads": {
+        "image": [
+          {
+            "id": "phase3-v7-image-thread",
+            "name": "Fifty checkpoint prompt",
+            "mode": "image",
+            "createdAt": "2026-09-01T00:00:00.000Z",
+            "updatedAt": "2026-09-09T01:00:00.000Z",
+            "revision": 50,
+            "optionOverrides": {},
+            "draft": {
+              "prompt": "Final approved market prompt",
+              "promptHistory": {
+                "schemaVersion": 1,
+                "entries": [
+                  {
+                    "id": "phase3-v7-checkpoint-01",
+                    "text": "Original market prompt",
+                    "kind": "manual",
+                    "createdAt": "2026-09-01T00:00:00.000Z"
+                  },
+                  {
+                    "id": "phase3-v7-checkpoint-02",
+                    "text": "Market prompt revision 02",
+                    "kind": "manual",
+                    "createdAt": "2026-09-01T01:00:00.000Z"
+                  },
+                  {
+                    "id": "phase3-v7-checkpoint-03",
+                    "text": "Market prompt revision 03",
+                    "kind": "manual",
+                    "createdAt": "2026-09-01T02:00:00.000Z"
+                  },
+                  {
+                    "id": "phase3-v7-checkpoint-04",
+                    "text": "Market prompt revision 04",
+                    "kind": "manual",
+                    "createdAt": "2026-09-01T03:00:00.000Z"
+                  },
+                  {
+                    "id": "phase3-v7-checkpoint-05",
+                    "text": "Market prompt revision 05",
+                    "kind": "enhancement_result",
+                    "createdAt": "2026-09-01T04:00:00.000Z",
+                    "enhancementAttemptId": "phase3-v7-enhancement-05",
+                    "plannerModel": "google/gemini-3.8-flash",
+                    "reasoningEffort": "high"
+                  },
+                  {
+                    "id": "phase3-v7-checkpoint-06",
+                    "text": "Market prompt revision 06",
+                    "kind": "manual",
+                    "createdAt": "2026-09-01T05:00:00.000Z"
+                  },
+                  {
+                    "id": "phase3-v7-checkpoint-07",
+                    "text": "Market prompt revision 07",
+                    "kind": "manual",
+                    "createdAt": "2026-09-02T06:00:00.000Z"
+                  },
+                  {
+                    "id": "phase3-v7-checkpoint-08",
+                    "text": "Market prompt revision 08",
+                    "kind": "manual",
+                    "createdAt": "2026-09-02T07:00:00.000Z"
+                  },
+                  {
+                    "id": "phase3-v7-checkpoint-09",
+                    "text": "Market prompt revision 09",
+                    "kind": "manual",
+                    "createdAt": "2026-09-02T08:00:00.000Z"
+                  },
+                  {
+                    "id": "phase3-v7-checkpoint-10",
+                    "text": "Market prompt revision 10",
+                    "kind": "enhancement_result",
+                    "createdAt": "2026-09-02T09:00:00.000Z",
+                    "enhancementAttemptId": "phase3-v7-enhancement-10",
+                    "plannerModel": "google/gemini-3.8-flash",
+                    "reasoningEffort": "high"
+                  },
+                  {
+                    "id": "phase3-v7-checkpoint-11",
+                    "text": "Market prompt revision 11",
+                    "kind": "manual",
+                    "createdAt": "2026-09-02T10:00:00.000Z"
+                  },
+                  {
+                    "id": "phase3-v7-checkpoint-12",
+                    "text": "Market prompt revision 12",
+                    "kind": "manual",
+                    "createdAt": "2026-09-02T11:00:00.000Z"
+                  },
+                  {
+                    "id": "phase3-v7-checkpoint-13",
+                    "text": "Market prompt revision 13",
+                    "kind": "manual",
+                    "createdAt": "2026-09-03T12:00:00.000Z"
+                  },
+                  {
+                    "id": "phase3-v7-checkpoint-14",
+                    "text": "Market prompt revision 14",
+                    "kind": "manual",
+                    "createdAt": "2026-09-03T13:00:00.000Z"
+                  },
+                  {
+                    "id": "phase3-v7-checkpoint-15",
+                    "text": "Market prompt revision 15",
+                    "kind": "enhancement_result",
+                    "createdAt": "2026-09-03T14:00:00.000Z",
+                    "enhancementAttemptId": "phase3-v7-enhancement-15",
+                    "plannerModel": "google/gemini-3.8-flash",
+                    "reasoningEffort": "high"
+                  },
+                  {
+                    "id": "phase3-v7-checkpoint-16",
+                    "text": "Market prompt revision 16",
+                    "kind": "manual",
+                    "createdAt": "2026-09-03T15:00:00.000Z"
+                  },
+                  {
+                    "id": "phase3-v7-checkpoint-17",
+                    "text": "Market prompt revision 17",
+                    "kind": "manual",
+                    "createdAt": "2026-09-03T16:00:00.000Z"
+                  },
+                  {
+                    "id": "phase3-v7-checkpoint-18",
+                    "text": "Market prompt revision 18",
+                    "kind": "manual",
+                    "createdAt": "2026-09-03T17:00:00.000Z"
+                  },
+                  {
+                    "id": "phase3-v7-checkpoint-19",
+                    "text": "Market prompt revision 19",
+                    "kind": "manual",
+                    "createdAt": "2026-09-04T18:00:00.000Z"
+                  },
+                  {
+                    "id": "phase3-v7-checkpoint-20",
+                    "text": "Market prompt revision 20",
+                    "kind": "enhancement_result",
+                    "createdAt": "2026-09-04T19:00:00.000Z",
+                    "enhancementAttemptId": "phase3-v7-enhancement-20",
+                    "plannerModel": "google/gemini-3.8-flash",
+                    "reasoningEffort": "high"
+                  },
+                  {
+                    "id": "phase3-v7-checkpoint-21",
+                    "text": "Market prompt revision 21",
+                    "kind": "manual",
+                    "createdAt": "2026-09-04T20:00:00.000Z"
+                  },
+                  {
+                    "id": "phase3-v7-checkpoint-22",
+                    "text": "Market prompt revision 22",
+                    "kind": "manual",
+                    "createdAt": "2026-09-04T21:00:00.000Z"
+                  },
+                  {
+                    "id": "phase3-v7-checkpoint-23",
+                    "text": "Market prompt revision 23",
+                    "kind": "manual",
+                    "createdAt": "2026-09-04T22:00:00.000Z"
+                  },
+                  {
+                    "id": "phase3-v7-checkpoint-24",
+                    "text": "Market prompt revision 24",
+                    "kind": "manual",
+                    "createdAt": "2026-09-04T23:00:00.000Z"
+                  },
+                  {
+                    "id": "phase3-v7-checkpoint-25",
+                    "text": "Market prompt revision 25",
+                    "kind": "enhancement_result",
+                    "createdAt": "2026-09-05T00:00:00.000Z",
+                    "enhancementAttemptId": "phase3-v7-enhancement-25",
+                    "plannerModel": "google/gemini-3.8-flash",
+                    "reasoningEffort": "high"
+                  },
+                  {
+                    "id": "phase3-v7-checkpoint-26",
+                    "text": "Market prompt revision 26",
+                    "kind": "manual",
+                    "createdAt": "2026-09-05T01:00:00.000Z"
+                  },
+                  {
+                    "id": "phase3-v7-checkpoint-27",
+                    "text": "Market prompt revision 27",
+                    "kind": "manual",
+                    "createdAt": "2026-09-05T02:00:00.000Z"
+                  },
+                  {
+                    "id": "phase3-v7-checkpoint-28",
+                    "text": "Market prompt revision 28",
+                    "kind": "manual",
+                    "createdAt": "2026-09-05T03:00:00.000Z"
+                  },
+                  {
+                    "id": "phase3-v7-checkpoint-29",
+                    "text": "Market prompt revision 29",
+                    "kind": "manual",
+                    "createdAt": "2026-09-05T04:00:00.000Z"
+                  },
+                  {
+                    "id": "phase3-v7-checkpoint-30",
+                    "text": "Market prompt revision 30",
+                    "kind": "enhancement_result",
+                    "createdAt": "2026-09-05T05:00:00.000Z",
+                    "enhancementAttemptId": "phase3-v7-enhancement-30",
+                    "plannerModel": "google/gemini-3.8-flash",
+                    "reasoningEffort": "high"
+                  },
+                  {
+                    "id": "phase3-v7-checkpoint-31",
+                    "text": "Market prompt revision 31",
+                    "kind": "manual",
+                    "createdAt": "2026-09-06T06:00:00.000Z"
+                  },
+                  {
+                    "id": "phase3-v7-checkpoint-32",
+                    "text": "Market prompt revision 32",
+                    "kind": "manual",
+                    "createdAt": "2026-09-06T07:00:00.000Z"
+                  },
+                  {
+                    "id": "phase3-v7-checkpoint-33",
+                    "text": "Market prompt revision 33",
+                    "kind": "manual",
+                    "createdAt": "2026-09-06T08:00:00.000Z"
+                  },
+                  {
+                    "id": "phase3-v7-checkpoint-34",
+                    "text": "Market prompt revision 34",
+                    "kind": "manual",
+                    "createdAt": "2026-09-06T09:00:00.000Z"
+                  },
+                  {
+                    "id": "phase3-v7-checkpoint-35",
+                    "text": "Market prompt revision 35",
+                    "kind": "enhancement_result",
+                    "createdAt": "2026-09-06T10:00:00.000Z",
+                    "enhancementAttemptId": "phase3-v7-enhancement-35",
+                    "plannerModel": "google/gemini-3.8-flash",
+                    "reasoningEffort": "high"
+                  },
+                  {
+                    "id": "phase3-v7-checkpoint-36",
+                    "text": "Market prompt revision 36",
+                    "kind": "manual",
+                    "createdAt": "2026-09-06T11:00:00.000Z"
+                  },
+                  {
+                    "id": "phase3-v7-checkpoint-37",
+                    "text": "Market prompt revision 37",
+                    "kind": "manual",
+                    "createdAt": "2026-09-07T12:00:00.000Z"
+                  },
+                  {
+                    "id": "phase3-v7-checkpoint-38",
+                    "text": "Market prompt revision 38",
+                    "kind": "manual",
+                    "createdAt": "2026-09-07T13:00:00.000Z"
+                  },
+                  {
+                    "id": "phase3-v7-checkpoint-39",
+                    "text": "Market prompt revision 39",
+                    "kind": "manual",
+                    "createdAt": "2026-09-07T14:00:00.000Z"
+                  },
+                  {
+                    "id": "phase3-v7-checkpoint-40",
+                    "text": "Market prompt revision 40",
+                    "kind": "enhancement_result",
+                    "createdAt": "2026-09-07T15:00:00.000Z",
+                    "enhancementAttemptId": "phase3-v7-enhancement-40",
+                    "plannerModel": "google/gemini-3.8-flash",
+                    "reasoningEffort": "high"
+                  },
+                  {
+                    "id": "phase3-v7-checkpoint-41",
+                    "text": "Market prompt revision 41",
+                    "kind": "manual",
+                    "createdAt": "2026-09-07T16:00:00.000Z"
+                  },
+                  {
+                    "id": "phase3-v7-checkpoint-42",
+                    "text": "Market prompt revision 42",
+                    "kind": "manual",
+                    "createdAt": "2026-09-07T17:00:00.000Z"
+                  },
+                  {
+                    "id": "phase3-v7-checkpoint-43",
+                    "text": "Market prompt revision 43",
+                    "kind": "manual",
+                    "createdAt": "2026-09-08T18:00:00.000Z"
+                  },
+                  {
+                    "id": "phase3-v7-checkpoint-44",
+                    "text": "Market prompt revision 44",
+                    "kind": "manual",
+                    "createdAt": "2026-09-08T19:00:00.000Z"
+                  },
+                  {
+                    "id": "phase3-v7-checkpoint-45",
+                    "text": "Market prompt revision 45",
+                    "kind": "enhancement_result",
+                    "createdAt": "2026-09-08T20:00:00.000Z",
+                    "enhancementAttemptId": "phase3-v7-enhancement-45",
+                    "plannerModel": "google/gemini-3.8-flash",
+                    "reasoningEffort": "high"
+                  },
+                  {
+                    "id": "phase3-v7-checkpoint-46",
+                    "text": "Market prompt revision 46",
+                    "kind": "manual",
+                    "createdAt": "2026-09-08T21:00:00.000Z"
+                  },
+                  {
+                    "id": "phase3-v7-checkpoint-47",
+                    "text": "Market prompt revision 47",
+                    "kind": "manual",
+                    "createdAt": "2026-09-08T22:00:00.000Z"
+                  },
+                  {
+                    "id": "phase3-v7-checkpoint-48",
+                    "text": "Market prompt revision 48",
+                    "kind": "manual",
+                    "createdAt": "2026-09-08T23:00:00.000Z"
+                  },
+                  {
+                    "id": "phase3-v7-checkpoint-49",
+                    "text": "Market prompt revision 49",
+                    "kind": "manual",
+                    "createdAt": "2026-09-09T00:00:00.000Z"
+                  },
+                  {
+                    "id": "phase3-v7-checkpoint-50",
+                    "text": "Final approved market prompt",
+                    "kind": "enhancement_result",
+                    "createdAt": "2026-09-09T01:00:00.000Z",
+                    "enhancementAttemptId": "phase3-v7-enhancement-50",
+                    "plannerModel": "google/gemini-3.8-flash",
+                    "reasoningEffort": "high"
+                  }
+                ],
+                "cursor": 49,
+                "enhancementLocked": true,
+                "editRevision": 40
+              },
+              "references": [],
+              "options": {},
+              "providerJson": "",
+              "imageEditMode": false,
+              "imageEditTarget": "",
+              "maskInstructions": "",
+              "maskStrokes": []
+            },
+            "attempts": [],
+            "enhancementAttempts": []
+          }
+        ],
+        "video": [
+          {
+            "id": "phase3-v7-video-thread",
+            "name": "Tracking shot",
+            "mode": "video",
+            "createdAt": "2026-09-03T00:00:00.000Z",
+            "updatedAt": "2026-09-03T00:00:00.000Z",
+            "revision": 1,
+            "optionOverrides": {
+              "duration": 8
+            },
+            "draft": {
+              "prompt": "A slow tracking shot follows the fruit truck.",
+              "promptHistory": {
+                "schemaVersion": 1,
+                "entries": [
+                  {
+                    "id": "phase3-v7-video-prompt",
+                    "text": "A slow tracking shot follows the fruit truck.",
+                    "kind": "manual",
+                    "createdAt": "2026-09-03T00:00:00.000Z"
+                  }
+                ],
+                "cursor": 0,
+                "enhancementLocked": false,
+                "editRevision": 0
+              },
+              "references": [],
+              "options": {},
+              "providerJson": "",
+              "imageEditMode": false,
+              "imageEditTarget": "",
+              "maskInstructions": "",
+              "maskStrokes": []
+            },
+            "attempts": [],
+            "enhancementAttempts": []
+          }
+        ]
+      },
+      "activeThreadIds": {
+        "image": "phase3-v7-image-thread",
+        "video": "phase3-v7-video-thread"
+      },
+      "costLedger": [],
+      "opaqueV7Field": {
+        "preserve": "exactly"
+      }
+    }
+  ]
+}

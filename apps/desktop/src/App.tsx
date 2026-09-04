@@ -1,5 +1,4 @@
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import { Collapsible } from "@base-ui/react/collapsible";
 import { Field } from "@base-ui/react/field";
 import { Toggle } from "@base-ui/react/toggle";
 import { ToggleGroup } from "@base-ui/react/toggle-group";
@@ -20,6 +19,7 @@ import {
 } from "lucide-react";
 import "./App.css";
 import { AttemptHistoryPopover } from "@/components/AttemptHistoryPopover";
+import { PromptEnhancementToolbar } from "@/components/PromptEnhancementToolbar";
 import { AssetLibrary } from "@/components/AssetLibrary";
 import { AssetPreview } from "@/components/AssetPreview";
 import { ConfirmDialog, type Confirmation } from "@/components/ConfirmDialog";
@@ -34,7 +34,8 @@ import { OptionsFields } from "@/components/OptionsFields";
 import { RightPanel } from "@/components/RightPanel";
 import { SessionSidebar } from "@/components/SessionSidebar";
 import { ShortcutHelpDialog } from "@/components/ShortcutHelpDialog";
-import { UpdatePrompt } from "@/components/UpdatePrompt";
+import { UpdatePrompt, type UpdateInstallPhase, type UpdatePreparationContext } from "@/components/UpdatePrompt";
+import { UpdateRecoveryDialog } from "@/components/UpdateRecoveryDialog";
 import { WorkspaceRecoveryDialog } from "@/components/WorkspaceRecoveryDialog";
 import { WorkflowGuide } from "@/components/WorkflowGuide";
 import { Button } from "@/components/ui/button";
@@ -74,6 +75,7 @@ import {
   hydrateImageModelPricing,
   isTauriRuntime,
   loadModels,
+  loadPromptModelAvailability,
   loadImageModelEndpoints,
   modelPriceLabel,
   pollVideo,
@@ -85,7 +87,6 @@ import {
   removeApiKey,
   saveApiKey,
   submitVideo,
-  validateEnhancedPrompt,
   validateApiKeyCandidate,
   validateCredential,
   validateProviderConfiguration,
@@ -143,15 +144,16 @@ import {
   effectiveThreadDraft,
   effectiveThreadModelId,
   exportAssetToDownloads,
+  exportStudioStateJson,
   optionOverridesFromDefaults,
   preferredCatalogModel,
-  applyDefaultEnhancePrompt,
   recordSessionCost,
   applyDirectorPreset as applyDirectorPresetToPlan,
   createDirectorPreset,
   saveDirectorPreset,
   deleteDirectorPreset,
   reconcileManagedAssetIndex,
+  reconcileVerifiedUpdateAssetIndex,
   type NativeManagedAsset,
   type GenerationDraftState,
   type GenerationAttempt,
@@ -166,8 +168,23 @@ import {
   STUDIO_LAST_KNOWN_GOOD_KEY,
   STUDIO_STORAGE_KEY,
 } from "@/studio";
+import {
+  beginPromptEnhancement,
+  canEnhancePrompt,
+  completePromptEnhancement,
+  currentPromptEnhancementArtifact,
+  currentPromptCheckpoint,
+  editPromptHistory,
+  failPromptEnhancement,
+  invalidatePromptEnhancement,
+  promptHistoryCanRedo,
+  promptHistoryCanUndo,
+  redoPromptEnhancement,
+  undoPromptEnhancement,
+} from "@/promptHistory";
+import { PROMPT_MODELS, promptModelDefinition, type PromptModel } from "@/promptModels";
 import { NATIVE_MENU_COMMAND_IDS, commandForKeyboardEvent, type AppCommandId } from "@/shortcuts";
-import { activeDurableOperationCount, reconcilePersistedAttempts, sessionDeletionDecision } from "@/attemptRecovery";
+import { reconcilePersistedAttempts, sessionDeletionDecision } from "@/attemptRecovery";
 import { localizedAttemptAction, localizedAttemptMessage } from "@/attemptPresentation";
 import { buildSupportBundle, localDiagnosticLog, serializeSupportBundle } from "@/diagnostics";
 import { resolveRunnableDirectorCapability } from "@/director/capabilities";
@@ -183,6 +200,15 @@ import {
   isVideoPollDue,
   videoPollRetryDelayMs,
 } from "@/videoPolling";
+import {
+  assertWorkspaceInvariants,
+  assertWorkspaceMutable,
+  inspectActiveUpdateOperations,
+  migrateStudioForUpdate,
+  type MutationLock,
+  type UpdateMigrationStep,
+  type WorkspaceInvariantReport,
+} from "@/updateMigration";
 
 const SettingsDialog = lazy(() => import("@/components/SettingsDialog").then((module) => ({ default: module.SettingsDialog })));
 const ImageEditPanel = lazy(() => import("@/components/EditMediaPanel").then((module) => ({ default: module.ImageEditPanel })));
@@ -231,9 +257,16 @@ const SESSION_SIDEBAR_OPEN_KEY = "fruit-truck.session-sidebar.open";
 const SESSION_SIDEBAR_WIDTH_KEY = "fruit-truck.session-sidebar.width";
 const RIGHT_PANEL_OPEN_KEY = "fruit-truck.right-panel.open";
 const ONBOARDING_COMPLETE_KEY = "fruit-truck.onboarding.complete.v1";
+const PROMPT_ENHANCEMENT_NOTICE_KEY = "fruit-truck.prompt-enhancement-notice.v1";
 const DEFAULT_SESSION_SIDEBAR_WIDTH = 256;
 const SESSION_BUDGET_KEY = "fruit-truck.session-budget-usd.v1";
 const DIAGNOSTIC_LOG = localDiagnosticLog();
+
+type PlannerAvailabilityStatus = "checking" | "available" | "unavailable" | "unknown";
+
+function plannerAvailabilityRecord(status: PlannerAvailabilityStatus): Record<PromptModel, PlannerAvailabilityStatus> {
+  return Object.fromEntries(PROMPT_MODELS.map((model) => [model.id, status])) as Record<PromptModel, PlannerAvailabilityStatus>;
+}
 
 type NativeLoadedWorkspace = {
   payload: unknown;
@@ -241,6 +274,77 @@ type NativeLoadedWorkspace = {
   schemaVersion: number;
   checksum: string;
   recovered: boolean;
+};
+
+type WorkspaceBootState = "loading" | "migrating" | "verifying" | "ready" | "recovery_required";
+
+type UpdateTransactionPhase =
+  | "preparing"
+  | "snapshot_ready"
+  | "downloading"
+  | "installing"
+  | "awaiting_restart"
+  | "verifying"
+  | "complete"
+  | "recovery_required";
+
+type NativeUpdateTransaction = {
+  schemaVersion: 1;
+  id: string;
+  fromAppVersion: string;
+  toAppVersion: string;
+  fromStudioSchema: number;
+  targetStudioSchema: number;
+  phase: UpdateTransactionPhase;
+  createdAt: string;
+  updatedAt: string;
+  snapshotPath: string;
+  snapshotChecksum: string;
+  assetManifestPath: string;
+  assetManifestChecksum: string;
+  migratedWorkspace?: { studioSchema: number; payloadChecksum: string };
+  failure?: { code: string; message: string };
+};
+
+type NativeAssetVerificationReport = {
+  schemaVersion: 1;
+  transactionId: string;
+  valid: boolean;
+  totalEntries: number;
+  verifiedEntries: number;
+  missingEntries: number;
+  changedEntries: number;
+  issues: Array<{ assetId: string; relativePath: string; code: string; message: string }>;
+};
+
+type NativeUpdatePreparationProgress = {
+  schemaVersion: 1;
+  transactionId: string;
+  stage: "hashing_assets";
+  assetId?: string;
+  relativePath?: string;
+  assetIndex: number;
+  assetCount: number;
+  assetBytesHashed: number;
+  assetByteSize: number;
+  totalBytesHashed: number;
+  totalByteSize: number;
+};
+
+type UpdateRecoveryState = {
+  transaction: NativeUpdateTransaction;
+  code: string;
+  message: string;
+  invariants?: WorkspaceInvariantReport;
+  assetReport?: NativeAssetVerificationReport;
+  migrationSteps?: UpdateMigrationStep[];
+};
+
+type PendingUpdateCompletion = {
+  transaction: NativeUpdateTransaction;
+  invariants: WorkspaceInvariantReport;
+  assetReport: NativeAssetVerificationReport;
+  migrationSteps: UpdateMigrationStep[];
 };
 
 function memoryStudioStorage(payload?: unknown): StudioStorage {
@@ -255,12 +359,8 @@ function memoryStudioStorage(payload?: unknown): StudioStorage {
   };
 }
 
-function persistedStudioPayload(state: StudioState): unknown {
-  const storage = memoryStudioStorage();
-  saveStudioState(state, { storage });
-  const serialized = storage.getItem(STUDIO_STORAGE_KEY);
-  if (!serialized) throw new Error("The workspace state could not be serialized.");
-  return JSON.parse(serialized) as unknown;
+function losslessStudioPayload(state: StudioState): unknown {
+  return JSON.parse(exportStudioStateJson(state)) as unknown;
 }
 
 type PreparedGenerationRequest = {
@@ -345,11 +445,7 @@ function preparationKeyFor(
     revision: thread.revision,
     model,
     prompt: draft.prompt,
-    enhancePrompt: draft.enhancePrompt,
-    enhancedPrompt: draft.enhancedPrompt,
-    enhancedPromptDirty: draft.enhancedPromptDirty,
-    enhancementSignature: draft.enhancementArtifact?.signature,
-    enhancementNegativePrompt: draft.enhancementArtifact?.negativePrompt,
+    promptHistory: draft.promptHistory,
     options: draft.options,
     providerJson: draft.providerJson,
     references: draft.references.map((reference) => ({
@@ -492,11 +588,6 @@ function hasRunnableInstructions(mode: GenerationMode, draft: GenerationDraftSta
   });
 }
 
-function enhancementOriginalIntent(mode: GenerationMode, draft: GenerationDraftState) {
-  const hasMask = mode === "image" && draft.imageEditMode && draft.maskStrokes.length > 0;
-  return [draft.prompt.trim(), hasMask ? draft.maskInstructions.trim() : ""].filter(Boolean).join("\n");
-}
-
 function promptReferenceInputs(session: StudioSession, draft: GenerationDraftState): PromptReferenceInput[] {
   const assets = new Map(session.assets.map((asset) => [asset.id, asset]));
   return draft.references.flatMap((reference) => {
@@ -510,6 +601,42 @@ function promptReferenceInputs(session: StudioSession, draft: GenerationDraftSta
       fingerprint: asset.fingerprint,
       durationSeconds: asset.duration,
     }] : [];
+  });
+}
+
+function promptEnhancementDirectorSummary(plan: DirectorPlan | undefined): string | undefined {
+  if (!plan) return undefined;
+  const subjectLabels = new Map(plan.subjects.map((subject) => [subject.id, subject.label]));
+  return JSON.stringify({
+    enabled: plan.enabled,
+    camera: {
+      sensor: plan.cameraRig.sensorPreset,
+      lens: plan.cameraRig.lensPreset,
+      focalLengthMm: plan.cameraRig.focalLengthMm,
+      aperture: plan.cameraRig.aperture,
+      focusSubject: plan.cameraRig.focusSubjectId ? subjectLabels.get(plan.cameraRig.focusSubjectId) : undefined,
+      aspectRatio: plan.cameraRig.aspectRatio,
+    },
+    subjects: plan.subjects.map((subject) => ({ label: subject.label, region: subject.region })),
+    motions: plan.motions.map((motion) => ({
+      target: motion.targetType === "subject" && motion.targetId ? subjectLabels.get(motion.targetId) ?? "subject" : motion.targetType,
+      kind: motion.kind,
+      path: motion.path,
+      direction: motion.direction,
+      intensity: motion.intensity,
+      start: motion.start,
+      end: motion.end,
+      easing: motion.easing,
+      order: motion.order,
+      action: motion.actionLabel,
+    })),
+    keyframes: plan.keyframes.map((keyframe) => ({ role: keyframe.role, time: keyframe.time })),
+    shots: plan.shots.map((shot) => ({
+      order: shot.order,
+      durationSeconds: shot.durationSeconds,
+      prompt: shot.promptFragment,
+      speed: shot.speed,
+    })),
   });
 }
 
@@ -571,7 +698,11 @@ function enhancementContext(
   draft: GenerationDraftState,
   targetModel: GenerationModel,
   plannerModel: string,
+  prompt = draft.prompt,
 ) {
+  const directorContext = thread.mode === "video"
+    ? promptEnhancementDirectorSummary(draft.directorPlan)
+    : undefined;
   const target: PromptTarget = {
     id: targetModel.id,
     name: targetModel.name,
@@ -591,6 +722,7 @@ function enhancementContext(
         resolutions: (targetModel as VideoModel).supported_resolutions,
         aspectRatios: (targetModel as VideoModel).supported_aspect_ratios,
         generateAudio: (targetModel as VideoModel).generate_audio,
+        directorContext,
       },
   };
   const profile = promptProfileForModel(thread.mode, targetModel.id);
@@ -606,22 +738,45 @@ function enhancementContext(
     plannerModel,
     promptVersion: PROMPT_PLANNER_VERSION,
     promptProfile: { id: profile.id, version: profile.version },
-    target,
+    target: thread.mode === "video"
+      ? {
+        ...target,
+        capabilities: {
+          ...target.capabilities,
+          // Hash the complete local Director plan without sending its internal
+          // asset identifiers to the planner. The planner still receives only
+          // the redacted directorContext summary above.
+          directorPlanSignature: draft.directorPlan ?? null,
+        },
+      }
+      : target,
     workflow,
-    prompt: draft.prompt,
+    prompt,
     maskInstructions: hasMask ? draft.maskInstructions : undefined,
     editTarget: draft.imageEditMode ? draft.imageEditTarget : undefined,
     maskState: hasMask ? draft.maskStrokes : undefined,
     references,
   });
-  return { references, hasMask, workflow, signature, target };
+  return { references, hasMask, workflow, signature, target, directorContext };
 }
 
 export default function App() {
   const { language, t } = useI18n();
-  const [studio, setStudio] = useState(() => reconcilePersistedAttempts(loadStudioState()).state);
+  const [studio, setStudio] = useState(() => reconcilePersistedAttempts(loadStudioState(
+    isTauriRuntime() ? { storage: memoryStudioStorage() } : {},
+  )).state);
   const [nativeWorkspaceReady, setNativeWorkspaceReady] = useState(() => !isTauriRuntime());
+  const [workspaceBootState, setWorkspaceBootState] = useState<WorkspaceBootState>(() => isTauriRuntime() ? "loading" : "ready");
+  const [updateMutationLock, setUpdateMutationLock] = useState<MutationLock>({ active: false });
+  const [updateRecovery, setUpdateRecovery] = useState<UpdateRecoveryState | null>(null);
+  const [pendingUpdateCompletion, setPendingUpdateCompletion] = useState<PendingUpdateCompletion | null>(null);
+  const [managedReconciliationRetry, setManagedReconciliationRetry] = useState(0);
+  const [updateRetentionCleanupEligible, setUpdateRetentionCleanupEligible] = useState(false);
+  const [updateRetentionCleanupRetry, setUpdateRetentionCleanupRetry] = useState(0);
   const [catalogs, setCatalogs] = useState<Record<GenerationMode, GenerationModel[]>>({ image: [], video: [] });
+  const [promptModelAvailability, setPromptModelAvailability] = useState<Record<PromptModel, PlannerAvailabilityStatus>>(
+    () => plannerAvailabilityRecord("unknown"),
+  );
   const [catalogLoading, setCatalogLoading] = useState(false);
   const [catalogError, setCatalogError] = useState<string | null>(null);
   const [catalogErrors, setCatalogErrors] = useState<Partial<Record<GenerationMode, string>>>({});
@@ -687,6 +842,8 @@ export default function App() {
   const resultHandoffTimer = useRef<number | undefined>(undefined);
   const resultCooldownTimer = useRef<number | undefined>(undefined);
   const assetHighlightTimer = useRef<number | undefined>(undefined);
+  const managedReconciliationRetryTimer = useRef<number | undefined>(undefined);
+  const updateRetentionCleanupRetryTimer = useRef<number | undefined>(undefined);
   const studioRef = useRef(studio);
   studioRef.current = studio;
   const migratingAssetIds = useRef(new Set<string>());
@@ -697,6 +854,49 @@ export default function App() {
   const nativeSaveErrorRef = useRef<unknown>(undefined);
   const nativeSnapshotSourceRef = useRef<"current" | "bak1" | "bak2">("current");
   const managedReconciliationRanRef = useRef(false);
+  const managedReconciliationPendingRef = useRef(0);
+  const updateRetentionCleanupRanRef = useRef(false);
+  const pendingWorkspaceMutationRef = useRef(0);
+  const updateMutationLockRef = useRef<MutationLock>(updateMutationLock);
+  const pendingUpdateTransactionRef = useRef<NativeUpdateTransaction | null>(null);
+  const completingUpdateTransactionRef = useRef<string | null>(null);
+  const updatePreparationPromiseRef = useRef<Promise<void> | null>(null);
+  updateMutationLockRef.current = updateMutationLock;
+
+  const replaceUpdateMutationLock = useCallback((lock: MutationLock) => {
+    updateMutationLockRef.current = lock;
+    setUpdateMutationLock(lock);
+  }, []);
+
+  const assertMutable = useCallback(() => {
+    assertWorkspaceMutable(updateMutationLockRef.current);
+  }, []);
+
+  const withPendingWorkspaceMutation = useCallback(async <T,>(operation: () => Promise<T>): Promise<T> => {
+    assertWorkspaceMutable(updateMutationLockRef.current);
+    pendingWorkspaceMutationRef.current += 1;
+    try {
+      return await operation();
+    } finally {
+      pendingWorkspaceMutationRef.current = Math.max(0, pendingWorkspaceMutationRef.current - 1);
+    }
+  }, []);
+
+  const scheduleManagedReconciliationRetry = useCallback(() => {
+    if (managedReconciliationRetryTimer.current !== undefined) return;
+    managedReconciliationRetryTimer.current = window.setTimeout(() => {
+      managedReconciliationRetryTimer.current = undefined;
+      setManagedReconciliationRetry((current) => current + 1);
+    }, 1_500);
+  }, []);
+
+  const scheduleUpdateRetentionCleanupRetry = useCallback(() => {
+    if (updateRetentionCleanupRetryTimer.current !== undefined) return;
+    updateRetentionCleanupRetryTimer.current = window.setTimeout(() => {
+      updateRetentionCleanupRetryTimer.current = undefined;
+      setUpdateRetentionCleanupRetry((current) => current + 1);
+    }, 5_000);
+  }, []);
 
   const session = studio.sessions.find((item) => item.id === studio.activeSessionId) ?? studio.sessions[0];
   const mode = session.mode;
@@ -810,8 +1010,25 @@ export default function App() {
   const hasActiveAttempt = Boolean(activeAttempt);
   const generating = executingThreadIds.has(thread.id) || Boolean(activeAttempt && activeAttempt.status !== "enhancing");
   const enhancing = enhancingThreadIds.has(thread.id) || activeAttempt?.status === "enhancing";
+  const selectedPromptModel = promptModelDefinition(studio.promptModel);
+  const selectedPromptModelAvailability = promptModelAvailability[studio.promptModel];
+  const promptEnhancementCanUndo = !enhancing && promptHistoryCanUndo(draft.promptHistory, draft.prompt);
+  const promptEnhancementCanRedo = !enhancing && promptHistoryCanRedo(draft.promptHistory, draft.prompt);
+  const promptEnhancementResultReady = !draft.promptHistory.enhancementLocked
+    && draft.promptHistory.entries[draft.promptHistory.cursor + 1]?.kind === "enhancement_result";
+  const promptEnhancementEnabled = canEnhancePrompt({
+    prompt: draft.prompt,
+    history: draft.promptHistory,
+    enhancing,
+    plannerAvailable: selectedPromptModelAvailability === "available",
+    generationModelAvailable: Boolean(selectedModel),
+  });
 
   useEffect(() => {
+    if (workspaceBootState !== "ready") {
+      attemptStatuses.current = null;
+      return;
+    }
     const previous = attemptStatuses.current;
     const next = new Map<string, GenerationAttempt["status"]>();
     const completed: GenerationResultNotice[] = [];
@@ -866,7 +1083,7 @@ export default function App() {
         ? `${failure.threadName}: ${failure.message}`
         : `${t("backgroundGenerationFailed", { session: failure.sessionName, thread: failure.threadName })}: ${failure.message}`);
     }
-  }, [studio, t]);
+  }, [studio, t, workspaceBootState]);
 
   useEffect(() => {
     if (resultQueue.length && !resultDialogOpen && !resultHandingOff && !resultQueuePaused && !otherDialogOpen) setResultDialogOpen(true);
@@ -897,6 +1114,8 @@ export default function App() {
     if (resultHandoffTimer.current) window.clearTimeout(resultHandoffTimer.current);
     if (resultCooldownTimer.current) window.clearTimeout(resultCooldownTimer.current);
     if (assetHighlightTimer.current) window.clearTimeout(assetHighlightTimer.current);
+    if (managedReconciliationRetryTimer.current) window.clearTimeout(managedReconciliationRetryTimer.current);
+    if (updateRetentionCleanupRetryTimer.current) window.clearTimeout(updateRetentionCleanupRetryTimer.current);
   }, []);
 
   useEffect(() => {
@@ -904,6 +1123,7 @@ export default function App() {
   }, [mode, selectedId, studio.activeSessionId, thread.id]);
 
   const patchSession = useCallback((id: string, update: (current: StudioSession) => StudioSession) => {
+    assertWorkspaceMutable(updateMutationLockRef.current);
     const next = {
       ...studioRef.current,
       sessions: studioRef.current.sessions.map((item) => {
@@ -917,6 +1137,7 @@ export default function App() {
   }, []);
 
   const commitStudioNow = useCallback((update: (current: StudioState) => StudioState) => {
+    assertWorkspaceMutable(updateMutationLockRef.current);
     const next = update(studioRef.current);
     studioRef.current = next;
     setStudio(next);
@@ -928,6 +1149,7 @@ export default function App() {
   }, [patchSession, studio.activeSessionId]);
 
   const patchDraft = useCallback((patch: Partial<GenerationDraftState>) => {
+    assertWorkspaceMutable(updateMutationLockRef.current);
     patchActive((current) => {
       const currentMode = current.mode;
       const targetId = current.activeThreadIds[currentMode];
@@ -943,14 +1165,28 @@ export default function App() {
               ? patch.providerJson === current.generationDefaults.providerJson[item.mode] ? undefined : patch.providerJson
               : item.providerJsonOverride;
             const { options: _options, providerJson: _providerJson, ...draftPatch } = patch;
-            const normalizedDraftPatch = draftPatch.enhancedPrompt === ""
-              ? { ...draftPatch, enhancedVisualCount: 0, enhancementArtifact: undefined }
-              : draftPatch;
+            const contextChanged = [
+              "references",
+              "options",
+              "providerJson",
+              "imageEditMode",
+              "imageEditTarget",
+              "maskInstructions",
+              "maskStrokes",
+              "directorPlan",
+            ].some((key) => key in patch);
+            const promptChanged = draftPatch.prompt !== undefined && draftPatch.prompt !== item.draft.prompt;
+            const promptHistory = draftPatch.promptHistory
+              ?? (promptChanged
+                ? editPromptHistory(item.draft.promptHistory, item.draft.prompt)
+                : contextChanged
+                  ? invalidatePromptEnhancement(item.draft.promptHistory)
+                  : item.draft.promptHistory);
             return {
               ...item,
               optionOverrides,
               providerJsonOverride,
-              draft: { ...item.draft, ...normalizedDraftPatch },
+              draft: { ...item.draft, ...draftPatch, promptHistory },
               revision: item.revision + 1,
               updatedAt: new Date().toISOString(),
             };
@@ -978,13 +1214,14 @@ export default function App() {
   }, []);
 
   const openDirector = useCallback(() => {
+    assertMutable();
     if (!draft.directorPlan) {
       const firstFrameAssetId = draft.references.find((reference) => reference.role === "first_frame")?.assetId;
       const lastFrameAssetId = draft.references.find((reference) => reference.role === "last_frame")?.assetId;
       patchDraft({ directorPlan: createDirectorPlanForFrames(firstFrameAssetId, lastFrameAssetId) });
     }
     setDirectorOpen(true);
-  }, [createDirectorPlanForFrames, draft.directorPlan, draft.references, patchDraft]);
+  }, [assertMutable, createDirectorPlanForFrames, draft.directorPlan, draft.references, patchDraft]);
 
   const recordGenerationCost = useCallback((
     sessionId: string,
@@ -1043,7 +1280,7 @@ export default function App() {
       return;
     }
     if (!nativeWorkspaceReady) throw new Error("The native workspace is still loading.");
-    const payload = persistedStudioPayload(state);
+    const payload = losslessStudioPayload(state);
     nativeSavePendingRef.current += 1;
     const queued = nativeSaveQueueRef.current
       .catch(() => undefined)
@@ -1060,10 +1297,163 @@ export default function App() {
     await tracked;
   }, [nativeWorkspaceReady]);
 
+  const requireUpdateRecovery = useCallback(async (
+    transaction: NativeUpdateTransaction,
+    code: string,
+    error: unknown,
+    details: Pick<UpdateRecoveryState, "invariants" | "assetReport" | "migrationSteps"> = {},
+  ) => {
+    replaceUpdateMutationLock({ active: true, reason: "update", transactionId: transaction.id });
+    const message = errorMessage(error);
+    let failedTransaction = transaction;
+    try {
+      failedTransaction = await invoke<NativeUpdateTransaction>("fail_update_transaction", {
+        transactionId: transaction.id,
+        code,
+        message,
+      });
+    } catch (failureWriteError) {
+      DIAGNOSTIC_LOG.append({
+        level: "error",
+        event: "update.failure_marker_write_failed",
+        details: { transactionId: transaction.id, code, error: errorMessage(failureWriteError) },
+      });
+    }
+    pendingUpdateTransactionRef.current = failedTransaction;
+    setUpdateRecovery({ transaction: failedTransaction, code, message, ...details });
+    setNativeWorkspaceReady(false);
+    setWorkspaceBootState("recovery_required");
+  }, [replaceUpdateMutationLock]);
+
+  const verifyPendingNativeUpdate = useCallback(async (transaction: NativeUpdateTransaction) => {
+    let invariants: WorkspaceInvariantReport | undefined;
+    let assetReport: NativeAssetVerificationReport | undefined;
+    let migrationSteps: UpdateMigrationStep[] | undefined;
+    try {
+      pendingUpdateTransactionRef.current = transaction;
+      replaceUpdateMutationLock({ active: true, reason: "update", transactionId: transaction.id });
+      setPendingUpdateCompletion(null);
+      setUpdateRetentionCleanupEligible(false);
+      setUpdateRecovery(null);
+      setNativeWorkspaceReady(false);
+      setWorkspaceBootState("migrating");
+      const snapshot = await invoke<NativeLoadedWorkspace>("load_pre_update_snapshot", {
+        transactionId: transaction.id,
+      });
+      const snapshotMigration = migrateStudioForUpdate(snapshot.payload);
+      if (snapshotMigration.state.schemaVersion !== transaction.targetStudioSchema) {
+        throw new Error("The migrated workspace does not match the update target schema.");
+      }
+      invariants = snapshotMigration.invariants;
+      migrationSteps = snapshotMigration.migration.steps;
+      setWorkspaceBootState("verifying");
+      assetReport = await invoke<NativeAssetVerificationReport>("verify_update_assets", {
+        transactionId: transaction.id,
+      });
+      if (!assetReport.valid) {
+        const firstIssue = assetReport.issues[0];
+        throw new Error(firstIssue?.message ?? "Managed asset verification failed.");
+      }
+
+      invariants = assertWorkspaceInvariants(snapshot.payload, snapshotMigration.state);
+      await invoke("save_verified_update_workspace", {
+        transactionId: transaction.id,
+        payload: losslessStudioPayload(snapshotMigration.state),
+      });
+
+      const nativeAssetRecords = await invoke<NativeManagedAsset[]>("scan_managed_assets");
+      const verifiedAssetIndex = reconcileVerifiedUpdateAssetIndex(
+        snapshotMigration.state,
+        nativeAssetRecords,
+      );
+      if (verifiedAssetIndex.missingCount > 0) {
+        throw new Error(`Managed asset presence scan is missing ${verifiedAssetIndex.missingCount} verified file(s).`);
+      }
+      managedReconciliationRanRef.current = true;
+
+      const recoveredAttempts = reconcilePersistedAttempts(snapshotMigration.state, transaction.createdAt).state;
+      invariants = assertWorkspaceInvariants(snapshot.payload, recoveredAttempts);
+      studioRef.current = recoveredAttempts;
+      setStudio(recoveredAttempts);
+      setUpdateRecovery(null);
+      setNativeWorkspaceReady(true);
+      setWorkspaceBootState("ready");
+      setPendingUpdateCompletion({ transaction, invariants, assetReport, migrationSteps });
+    } catch (error) {
+      setPendingUpdateCompletion(null);
+      await requireUpdateRecovery(
+        transaction,
+        assetReport && !assetReport.valid
+          ? "asset_verification_failed"
+          : "post_update_verification_failed",
+        error,
+        { invariants, assetReport, migrationSteps },
+      );
+    }
+  }, [replaceUpdateMutationLock, requireUpdateRecovery]);
+
+  useEffect(() => {
+    const completion = pendingUpdateCompletion;
+    if (!completion || completingUpdateTransactionRef.current === completion.transaction.id) return;
+    completingUpdateTransactionRef.current = completion.transaction.id;
+    void invoke("complete_update_transaction", { transactionId: completion.transaction.id }).then(() => {
+      DIAGNOSTIC_LOG.append({
+        level: "info",
+        event: "update.verification_complete",
+        details: {
+          transactionId: completion.transaction.id,
+          fromAppVersion: completion.transaction.fromAppVersion,
+          toAppVersion: completion.transaction.toAppVersion,
+          fromStudioSchema: completion.transaction.fromStudioSchema,
+          targetStudioSchema: completion.transaction.targetStudioSchema,
+          finalPhase: "complete",
+          snapshotChecksum: completion.transaction.snapshotChecksum,
+          assetManifestChecksum: completion.transaction.assetManifestChecksum,
+          invariants: completion.invariants,
+          assetVerification: {
+            totalEntries: completion.assetReport.totalEntries,
+            verifiedEntries: completion.assetReport.verifiedEntries,
+            missingEntries: completion.assetReport.missingEntries,
+            changedEntries: completion.assetReport.changedEntries,
+            errorCount: completion.assetReport.issues.length,
+          },
+          migrationSteps: completion.migrationSteps,
+        },
+      });
+      pendingUpdateTransactionRef.current = null;
+      setPendingUpdateCompletion(null);
+      setUpdateRecovery(null);
+      setUpdateRetentionCleanupEligible(true);
+      replaceUpdateMutationLock({ active: false });
+    }).catch(async (error) => {
+      setPendingUpdateCompletion(null);
+      DIAGNOSTIC_LOG.append({
+        level: "error",
+        event: "update.completion_marker_failed",
+        details: { transactionId: completion.transaction.id, error: errorMessage(error) },
+      });
+      await requireUpdateRecovery(
+        completion.transaction,
+        "completion_marker_failed",
+        error,
+        {
+          invariants: completion.invariants,
+          assetReport: completion.assetReport,
+          migrationSteps: completion.migrationSteps,
+        },
+      );
+    }).finally(() => {
+      if (completingUpdateTransactionRef.current === completion.transaction.id) {
+        completingUpdateTransactionRef.current = null;
+      }
+    });
+  }, [pendingUpdateCompletion, replaceUpdateMutationLock, requireUpdateRecovery]);
+
   useEffect(() => {
     if (!isTauriRuntime()) return;
     let cancelled = false;
-    void invoke<NativeLoadedWorkspace | null>("load_workspace_state").then((loaded) => {
+    const loadRegularWorkspace = async () => {
+      const loaded = await invoke<NativeLoadedWorkspace | null>("load_workspace_state");
       if (cancelled) return;
       if (loaded) {
         nativeSnapshotSourceRef.current = loaded.source.endsWith(".bak1")
@@ -1084,8 +1474,52 @@ export default function App() {
         } : reconciled);
       }
       setNativeWorkspaceReady(true);
-    }).catch((error) => {
+      setWorkspaceBootState("ready");
+    };
+    void (async () => {
+      const pending = await invoke<NativeUpdateTransaction | null>("load_pending_update_transaction");
       if (cancelled) return;
+      if (pending) {
+        pendingUpdateTransactionRef.current = pending;
+        replaceUpdateMutationLock({ active: true, reason: "update", transactionId: pending.id });
+        const { getVersion } = await import("@tauri-apps/api/app");
+        const runningVersion = await getVersion();
+        if (runningVersion === pending.toAppVersion) {
+          await verifyPendingNativeUpdate(pending);
+          return;
+        }
+        if (runningVersion === pending.fromAppVersion && ["preparing", "snapshot_ready", "downloading"].includes(pending.phase)) {
+          await invoke("abort_update_transaction", { transactionId: pending.id });
+          pendingUpdateTransactionRef.current = null;
+          replaceUpdateMutationLock({ active: false });
+        } else if (runningVersion === pending.fromAppVersion && ["installing", "awaiting_restart", "recovery_required"].includes(pending.phase)) {
+          try {
+            await invoke<NativeUpdateTransaction>("abandon_update_transaction_after_source_relaunch", {
+              transactionId: pending.id,
+            });
+            pendingUpdateTransactionRef.current = null;
+            replaceUpdateMutationLock({ active: false });
+          } catch (error) {
+            await requireUpdateRecovery(pending, "source_relaunch_abandon_failed", error);
+            return;
+          }
+        } else {
+          await requireUpdateRecovery(
+            pending,
+            "app_version_mismatch",
+            new Error(`Expected app version ${pending.toAppVersion} after the update, but found ${runningVersion}.`),
+          );
+          return;
+        }
+      }
+      await loadRegularWorkspace();
+    })().catch((error) => {
+      if (cancelled) return;
+      const pending = pendingUpdateTransactionRef.current;
+      if (pending) {
+        void requireUpdateRecovery(pending, "update_boot_failed", error);
+        return;
+      }
       setStudio((current) => ({
         ...current,
         recovery: {
@@ -1100,21 +1534,62 @@ export default function App() {
         },
       }));
       setNativeWorkspaceReady(true);
+      setWorkspaceBootState("ready");
     });
     return () => { cancelled = true; };
-  }, []);
+  }, [replaceUpdateMutationLock, requireUpdateRecovery, verifyPendingNativeUpdate]);
 
   useEffect(() => {
-    if (!isTauriRuntime() || !nativeWorkspaceReady || studio.recovery?.requiresUserAction || managedReconciliationRanRef.current) return;
+    if (!isTauriRuntime()
+      || !nativeWorkspaceReady
+      || workspaceBootState !== "ready"
+      || updateMutationLock.active
+      || updateRecovery
+      || !updateRetentionCleanupEligible
+      || pendingUpdateTransactionRef.current
+      || studio.recovery?.requiresUserAction
+      || updateRetentionCleanupRanRef.current) return;
+    updateRetentionCleanupRanRef.current = true;
+    void invoke<number>("cleanup_completed_update_snapshots").catch((error) => {
+      updateRetentionCleanupRanRef.current = false;
+      scheduleUpdateRetentionCleanupRetry();
+      DIAGNOSTIC_LOG.append({
+        level: "warn",
+        event: "update.retention_cleanup_failed",
+        details: { error: errorMessage(error) },
+      });
+    });
+  }, [
+    nativeWorkspaceReady,
+    scheduleUpdateRetentionCleanupRetry,
+    studio.recovery?.requiresUserAction,
+    updateMutationLock.active,
+    updateRecovery,
+    updateRetentionCleanupEligible,
+    updateRetentionCleanupRetry,
+    workspaceBootState,
+  ]);
+
+  useEffect(() => {
+    if (!isTauriRuntime()
+      || !nativeWorkspaceReady
+      || workspaceBootState !== "ready"
+      || updateMutationLock.active
+      || studio.recovery?.requiresUserAction
+      || managedReconciliationRanRef.current) return;
     managedReconciliationRanRef.current = true;
+    managedReconciliationPendingRef.current += 1;
     void invoke<NativeManagedAsset[]>("scan_managed_assets").then(async (records) => {
       const scanned = await managedDroppedAssets(records);
       const reconciliation = reconcileManagedAssetIndex(studioRef.current, scanned);
       const changed = reconciliation.missingCount + reconciliation.relinkedCount + reconciliation.recoveredCount > 0;
+      if (updateMutationLockRef.current.active) {
+        throw new Error("Managed media reconciliation paused while the workspace is locked.");
+      }
       if (changed) {
+        await persistWorkspace(reconciliation.state);
         studioRef.current = reconciliation.state;
         setStudio(reconciliation.state);
-        await persistWorkspace(reconciliation.state);
         toast.info(t("managedMediaReconciled", {
           missing: reconciliation.missingCount,
           relinked: reconciliation.relinkedCount,
@@ -1123,16 +1598,20 @@ export default function App() {
       }
       const cleanup = await Promise.allSettled(reconciliation.duplicateFiles.map(deleteManagedAsset));
       for (const outcome of cleanup) {
-        if (outcome.status === "rejected") console.warn("Could not clean a duplicate managed file", outcome.reason);
+        if (outcome.status === "rejected") throw outcome.reason;
       }
     }).catch((error) => {
+      managedReconciliationRanRef.current = false;
+      scheduleManagedReconciliationRetry();
       DIAGNOSTIC_LOG.append({ level: "error", event: "managed-media.reconcile", details: { error: errorMessage(error) } });
       toast.error(errorMessage(error));
+    }).finally(() => {
+      managedReconciliationPendingRef.current = Math.max(0, managedReconciliationPendingRef.current - 1);
     });
-  }, [nativeWorkspaceReady, persistWorkspace, studio.recovery?.requiresUserAction, t]);
+  }, [managedReconciliationRetry, nativeWorkspaceReady, persistWorkspace, scheduleManagedReconciliationRetry, studio.recovery?.requiresUserAction, t, updateMutationLock.active, workspaceBootState]);
 
   useEffect(() => {
-    if (!nativeWorkspaceReady) return;
+    if (!nativeWorkspaceReady || workspaceBootState !== "ready" || updateMutationLock.active) return;
     if (studio.recovery?.requiresUserAction) return;
     if (studio.sessions.some((item) => item.assets.some((asset) => asset.externalUrl?.startsWith("data:")))) {
       return;
@@ -1147,10 +1626,10 @@ export default function App() {
       }
     }, 120);
     return () => window.clearTimeout(timer);
-  }, [nativeWorkspaceReady, persistWorkspace, studio]);
+  }, [nativeWorkspaceReady, persistWorkspace, studio, updateMutationLock.active, workspaceBootState]);
 
   useEffect(() => {
-    if (!isTauriRuntime()) return;
+    if (!isTauriRuntime() || workspaceBootState !== "ready" || updateMutationLock.active) return;
     const candidate = studio.sessions.flatMap((candidateSession) =>
       candidateSession.assets
         .filter((asset) =>
@@ -1168,10 +1647,11 @@ export default function App() {
         assets: current.assets.map((asset) => asset.id === migrated.id ? migrated : asset),
       }));
     }).catch((error) => {
-      migratingAssetIds.current.delete(candidate.asset.id);
       console.warn("Legacy asset migration failed; retaining IndexedDB fallback", error);
+    }).finally(() => {
+      migratingAssetIds.current.delete(candidate.asset.id);
     });
-  }, [patchSession, studio]);
+  }, [patchSession, studio, updateMutationLock.active, workspaceBootState]);
 
   useEffect(() => {
     localStorage.setItem(SESSION_SIDEBAR_OPEN_KEY, String(sessionSidebarOpen));
@@ -1225,16 +1705,17 @@ export default function App() {
   }, [validateSavedCredential]);
 
   const refreshCatalog = useCallback(async () => {
-    if (connectionState !== "connected") return;
+    if (connectionState !== "connected" || workspaceBootState !== "ready" || updateMutationLockRef.current.active) return;
     const hydrationRevision = ++catalogHydrationRevision.current;
     setCatalogLoading(true);
     setCatalogError(null);
     setCatalogErrors({});
     setImageEndpoints({});
+    setPromptModelAvailability(plannerAvailabilityRecord("checking"));
     const applyCatalog = (catalogMode: GenerationMode, candidates: GenerationModel[]) => {
       const preferred = preferredCatalogModel(catalogMode, candidates);
       setCatalogs((current) => ({ ...current, [catalogMode]: candidates }));
-      setStudio((current) => ({
+      if (!updateMutationLockRef.current.active) setStudio((current) => ({
         ...current,
         sessions: current.sessions.map((item) => {
           const existingId = item.generationDefaults.modelIds[catalogMode];
@@ -1283,16 +1764,33 @@ export default function App() {
         throw new Error(`${catalogMode}: ${message}`);
       }
     };
-    const outcomes = await Promise.allSettled([loadMode("image"), loadMode("video")]);
+    const [imageOutcome, videoOutcome, plannerOutcome] = await Promise.allSettled([
+      loadMode("image"),
+      loadMode("video"),
+      loadPromptModelAvailability(),
+    ]);
+    const outcomes = [imageOutcome, videoOutcome];
     const failures = outcomes.flatMap((outcome) => outcome.status === "rejected" ? [errorMessage(outcome.reason)] : []);
     setCatalogError(failures.length === outcomes.length ? failures.join(" · ") : null);
+    if (plannerOutcome.status === "fulfilled") {
+      setPromptModelAvailability(Object.fromEntries(PROMPT_MODELS.map((model) => [
+        model.id,
+        plannerOutcome.value[model.id] ? "available" : "unavailable",
+      ])) as Record<PromptModel, PlannerAvailabilityStatus>);
+    } else {
+      DIAGNOSTIC_LOG.append({ level: "error", event: "planner_catalog.load_failed", details: { error: errorMessage(plannerOutcome.reason) } });
+      setPromptModelAvailability(plannerAvailabilityRecord("unknown"));
+    }
     setCatalogLoading(false);
-  }, [connectionState]);
+  }, [connectionState, workspaceBootState]);
 
   useEffect(() => { void refreshCatalog(); }, [refreshCatalog]);
 
   useEffect(() => {
-    if (connectionState !== "connected") catalogHydrationRevision.current += 1;
+    if (connectionState !== "connected") {
+      catalogHydrationRevision.current += 1;
+      setPromptModelAvailability(plannerAvailabilityRecord("unknown"));
+    }
   }, [connectionState]);
 
   useEffect(() => {
@@ -1324,14 +1822,14 @@ export default function App() {
   ).sort().join("|");
 
   useEffect(() => {
-    if (connectionState !== "connected") return;
+    if (connectionState !== "connected" || workspaceBootState !== "ready" || updateMutationLock.active) return;
     const activeJobKeys = new Set(activeVideoJobIds.split("|"));
     for (const key of videoPollNotBefore.current.keys()) {
       if (!activeJobKeys.has(key)) videoPollNotBefore.current.delete(key);
     }
     if (!activeVideoJobIds) return;
     const pollActiveJobs = async () => {
-      if (polling.current) return;
+      if (polling.current || updateMutationLockRef.current.active) return;
       const nowMs = Date.now();
       const activeJobs = studioRef.current.sessions.flatMap((item) =>
         activeVideoJobsFromAttempts(item)
@@ -1342,10 +1840,11 @@ export default function App() {
           ))
           .map((job) => ({ sessionId: item.id, job })),
       );
-      if (!activeJobs.length) return;
+      if (!activeJobs.length || updateMutationLockRef.current.active) return;
       polling.current = true;
       let outcomes: PromiseSettledResult<void>[] = [];
       const persistPollState = async (sessionId: string, jobId: string) => {
+        if (updateMutationLockRef.current.active) return;
         try {
           await persistWorkspace(studioRef.current);
         } catch (error) {
@@ -1360,8 +1859,11 @@ export default function App() {
         outcomes = await Promise.allSettled(activeJobs.map(async ({ sessionId, job }) => {
         try {
           const result = await pollVideo(job.jobId, (actualCostUsd) => {
-            recordGenerationCost(sessionId, "video", job.threadId, job.attemptId, actualCostUsd);
+            if (!updateMutationLockRef.current.active) {
+              recordGenerationCost(sessionId, "video", job.threadId, job.attemptId, actualCostUsd);
+            }
           });
+          if (updateMutationLockRef.current.active) return;
           const pollKey = `${sessionId}:${job.jobId}`;
           if (result.status === "completed") {
             videoPollNotBefore.current.set(pollKey, Number.POSITIVE_INFINITY);
@@ -1385,6 +1887,7 @@ export default function App() {
               return;
             }
             const source = await cacheVideo(job.jobId);
+            if (updateMutationLockRef.current.active) return;
             const asset = await importGeneratedVideo(
               source,
               `video-${job.jobId}.mp4`,
@@ -1392,6 +1895,7 @@ export default function App() {
               job.jobId,
               typeof job.request.duration === "number" ? job.request.duration : undefined,
             );
+            if (updateMutationLockRef.current.active) return;
             patchSession(sessionId, (current) => {
               const existing = current.assets.find((item) => item.jobId === job.jobId);
               const resolvedAsset = existing ?? asset;
@@ -1470,6 +1974,7 @@ export default function App() {
           }
           await persistPollState(sessionId, job.jobId);
         } catch (error) {
+          if (updateMutationLockRef.current.active) return;
           const polledAt = new Date().toISOString();
           const timedOut = hasVideoPollingTimedOut(job.submittedAt, Date.parse(polledAt));
           const explained = explainGenerationError(timedOut ? t("videoPollingTimedOut") : error, { modelId: job.model, language });
@@ -1526,7 +2031,7 @@ export default function App() {
       window.removeEventListener("focus", wake);
       document.removeEventListener("visibilitychange", wakeWhenVisible);
     };
-  }, [activeVideoJobIds, connectionState, language, patchSession, persistWorkspace, recordGenerationCost, t]);
+  }, [activeVideoJobIds, connectionState, language, patchSession, persistWorkspace, recordGenerationCost, t, updateMutationLock.active, workspaceBootState]);
 
   const commitImportedAssets = useCallback((candidates: SessionAsset[]): SessionAsset[] => {
     const imported: SessionAsset[] = [];
@@ -1556,17 +2061,18 @@ export default function App() {
     return resolved;
   }, [patchSession, t]);
 
-  const importFiles = async (files: FileList | File[]): Promise<SessionAsset[]> => {
-    const imported: SessionAsset[] = [];
-    for (const file of Array.from(files)) {
-      try {
-        imported.push(await importFileAsset(file));
-      } catch (error) {
-        toast.error(errorMessage(error));
+  const importFiles = async (files: FileList | File[]): Promise<SessionAsset[]> => withPendingWorkspaceMutation(async () => {
+      const imported: SessionAsset[] = [];
+      for (const file of Array.from(files)) {
+        try {
+          imported.push(await importFileAsset(file));
+        } catch (error) {
+          toast.error(errorMessage(error));
+        }
       }
-    }
-    return commitImportedAssets(imported);
-  };
+      assertMutable();
+      return commitImportedAssets(imported);
+    });
 
   const pickFiles = async (): Promise<SessionAsset[]> => {
     if (!isTauriRuntime()) {
@@ -1575,13 +2081,17 @@ export default function App() {
         input.type = "file";
         input.accept = "image/*,video/*,audio/*";
         input.multiple = true;
-        input.onchange = () => void importFiles(input.files ?? []).then(resolve);
+        input.onchange = () => void importFiles(input.files ?? []).then(resolve, () => resolve([]));
         input.oncancel = () => resolve([]);
         input.click();
       });
     }
     try {
-      return commitImportedAssets(await pickManagedAssets());
+      return await withPendingWorkspaceMutation(async () => {
+        const imported = await pickManagedAssets();
+        assertMutable();
+        return commitImportedAssets(imported);
+      });
     } catch (error) {
       toast.error(errorMessage(error));
       return [];
@@ -1589,6 +2099,9 @@ export default function App() {
   };
 
   const reimportAsset = async (assetId: string) => {
+    assertMutable();
+    pendingWorkspaceMutationRef.current += 1;
+    try {
     const targetSessionId = studioRef.current.activeSessionId;
     const currentAsset = studioRef.current.sessions.find((candidate) => candidate.id === targetSessionId)?.assets.find((asset) => asset.id === assetId);
     if (!currentAsset) return;
@@ -1612,6 +2125,7 @@ export default function App() {
         input.click();
       });
     }
+    assertMutable();
     const compatible = candidates.find((candidate) => candidate.kind === currentAsset.kind);
     const unused = candidates.filter((candidate) => candidate !== compatible);
     await Promise.allSettled(unused.map(deleteManagedAsset));
@@ -1636,6 +2150,9 @@ export default function App() {
     }));
     await persistWorkspace(studioRef.current);
     toast.success(t("reimportAssetComplete", { name: currentAsset.name }));
+    } finally {
+      pendingWorkspaceMutationRef.current = Math.max(0, pendingWorkspaceMutationRef.current - 1);
+    }
   };
 
   useEffect(() => {
@@ -1644,7 +2161,10 @@ export default function App() {
     const unlisteners: Array<() => void> = [];
     void import("@tauri-apps/api/event").then(async ({ listen }) => {
       const unlistenAssets = await listen<NativeManagedAsset[]>("managed-assets-imported", (event) => {
-        if (!disposed) void managedDroppedAssets(event.payload).then(commitImportedAssets).catch((error) => toast.error(errorMessage(error)));
+        if (!disposed && workspaceBootState === "ready" && !updateMutationLockRef.current.active) {
+          void withPendingWorkspaceMutation(async () => commitImportedAssets(await managedDroppedAssets(event.payload)))
+            .catch((error) => toast.error(errorMessage(error)));
+        }
       });
       const unlistenFailure = await listen<string>("managed-assets-import-failed", (event) => {
         if (!disposed) toast.error(event.payload);
@@ -1660,9 +2180,10 @@ export default function App() {
       disposed = true;
       unlisteners.forEach((unlisten) => unlisten());
     };
-  }, [commitImportedAssets]);
+  }, [commitImportedAssets, withPendingWorkspaceMutation, workspaceBootState]);
 
   const addAssetAsReference = (assetId: string, notice?: GenerationResultNotice) => {
+    assertMutable();
     const targetSession = notice
       ? studioRef.current.sessions.find((item) => item.id === notice.sessionId)
       : studioRef.current.sessions.find((item) => item.id === studioRef.current.activeSessionId) ?? studioRef.current.sessions[0];
@@ -1700,8 +2221,6 @@ export default function App() {
           purpose: defaultReferencePurpose(targetAsset.kind, validRole),
           slot: nextReferenceSlot(targetDraft.references),
         }],
-        enhancedPrompt: "",
-        enhancedPromptDirty: false,
       });
       return;
     }
@@ -1723,10 +2242,7 @@ export default function App() {
               purpose: defaultReferencePurpose(targetAsset.kind, validRole),
               slot: nextReferenceSlot(item.draft.references),
             }],
-            enhancedPrompt: "",
-            enhancedPromptDirty: false,
-            enhancedVisualCount: 0,
-            enhancementArtifact: undefined,
+            promptHistory: invalidatePromptEnhancement(item.draft.promptHistory),
           },
         } : item),
       },
@@ -1734,21 +2250,25 @@ export default function App() {
     setStudio((current) => ({ ...current, activeSessionId: notice.sessionId }));
   };
 
-  const loadGuideSample = () => void (async () => {
-    const existing = session.assets.find((asset) => asset.name === "fruit-truck-workflow-sample.png");
+  const loadGuideSample = () => void withPendingWorkspaceMutation(async () => {
+    const currentSession = studioRef.current.sessions.find((item) => item.id === studioRef.current.activeSessionId)
+      ?? studioRef.current.sessions[0];
+    const existing = currentSession.assets.find((asset) => asset.name === "fruit-truck-workflow-sample.png");
     const sample = existing ?? await importGeneratedImage(
       new URL("/fruit-truck-icon.png", window.location.href).href,
       "fruit-truck-workflow-sample.png",
       "upload",
     );
+    assertMutable();
     if (!existing) commitImportedAssets([sample]);
     addAssetAsReference(sample.id);
     setRightPanelOpen(true);
     focusPrompt();
     toast.success(t("guideSampleLoaded"));
-  })().catch((error) => toast.error(errorMessage(error)));
+  }).catch((error) => toast.error(errorMessage(error)));
 
   const editImageAsset = (assetId: string, notice?: GenerationResultNotice) => {
+    assertMutable();
     const patchTarget = notice
       ? (update: (current: StudioSession) => StudioSession) => patchSession(notice.sessionId, update)
       : patchActive;
@@ -1791,10 +2311,7 @@ export default function App() {
               imageEditTarget: `@${slot}`,
               maskStrokes: previousTarget?.assetId === assetId ? imageDraft.maskStrokes : [],
               maskInstructions: previousTarget?.assetId === assetId ? imageDraft.maskInstructions : "",
-              enhancedPrompt: "",
-              enhancedPromptDirty: false,
-              enhancedVisualCount: 0,
-              enhancementArtifact: undefined,
+              promptHistory: invalidatePromptEnhancement(imageDraft.promptHistory),
               references: existing
                 ? imageDraft.references.map((reference) => reference.assetId === assetId
                   ? markReferenceAsEditTarget(reference)
@@ -1816,6 +2333,7 @@ export default function App() {
   };
 
   const setEditTargetAsset = (assetId: string, incomingAsset?: SessionAsset) => {
+    assertMutable();
     const asset = assetMap.get(assetId) ?? incomingAsset;
     if (!asset || asset.kind !== "image") {
       toast.error(t("editImageRequired"));
@@ -1852,10 +2370,7 @@ export default function App() {
               references,
               maskStrokes: previousTarget?.assetId === assetId ? currentDraft.maskStrokes : [],
               maskInstructions: previousTarget?.assetId === assetId ? currentDraft.maskInstructions : "",
-              enhancedPrompt: "",
-              enhancedPromptDirty: false,
-              enhancedVisualCount: 0,
-              enhancementArtifact: undefined,
+              promptHistory: invalidatePromptEnhancement(currentDraft.promptHistory),
             },
           } : item),
         },
@@ -1872,6 +2387,7 @@ export default function App() {
   const pickEditTarget = async () => applyImportedEditTarget(await pickFiles());
 
   const routeImageToVideo = (assetId: string, notice?: GenerationResultNotice) => {
+    assertMutable();
     const patchTarget = notice
       ? (update: (current: StudioSession) => StudioSession) => patchSession(notice.sessionId, update)
       : patchActive;
@@ -1934,7 +2450,12 @@ export default function App() {
             };
             return {
               ...candidate,
-              draft: { ...candidate.draft, references, directorPlan: planWithSource },
+              draft: {
+                ...candidate.draft,
+                references,
+                directorPlan: planWithSource,
+                promptHistory: invalidatePromptEnhancement(candidate.draft.promptHistory),
+              },
               revision: candidate.revision + 1,
               updatedAt: new Date().toISOString(),
             };
@@ -1947,6 +2468,7 @@ export default function App() {
   };
 
   const selectStageModel = async (targetMode: GenerationMode, id: string) => {
+    assertMutable();
     const model = catalogs[targetMode].find((item) => item.id === id) ?? null;
     if (!model) return;
     const targetThread = session.threads[targetMode].find((item) => item.id === session.activeThreadIds[targetMode])
@@ -1968,6 +2490,7 @@ export default function App() {
       t("changeModel"),
     );
     if (!accepted) return;
+    assertMutable();
     patchActive((current) => {
       const targetId = current.activeThreadIds[targetMode];
       const createdAt = new Date().toISOString();
@@ -1978,6 +2501,7 @@ export default function App() {
           [targetMode]: current.threads[targetMode].map((item) => item.id === targetId ? {
             ...item,
             modelOverrideId: id,
+            draft: { ...item.draft, promptHistory: invalidatePromptEnhancement(item.draft.promptHistory) },
             optionOverrides: optionOverridesFromDefaults(
               current.generationDefaults.options[targetMode],
               { ...nextDefaults, ...effectiveThreadDraft(current, item).options },
@@ -2007,6 +2531,7 @@ export default function App() {
   const selectModel = (id: string) => { void selectStageModel(mode, id); };
 
   const switchMode = (next: GenerationMode) => {
+    assertMutable();
     patchActive((current) => ({ ...current, mode: next }));
   };
 
@@ -2054,14 +2579,12 @@ export default function App() {
     )];
   }, [assetMap, compiledDirector?.visualInstructions, draft.imageEditMode, draft.imageEditTarget, draft.maskStrokes.length, generationReferences, mode]);
 
-  const hasCurrentEnhancement = Boolean(
-    currentEnhancementContext
-    && draft.enhancementArtifact?.signature === currentEnhancementContext.signature,
+  const currentCheckpoint = currentPromptCheckpoint(draft.prompt, draft.promptHistory);
+  const currentEnhancementArtifact = currentPromptEnhancementArtifact(
+    draft.prompt,
+    draft.promptHistory,
+    currentEnhancementContext?.signature,
   );
-  const displayedEnhancedPrompt = hasCurrentEnhancement ? draft.enhancedPrompt : "";
-  const effectivePrompt = draft.enhancePrompt && hasCurrentEnhancement && draft.enhancedPrompt.trim()
-    ? draft.enhancedPrompt
-    : draft.prompt;
   const prepareGenerationPrompt = (prompt: string) => {
     if (mode !== "image" || !draft.imageEditMode) return prompt.trim();
     return composeEditPrompt({
@@ -2071,7 +2594,7 @@ export default function App() {
       maskInstructions: draft.maskInstructions,
     });
   };
-  const preparedPrompt = prepareGenerationPrompt(effectivePrompt);
+  const preparedPrompt = prepareGenerationPrompt(draft.prompt);
   const currentPreparationKey = useMemo(
     () => preparationKeyFor(session, thread, draft, selectedModel),
     [draft, selectedModel, session, thread],
@@ -2092,24 +2615,22 @@ export default function App() {
     editTargetSlot: draft.imageEditMode
       ? Number(draft.imageEditTarget.match(/^@(\d+)$/)?.[1] ?? 0) || undefined
       : undefined,
-    negativePrompt: hasCurrentEnhancement ? draft.enhancementArtifact?.negativePrompt : undefined,
+    negativePrompt: currentEnhancementArtifact?.negativePrompt,
     director: compiledDirector,
-  }), [compiledDirector, draft.enhancementArtifact?.negativePrompt, draft.imageEditMode, draft.imageEditTarget, draft.options, draft.providerJson, hasCurrentEnhancement, mode, preparedPrompt, previewReferences, selectedId]);
+  }), [compiledDirector, currentEnhancementArtifact?.negativePrompt, draft.imageEditMode, draft.imageEditTarget, draft.options, draft.providerJson, mode, preparedPrompt, previewReferences, selectedId]);
   const draftPreparedRequest = useMemo(() => prepareOpenRouterRequest(previewGenerationDraft, selectedModel, {
     final: false,
     catalogFingerprint: currentCatalogFingerprint,
     sourceSignature: currentPreparationKey,
     planner: {
-      requested: draft.enhancePrompt,
-      modelId: draft.enhancePrompt ? studio.promptModel : undefined,
-      costUsd: hasCurrentEnhancement ? draft.enhancementArtifact?.actualCostUsd : undefined,
+      requested: Boolean(currentEnhancementArtifact),
+      modelId: currentEnhancementArtifact ? currentCheckpoint?.plannerModel ?? currentEnhancementArtifact.plannerModel : undefined,
+      costUsd: currentEnhancementArtifact?.actualCostUsd,
     },
-  }), [currentCatalogFingerprint, currentPreparationKey, draft.enhancePrompt, draft.enhancementArtifact?.actualCostUsd, hasCurrentEnhancement, previewGenerationDraft, selectedModel, studio.promptModel]);
+  }), [currentCatalogFingerprint, currentCheckpoint?.plannerModel, currentEnhancementArtifact, currentPreparationKey, previewGenerationDraft, selectedModel]);
   const requestPayload = draftPreparedRequest.sanitizedPayload;
   const requestBuildError = null;
-  const previewReferencePriorities = hasCurrentEnhancement
-    ? draft.enhancementArtifact?.referencePriorities
-    : undefined;
+  const previewReferencePriorities = currentEnhancementArtifact?.referencePriorities;
   const previewCoverage = useMemo(() => referenceCoverageReport({
     mode,
     model: selectedId,
@@ -2120,8 +2641,8 @@ export default function App() {
     editTargetSlot: draft.imageEditMode
       ? Number(draft.imageEditTarget.match(/^@(\d+)$/)?.[1] ?? 0) || undefined
       : undefined,
-    negativePrompt: hasCurrentEnhancement ? draft.enhancementArtifact?.negativePrompt : undefined,
-  }, selectedModel, requestPayload, previewReferencePriorities), [draft.enhancementArtifact?.negativePrompt, draft.imageEditMode, draft.imageEditTarget, draft.options, draft.providerJson, hasCurrentEnhancement, mode, preparedPrompt, previewReferencePriorities, previewReferences, requestPayload, selectedId, selectedModel]);
+    negativePrompt: currentEnhancementArtifact?.negativePrompt,
+  }, selectedModel, requestPayload, previewReferencePriorities), [currentEnhancementArtifact?.negativePrompt, draft.imageEditMode, draft.imageEditTarget, draft.options, draft.providerJson, mode, preparedPrompt, previewReferencePriorities, previewReferences, requestPayload, selectedId, selectedModel]);
 
   const editTargetError = useMemo(() => {
     if (mode !== "image" || !draft.imageEditMode) return null;
@@ -2306,12 +2827,10 @@ export default function App() {
     targetThread: GenerationThread,
     costEntryId = `prompt-enhancement:${crypto.randomUUID()}`,
   ): Promise<PromptEnhancementArtifact> => {
+    assertMutable();
     const targetDraft = effectiveThreadDraft(targetSession, targetThread);
-    if (!hasRunnableInstructions(targetThread.mode, targetDraft)) {
-      throw new Error(targetThread.mode === "image" && targetDraft.imageEditMode && targetDraft.maskStrokes.length
-        ? t("enterPromptOrMaskInstructions")
-        : t("enterPromptFirst"));
-    }
+    if (!targetDraft.prompt.trim()) throw new Error(t("enterPromptFirst"));
+    if (promptModelAvailability[studioRef.current.promptModel] !== "available") throw new Error(t("promptModelAvailabilityUnavailable"));
     if (targetThread.enhancementAttempts?.at(-1)?.status === "uncertain" && !await confirmAction(
       t("uncertainEnhancementTitle"),
       t("uncertainEnhancementHint"),
@@ -2319,9 +2838,12 @@ export default function App() {
     )) {
       throw new Error(t("uncertainEnhancementHint"));
     }
+    assertMutable();
+    pendingWorkspaceMutationRef.current += 1;
     setEnhancingThreadIds((current) => new Set(current).add(targetThread.id));
     let enhancementAttemptId: string | undefined;
     let reportedCostUsd = 0;
+    let resultReady = false;
     try {
       const targetModelId = effectiveThreadModelId(targetSession, targetThread);
       const targetModel = catalogs[targetThread.mode].find((candidate) => candidate.id === targetModelId) ?? null;
@@ -2337,6 +2859,12 @@ export default function App() {
       const visuals = await hydratePromptEnhancementVisuals(targetSession, targetThread, targetDraft);
       enhancementAttemptId = costEntryId.replace(/^prompt-enhancement:/, "") || crypto.randomUUID();
       const startedAt = new Date().toISOString();
+      const dispatchSnapshot = {
+        threadRevision: targetThread.revision,
+        editRevision: targetDraft.promptHistory.editRevision,
+        prompt: targetDraft.prompt,
+        contextSignature: context.signature,
+      };
       const enhancementState = commitStudioNow((current) => ({
         ...current,
         sessions: current.sessions.map((candidateSession) => candidateSession.id === targetSession.id ? {
@@ -2346,11 +2874,22 @@ export default function App() {
             ...candidateSession.threads,
             [targetThread.mode]: candidateSession.threads[targetThread.mode].map((item) => item.id === targetThread.id ? {
               ...item,
+              draft: {
+                ...item.draft,
+                promptHistory: beginPromptEnhancement(item.draft.promptHistory, targetDraft.prompt, {
+                  attemptId: enhancementAttemptId!,
+                  plannerModel,
+                  inputHash: context.signature,
+                  createdAt: startedAt,
+                }),
+              },
               enhancementAttempts: [...(item.enhancementAttempts ?? []), {
                 id: enhancementAttemptId!,
                 requestKey: context.signature,
                 status: "in_progress",
-                threadRevision: targetThread.revision,
+                threadRevision: dispatchSnapshot.threadRevision,
+                editRevision: dispatchSnapshot.editRevision,
+                contextSignature: dispatchSnapshot.contextSignature,
                 originalPrompt: targetDraft.prompt,
                 createdAt: startedAt,
                 updatedAt: startedAt,
@@ -2374,9 +2913,13 @@ export default function App() {
         hasMask: context.hasMask,
         references: context.references,
         visuals,
+        directorContext: context.directorContext,
       }, (actualCostUsd) => { reportedCostUsd = actualCostUsd; });
       const completedAt = new Date().toISOString();
       const actualCostUsd = artifact.actualCostUsd ?? reportedCostUsd;
+      const completedArtifact = actualCostUsd > 0 && artifact.actualCostUsd == null
+        ? { ...artifact, actualCostUsd }
+        : artifact;
       const completedState = commitStudioNow((current) => ({
         ...current,
         sessions: current.sessions.map((candidateSession) => {
@@ -2392,35 +2935,67 @@ export default function App() {
             updatedAt: completedAt,
             threads: {
               ...withCost.threads,
-              [targetThread.mode]: withCost.threads[targetThread.mode].map((item) => item.id === targetThread.id ? {
-                ...item,
-                draft: item.revision === targetThread.revision ? {
-                  ...item.draft,
-                  enhancedPrompt: artifact.prompt,
-                  enhancedPromptDirty: false,
-                  enhancedVisualCount: visuals.length,
-                  enhancementArtifact: artifact,
-                } : item.draft,
-                enhancementAttempts: (item.enhancementAttempts ?? []).map((entry) => entry.id === enhancementAttemptId ? {
-                  ...entry,
-                  status: "completed",
-                  enhancedPrompt: artifact.prompt,
-                  actualCostUsd: actualCostUsd || undefined,
-                  costRecordedAt: actualCostUsd > 0 ? completedAt : undefined,
+              [targetThread.mode]: withCost.threads[targetThread.mode].map((item) => {
+                if (item.id !== targetThread.id) return item;
+                const currentDraft = effectiveThreadDraft(withCost, item);
+                const currentModelId = effectiveThreadModelId(withCost, item);
+                const currentModel = catalogs[item.mode].find((candidate) => candidate.id === currentModelId) ?? null;
+                const currentContext = currentModel
+                  ? enhancementContext(withCost, item, currentDraft, currentModel, current.promptModel)
+                  : null;
+                const autoApply = item.revision === dispatchSnapshot.threadRevision
+                  && currentDraft.promptHistory.editRevision === dispatchSnapshot.editRevision
+                  && currentDraft.prompt === dispatchSnapshot.prompt
+                  && currentContext?.signature === dispatchSnapshot.contextSignature;
+                const completed = completePromptEnhancement(
+                  item.draft.promptHistory,
+                  item.draft.prompt,
+                  completedArtifact,
+                  {
+                    attemptId: enhancementAttemptId!,
+                    plannerModel,
+                    autoApply,
+                    outputHash: enhancementContext(
+                      targetSession,
+                      targetThread,
+                      targetDraft,
+                      targetModel,
+                      plannerModel,
+                      completedArtifact.prompt,
+                    ).signature,
+                    createdAt: completedAt,
+                  },
+                );
+                if (!autoApply) resultReady = true;
+                return {
+                  ...item,
+                  draft: {
+                    ...item.draft,
+                    prompt: completed.prompt,
+                    promptHistory: completed.history,
+                  },
+                  enhancementAttempts: (item.enhancementAttempts ?? []).map((entry) => entry.id === enhancementAttemptId ? {
+                    ...entry,
+                    status: "completed",
+                    enhancedPrompt: completedArtifact.prompt,
+                    actualCostUsd: actualCostUsd || undefined,
+                    costRecordedAt: actualCostUsd > 0 ? completedAt : undefined,
+                    updatedAt: completedAt,
+                  } : entry),
                   updatedAt: completedAt,
-                } : entry),
-                updatedAt: completedAt,
-              } : item),
+                };
+              }),
             },
           };
         }),
       }));
       await persistWorkspace(completedState);
-      return artifact;
+      if (resultReady) toast.info(t("promptEnhancementResultReady"));
+      return completedArtifact;
     } catch (error) {
       if (enhancementAttemptId) {
         const failedAt = new Date().toISOString();
-        const uncertain = mayHaveReachedPaidEndpoint(error);
+        const uncertain = reportedCostUsd > 0 || mayHaveReachedPaidEndpoint(error);
         const failedState = commitStudioNow((current) => ({
           ...current,
           sessions: current.sessions.map((candidateSession) => {
@@ -2436,27 +3011,47 @@ export default function App() {
               updatedAt: failedAt,
               threads: {
                 ...withCost.threads,
-                [targetThread.mode]: withCost.threads[targetThread.mode].map((item) => item.id === targetThread.id ? {
-                  ...item,
-                  enhancementAttempts: (item.enhancementAttempts ?? []).map((entry) => entry.id === enhancementAttemptId ? {
-                    ...entry,
-                    status: uncertain ? "uncertain" : "failed",
-                    error: errorMessage(error),
-                    errorCode: uncertain ? "delivery_uncertain" : "enhancement_failed",
-                    errorAction: uncertain ? "Review account activity before retrying." : "Retry from the saved prompt.",
-                    actualCostUsd: reportedCostUsd || undefined,
-                    costRecordedAt: reportedCostUsd > 0 ? failedAt : undefined,
-                    updatedAt: failedAt,
-                  } : entry),
-                } : item),
+                [targetThread.mode]: withCost.threads[targetThread.mode].map((item) => {
+                  if (item.id !== targetThread.id) return item;
+                  const selectedCheckpoint = item.draft.promptHistory.entries[item.draft.promptHistory.cursor];
+                  const resultWasApplied = selectedCheckpoint?.kind === "enhancement_result"
+                    && selectedCheckpoint.enhancementAttemptId === enhancementAttemptId
+                    && selectedCheckpoint.text === item.draft.prompt;
+                  const enhancementAttempt = (item.enhancementAttempts ?? []).find((entry) => entry.id === enhancementAttemptId);
+                  return {
+                    ...item,
+                    draft: {
+                      ...item.draft,
+                      prompt: resultWasApplied && enhancementAttempt
+                        ? enhancementAttempt.originalPrompt
+                        : item.draft.prompt,
+                      promptHistory: failPromptEnhancement(item.draft.promptHistory, enhancementAttemptId!),
+                    },
+                    enhancementAttempts: (item.enhancementAttempts ?? []).map((entry) => entry.id === enhancementAttemptId ? {
+                      ...entry,
+                      status: uncertain ? "uncertain" : "failed",
+                      error: errorMessage(error),
+                      errorCode: uncertain ? "delivery_uncertain" : "enhancement_failed",
+                      errorAction: uncertain ? "Review account activity before retrying." : "Retry from the saved prompt.",
+                      actualCostUsd: reportedCostUsd || undefined,
+                      costRecordedAt: reportedCostUsd > 0 ? failedAt : undefined,
+                      updatedAt: failedAt,
+                    } : entry),
+                  };
+                }),
               },
             };
           }),
         }));
-        await persistWorkspace(failedState).catch(() => undefined);
+        try {
+          await persistWorkspace(failedState);
+        } catch (persistenceError) {
+          throw new Error(`${errorMessage(error)} ${errorMessage(persistenceError)}`);
+        }
       }
       throw error;
     } finally {
+      pendingWorkspaceMutationRef.current = Math.max(0, pendingWorkspaceMutationRef.current - 1);
       setEnhancingThreadIds((current) => {
         const next = new Set(current);
         next.delete(targetThread.id);
@@ -2617,7 +3212,14 @@ export default function App() {
       editTargetSlot: targetDraft.imageEditMode
         ? Number(targetDraft.imageEditTarget.match(/^@(\d+)$/)?.[1] ?? 0) || undefined
         : undefined,
-      negativePrompt: targetDraft.enhancementArtifact?.negativePrompt,
+      negativePrompt: (() => {
+        const context = enhancementContext(targetSession, targetThread, targetDraft, model, studioRef.current.promptModel);
+        return currentPromptEnhancementArtifact(
+          targetDraft.prompt,
+          targetDraft.promptHistory,
+          context.signature,
+        )?.negativePrompt;
+      })(),
       director: targetCompiledDirector,
     }, model, {
       final: false,
@@ -2643,6 +3245,7 @@ export default function App() {
   };
 
   const prepareRequestForReview = async () => {
+    assertMutable();
     if (preparingRequest) return;
     const targetSession = studioRef.current.sessions.find((item) => item.id === studioRef.current.activeSessionId) ?? studioRef.current.sessions[0];
     const targetThread = [...targetSession.threads.image, ...targetSession.threads.video].find((item) => item.id === thread.id);
@@ -2659,27 +3262,17 @@ export default function App() {
       toast.error(t("modelUnavailable"));
       return;
     }
+    pendingWorkspaceMutationRef.current += 1;
     setPreparingRequest(true);
     try {
       const targetEnhancementContext = enhancementContext(targetSession, targetThread, targetDraft, targetModel, studioRef.current.promptModel);
-      let artifact = targetDraft.enhancementArtifact?.signature === targetEnhancementContext.signature
-        ? targetDraft.enhancementArtifact
-        : undefined;
-      let prompt = targetDraft.prompt.trim();
-      if (targetDraft.enhancePrompt) {
-        artifact ??= await enhanceThreadPrompt(targetSession, targetThread);
-        prompt = targetDraft.enhancedPromptDirty && artifact === targetDraft.enhancementArtifact
-          ? targetDraft.enhancedPrompt.trim()
-          : artifact.prompt;
-        const enhancedError = validateEnhancedPrompt(
-          enhancementOriginalIntent(targetThread.mode, targetDraft),
-          prompt,
-          targetDraft.imageEditMode ? targetDraft.imageEditTarget : undefined,
-          targetDraft.references.map((reference) => reference.slot),
-          targetDraft.references.map((reference) => reference.slot),
-        );
-        if (enhancedError) throw new Error(enhancedError);
-      }
+      const checkpoint = currentPromptCheckpoint(targetDraft.prompt, targetDraft.promptHistory);
+      const artifact = currentPromptEnhancementArtifact(
+        targetDraft.prompt,
+        targetDraft.promptHistory,
+        targetEnhancementContext.signature,
+      );
+      const prompt = targetDraft.prompt.trim();
       const finalPrompt = targetThread.mode === "image" && targetDraft.imageEditMode
         ? composeEditPrompt({ prompt, target: targetDraft.imageEditTarget.trim(), hasMask: targetDraft.maskStrokes.length > 0, maskInstructions: targetDraft.maskInstructions })
         : prompt;
@@ -2725,12 +3318,12 @@ export default function App() {
         catalogFingerprint: catalogFingerprint(catalogs[targetThread.mode]),
         sourceSignature: preparationKeyFor(targetSession, targetThread, targetDraft, targetModel),
         planner: {
-          requested: targetDraft.enhancePrompt,
-          modelId: targetDraft.enhancePrompt ? studioRef.current.promptModel : undefined,
+          requested: Boolean(artifact),
+          modelId: artifact ? checkpoint?.plannerModel ?? artifact.plannerModel : undefined,
           costUsd: artifact?.actualCostUsd,
           // The prompt planner is a separate OpenRouter request and has no
           // hydrated endpoint/privacy contract in this flow.
-          inheritsConstraints: !targetDraft.enhancePrompt,
+          inheritsConstraints: !artifact,
         },
       });
       if (finalRequest.status !== "ready") {
@@ -2740,14 +3333,9 @@ export default function App() {
       const coverage = referenceCoverageReport(generationDraft, targetModel, payload, artifact?.referencePriorities);
       const coverageError = validateReferenceCoverage(coverage);
       if (coverageError) throw new Error(coverageError);
-      const preparedDraft: GenerationDraftState = artifact && artifact !== targetDraft.enhancementArtifact ? {
-        ...targetDraft,
-        enhancedPrompt: prompt,
-        enhancedPromptDirty: false,
-        enhancementArtifact: artifact,
-      } : targetDraft;
+      assertMutable();
       setPreparedRequest({
-        key: preparationKeyFor(targetSession, targetThread, preparedDraft, targetModel),
+        key: preparationKeyFor(targetSession, targetThread, targetDraft, targetModel),
         threadId: targetThread.id,
         artifact: finalRequest,
         request: prettyRequest(payload),
@@ -2764,14 +3352,66 @@ export default function App() {
     } catch (error) {
       toast.error(errorMessage(error));
     } finally {
+      pendingWorkspaceMutationRef.current = Math.max(0, pendingWorkspaceMutationRef.current - 1);
       setPreparingRequest(false);
     }
   };
 
   const runEnhancement = async () => {
-    const validationError = validateThreadForRun(session, thread);
-    if (validationError) throw new Error(validationError);
+    assertMutable();
+    if (!promptEnhancementEnabled) throw new Error(
+      selectedPromptModelAvailability === "available" ? t("enterPromptFirst") : t("promptModelAvailabilityUnavailable"),
+    );
+    if (localStorage.getItem(PROMPT_ENHANCEMENT_NOTICE_KEY) !== "true") {
+      const accepted = await confirmAction(
+        t("promptEnhancement"),
+        t("promptEnhancementFirstUseNotice"),
+        t("enhancePrompt"),
+      );
+      if (!accepted) return undefined;
+      assertMutable();
+      localStorage.setItem(PROMPT_ENHANCEMENT_NOTICE_KEY, "true");
+    }
     return enhanceThreadPrompt(session, thread);
+  };
+
+  const navigatePromptEnhancementHistory = (direction: "undo" | "redo") => {
+    assertMutable();
+    let changed = false;
+    const next = commitStudioNow((current) => ({
+      ...current,
+      sessions: current.sessions.map((candidateSession) => {
+        if (candidateSession.id !== session.id) return candidateSession;
+        return {
+          ...candidateSession,
+          threads: {
+            ...candidateSession.threads,
+            [thread.mode]: candidateSession.threads[thread.mode].map((candidateThread) => {
+              if (candidateThread.id !== thread.id) return candidateThread;
+              const navigation = direction === "undo"
+                ? undoPromptEnhancement(candidateThread.draft.promptHistory, candidateThread.draft.prompt)
+                : redoPromptEnhancement(candidateThread.draft.promptHistory);
+              if (!navigation) return candidateThread;
+              changed = true;
+              return {
+                ...candidateThread,
+                draft: {
+                  ...candidateThread.draft,
+                  prompt: navigation.prompt,
+                  promptHistory: navigation.history,
+                },
+                revision: candidateThread.revision + 1,
+                updatedAt: new Date().toISOString(),
+              };
+            }),
+          },
+        };
+      }),
+    }));
+    if (changed) {
+      setPreparedRequest(null);
+      void persistWorkspace(next).catch((error) => toast.error(errorMessage(error)));
+    }
   };
 
   const patchAttempt = (sessionId: string, mode: GenerationMode, threadId: string, attemptId: string, patch: Partial<GenerationAttempt>) => {
@@ -2800,6 +3440,7 @@ export default function App() {
   };
 
   const runGenerationThread = async (threadId: string) => {
+    assertMutable();
     const targetSession = studioRef.current.sessions.find((item) => item.id === studioRef.current.activeSessionId) ?? studioRef.current.sessions[0];
     const targetThread = [...targetSession.threads.image, ...targetSession.threads.video].find((item) => item.id === threadId);
     if (!targetThread) return;
@@ -2826,6 +3467,7 @@ export default function App() {
       t("highCostHint", { cost: formatUsd(reviewedEstimate) }),
       t("confirmGeneration"),
     )) return;
+    assertMutable();
     const attemptId = crypto.randomUUID();
     const createdAt = new Date().toISOString();
     const attemptReferences = draftReferencesWithDirectorBindings(
@@ -2846,9 +3488,7 @@ export default function App() {
         mode: targetThread.mode,
         modelId: targetModelId,
         prompt: targetDraft.prompt,
-        enhancePrompt: targetDraft.enhancePrompt,
-        enhancedPrompt: reviewedRequest.enhancementArtifact ? targetDraft.enhancedPrompt : "",
-        enhancementArtifact: reviewedRequest.enhancementArtifact,
+        promptHistory: structuredClone(targetDraft.promptHistory),
         options: structuredClone(targetDraft.options),
         providerJson: targetDraft.providerJson,
         assetBindings: targetDraft.references.map((reference) => ({ ...reference })),
@@ -2893,8 +3533,7 @@ export default function App() {
         submittedAt: new Date().toISOString(),
         snapshot: attempt.snapshot ? {
           ...attempt.snapshot,
-          enhancedPrompt: reviewedRequest.enhancementArtifact ? targetDraft.enhancedPrompt : "",
-          enhancementArtifact: reviewedRequest.enhancementArtifact,
+          promptHistory: structuredClone(targetDraft.promptHistory),
           referenceCoverage,
         } : undefined,
       });
@@ -3118,6 +3757,7 @@ export default function App() {
   })();
 
   const restoreAttemptSnapshot = (attempt: GenerationAttempt) => {
+    assertMutable();
     const snapshot = attempt.snapshot;
     if (!snapshot) return;
     patchActive((current) => ({
@@ -3134,10 +3774,7 @@ export default function App() {
           draft: {
             ...item.draft,
             prompt: snapshot.prompt,
-            enhancePrompt: snapshot.enhancePrompt,
-            enhancedPrompt: snapshot.enhancedPrompt,
-            enhancedPromptDirty: false,
-            enhancementArtifact: snapshot.enhancementArtifact,
+            promptHistory: structuredClone(snapshot.promptHistory),
             references: snapshot.assetBindings.map((binding) => ({ ...binding })),
             imageEditMode: snapshot.imageEditMode,
             imageEditTarget: snapshot.imageEditTarget,
@@ -3155,6 +3792,7 @@ export default function App() {
   };
 
   const duplicateAttemptSnapshot = (attempt: GenerationAttempt) => {
+    assertMutable();
     const snapshot = attempt.snapshot;
     if (!snapshot) return;
     patchActive((current) => {
@@ -3177,10 +3815,7 @@ export default function App() {
         draft: {
           ...source.draft,
           prompt: snapshot.prompt,
-          enhancePrompt: snapshot.enhancePrompt,
-          enhancedPrompt: snapshot.enhancedPrompt,
-          enhancedPromptDirty: false,
-          enhancementArtifact: snapshot.enhancementArtifact,
+          promptHistory: structuredClone(snapshot.promptHistory),
           references: snapshot.assetBindings.map((binding) => ({ ...binding })),
           imageEditMode: snapshot.imageEditMode,
           imageEditTarget: snapshot.imageEditTarget,
@@ -3201,6 +3836,7 @@ export default function App() {
   };
 
   const recheckAttemptStatus = (attempt: GenerationAttempt) => {
+    assertMutable();
     if (!attempt.jobId) return;
     videoPollNotBefore.current.set(`${session.id}:${attempt.jobId}`, 0);
     patchAttempt(session.id, "video", thread.id, attempt.id, {
@@ -3218,63 +3854,73 @@ export default function App() {
   };
 
   const recoverAttemptResults = async (attempt: GenerationAttempt) => {
-    if (attempt.jobId) {
-      recheckAttemptStatus(attempt);
-      return;
+    try {
+      await withPendingWorkspaceMutation(async () => {
+        if (attempt.jobId) {
+          recheckAttemptStatus(attempt);
+          return;
+        }
+        const sources = attempt.resultSources ?? [];
+        if (!sources.length) {
+          toast.error(t("noRecoverableResultSource"));
+          return;
+        }
+        const recovered = await Promise.allSettled(sources.map((source, index) => importGeneratedImage(
+          source,
+          `recovered-${attempt.id}-${index + 1}.png`,
+          "generated",
+        )));
+        const assets = recovered.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+        if (!assets.length) {
+          toast.error(t("resultRecoveryFailed"));
+          return;
+        }
+        assertMutable();
+        patchActive((current) => ({
+          ...current,
+          assets: [...current.assets, ...assets],
+          threads: {
+            ...current.threads,
+            [thread.mode]: current.threads[thread.mode].map((candidate) => candidate.id === thread.id ? {
+              ...candidate,
+              attempts: candidate.attempts.map((entry) => entry.id === attempt.id ? {
+                ...entry,
+                status: "completed",
+                assetIds: assets.map((asset) => asset.id),
+                completedAt: new Date().toISOString(),
+              } : entry),
+            } : candidate),
+          },
+        }));
+        await persistWorkspace(studioRef.current);
+        toast.success(t("resultRecovered", { count: assets.length }));
+      });
+    } catch (error) {
+      toast.error(errorMessage(error));
     }
-    const sources = attempt.resultSources ?? [];
-    if (!sources.length) {
-      toast.error(t("noRecoverableResultSource"));
-      return;
-    }
-    const recovered = await Promise.allSettled(sources.map((source, index) => importGeneratedImage(
-      source,
-      `recovered-${attempt.id}-${index + 1}.png`,
-      "generated",
-    )));
-    const assets = recovered.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
-    if (!assets.length) {
-      toast.error(t("resultRecoveryFailed"));
-      return;
-    }
-    patchActive((current) => ({
-      ...current,
-      assets: [...current.assets, ...assets],
-      threads: {
-        ...current.threads,
-        [thread.mode]: current.threads[thread.mode].map((candidate) => candidate.id === thread.id ? {
-          ...candidate,
-          attempts: candidate.attempts.map((entry) => entry.id === attempt.id ? {
-            ...entry,
-            status: "completed",
-            assetIds: assets.map((asset) => asset.id),
-            completedAt: new Date().toISOString(),
-          } : entry),
-        } : candidate),
-      },
-    }));
-    await persistWorkspace(studioRef.current);
-    toast.success(t("resultRecovered", { count: assets.length }));
   };
 
   const activateThread = (id: string) => {
+    assertMutable();
     patchActive((current) => ({ ...current, activeThreadIds: { ...current.activeThreadIds, [current.mode]: id } }));
   };
 
   const createThread = useCallback(() => {
+    assertMutable();
     patchActive((current) => {
       const active = current.threads[current.mode].find((item) => item.id === current.activeThreadIds[current.mode]);
       if (!active) return current;
-      const next = createSiblingGenerationThread(active, current.threads[current.mode].length + 1, studioRef.current.defaultEnhancePrompt);
+      const next = createSiblingGenerationThread(active, current.threads[current.mode].length + 1);
       return {
         ...current,
         threads: { ...current.threads, [current.mode]: [...current.threads[current.mode], next] },
         activeThreadIds: { ...current.activeThreadIds, [current.mode]: next.id },
       };
     });
-  }, [patchActive]);
+  }, [assertMutable, patchActive]);
 
   const duplicateThread = (id: string) => {
+    assertMutable();
     patchActive((current) => {
       const source = current.threads[current.mode].find((item) => item.id === id);
       if (!source) return current;
@@ -3288,7 +3934,7 @@ export default function App() {
         archivedAt: undefined,
         revision: 0,
         attempts: [],
-        draft: { ...source.draft, enhancePrompt: studioRef.current.defaultEnhancePrompt },
+        draft: structuredClone(source.draft),
       };
       return {
         ...current,
@@ -3299,6 +3945,7 @@ export default function App() {
   };
 
   const renameThread = (id: string, name: string) => {
+    assertMutable();
     const current = modeThreads.find((item) => item.id === id);
     if (!current) return;
     const normalized = name.trim().slice(0, 100);
@@ -3318,6 +3965,7 @@ export default function App() {
   };
 
   const archiveThread = useCallback((id: string) => {
+    assertMutable();
     patchActive((current) => {
       const visible = current.threads[current.mode].filter((item) => !item.archivedAt);
       if (visible.length <= 1) return current;
@@ -3337,7 +3985,7 @@ export default function App() {
           : current.activeThreadIds,
       };
     });
-  }, [patchActive]);
+  }, [assertMutable, patchActive]);
 
   const requestAppQuit = useCallback(() => void (async () => {
     if (quitConfirmationPending.current || confirmationRef.current) return;
@@ -3366,6 +4014,7 @@ export default function App() {
   })(), [confirmAction, persistWorkspace, t]);
 
   const restoreThread = (id: string) => {
+    assertMutable();
     patchActive((current) => {
       const restored = current.threads[current.mode].find((item) => item.id === id);
       if (!restored) return current;
@@ -3380,22 +4029,28 @@ export default function App() {
     });
   };
 
-  const useModeDefaults = () => patchActive((current) => ({
+  const useModeDefaults = () => {
+    assertMutable();
+    patchActive((current) => ({
     ...current,
     threads: {
       ...current.threads,
       [current.mode]: current.threads[current.mode].map((item) => item.id === current.activeThreadIds[current.mode] ? {
         ...item,
         modelOverrideId: undefined,
+        draft: { ...item.draft, promptHistory: invalidatePromptEnhancement(item.draft.promptHistory) },
         optionOverrides: {},
         providerJsonOverride: undefined,
         revision: item.revision + 1,
         updatedAt: new Date().toISOString(),
       } : item),
     },
-  }));
+    }));
+  };
 
-  const setCurrentAsModeDefault = () => patchActive((current) => {
+  const setCurrentAsModeDefault = () => {
+    assertMutable();
+    patchActive((current) => {
     const target = current.threads[current.mode].find((item) => item.id === current.activeThreadIds[current.mode]) ?? current.threads[current.mode][0];
     const resolved = effectiveThreadDraft(current, target);
     const key = target.mode;
@@ -3410,12 +4065,18 @@ export default function App() {
       },
       threads: {
         ...current.threads,
-        [current.mode]: current.threads[current.mode].map((item) => item.id === target.id ? { ...item, modelOverrideId: undefined, optionOverrides: {}, providerJsonOverride: undefined } : item),
+        [current.mode]: current.threads[current.mode].map((item) => ({
+          ...item,
+          ...(item.id === target.id ? { modelOverrideId: undefined, optionOverrides: {}, providerJsonOverride: undefined } : {}),
+          draft: { ...item.draft, promptHistory: invalidatePromptEnhancement(item.draft.promptHistory) },
+        })),
       },
     };
-  });
+    });
+  };
 
   const saveGenerationPreset = (name: string): string => {
+    assertMutable();
     const id = crypto.randomUUID();
     const timestamp = new Date().toISOString();
     const preset: GenerationPreset = {
@@ -3438,6 +4099,7 @@ export default function App() {
   };
 
   const applyGenerationPreset = (preset: GenerationPreset) => void (async () => {
+    assertMutable();
     const presetModel = catalogs[preset.mode].find((model) => model.id === preset.modelId);
     if (!presetModel) {
       toast.error(t("presetModelUnavailable", { model: preset.modelId }));
@@ -3448,6 +4110,7 @@ export default function App() {
       t("applyPresetModelHint", { current: selectedModel?.name ?? selectedId, next: presetModel.name, price: modelPriceLabel(preset.mode, presetModel) }),
       t("applyPreset"),
     )) return;
+    assertMutable();
     patchActive((current) => ({
       ...current,
       threads: {
@@ -3455,6 +4118,7 @@ export default function App() {
         [preset.mode]: current.threads[preset.mode].map((item) => item.id === current.activeThreadIds[preset.mode] ? {
           ...item,
           modelOverrideId: preset.modelId === current.generationDefaults.modelIds[preset.mode] ? undefined : preset.modelId,
+          draft: { ...item.draft, promptHistory: invalidatePromptEnhancement(item.draft.promptHistory) },
           optionOverrides: optionOverridesFromDefaults(current.generationDefaults.options[preset.mode], preset.options),
           providerJsonOverride: preset.providerJson === current.generationDefaults.providerJson[preset.mode] ? undefined : preset.providerJson,
           revision: item.revision + 1,
@@ -3467,6 +4131,7 @@ export default function App() {
   })();
 
   const deleteGenerationPreset = (id: string) => {
+    assertMutable();
     const next = commitStudioNow((current) => ({
       ...current,
       generationPresets: (current.generationPresets ?? []).filter((preset) => preset.id !== id),
@@ -3475,6 +4140,7 @@ export default function App() {
   };
 
   const saveCurrentDirectorPreset = (name: string) => {
+    assertMutable();
     if (!draft.directorPlan) return;
     try {
       const preset = createDirectorPreset(name, draft.directorPlan);
@@ -3487,6 +4153,7 @@ export default function App() {
   };
 
   const applySavedDirectorPreset = (preset: DirectorPreset) => {
+    assertMutable();
     if (!draft.directorPlan) return;
     try {
       patchDraft({ directorPlan: applyDirectorPresetToPlan(draft.directorPlan, preset) });
@@ -3498,11 +4165,15 @@ export default function App() {
   };
 
   const deleteSavedDirectorPreset = (presetId: string) => {
+    assertMutable();
     const next = commitStudioNow((current) => deleteDirectorPreset(current, presetId));
     void persistWorkspace(next).catch((error) => toast.error(errorMessage(error)));
   };
 
   const deleteAssets = async (ids: string[]) => {
+    assertMutable();
+    pendingWorkspaceMutationRef.current += 1;
+    try {
     const deleting = session.assets.filter((asset) => ids.includes(asset.id));
     const inUse = [...session.threads.image, ...session.threads.video].some((item) =>
       item.draft.references.some((reference) => ids.includes(reference.assetId)),
@@ -3512,6 +4183,7 @@ export default function App() {
       `${inUse ? t("deleteAttachedAssetsHint") : t("deleteAssetsHint")}\n\n${deleting.length}: ${deleting.map((asset) => `${asset.name} (${asset.kind})`).join(", ")}`,
       t("deleteAssets"),
     )) return;
+    assertMutable();
     const outcomes = await Promise.allSettled(deleting.map(deleteManagedAsset));
     const deletedIds = outcomes.flatMap((outcome, index) => outcome.status === "fulfilled" ? [deleting[index].id] : []);
     const failures = outcomes.flatMap((outcome, index) => outcome.status === "rejected" ? [`${deleting[index].name}: ${errorMessage(outcome.reason)}`] : []);
@@ -3525,17 +4197,32 @@ export default function App() {
       threads: {
         image: current.threads.image.map((item) => ({
           ...item,
-          draft: { ...item.draft, references: item.draft.references.filter((reference) => !deletedIds.includes(reference.assetId)) },
+          draft: {
+            ...item.draft,
+            references: item.draft.references.filter((reference) => !deletedIds.includes(reference.assetId)),
+            promptHistory: item.draft.references.some((reference) => deletedIds.includes(reference.assetId))
+              ? invalidatePromptEnhancement(item.draft.promptHistory)
+              : item.draft.promptHistory,
+          },
         })),
         video: current.threads.video.map((item) => ({
           ...item,
-          draft: { ...item.draft, references: item.draft.references.filter((reference) => !deletedIds.includes(reference.assetId)) },
+          draft: {
+            ...item.draft,
+            references: item.draft.references.filter((reference) => !deletedIds.includes(reference.assetId)),
+            promptHistory: item.draft.references.some((reference) => deletedIds.includes(reference.assetId))
+              ? invalidatePromptEnhancement(item.draft.promptHistory)
+              : item.draft.promptHistory,
+          },
         })),
       },
     }));
     await persistWorkspace(studioRef.current).catch((error) => toast.error(errorMessage(error)));
     setSelectedAssetIds(new Set());
     if (failures.length) toast.error(t("someAssetDeletesFailed", { error: failures.join(" · ") }));
+    } finally {
+      pendingWorkspaceMutationRef.current = Math.max(0, pendingWorkspaceMutationRef.current - 1);
+    }
   };
 
   const mentionMatch = draft.prompt.match(/(?:^|\s)@(\d*)$/);
@@ -3615,6 +4302,10 @@ export default function App() {
     if (resultHandoffTimer.current) window.clearTimeout(resultHandoffTimer.current);
     if (resultCooldownTimer.current) window.clearTimeout(resultCooldownTimer.current);
     resultHandoffTimer.current = window.setTimeout(() => {
+      if (action && updateMutationLockRef.current.active) {
+        setResultQueuePaused(false);
+        return;
+      }
       if (action) {
         action();
       } else {
@@ -3627,24 +4318,29 @@ export default function App() {
     resultCooldownTimer.current = window.setTimeout(() => setResultHandingOff(false), exitDelay + (reduceMotion ? 20 : 420));
   };
   const selectSession = (id: string) => {
+    assertMutable();
     setStudio((current) => ({ ...current, activeSessionId: id }));
     setSelectedAssetIds(new Set());
     setFocusedAssetId(null);
     setPreviewAssetId(null);
   };
   const createNewSession = () => {
+    assertMutable();
     setStudio((current) => {
       const created = initializeSessionCatalogDefaults(
         createSession(nextAvailableSessionName(
           current.sessions,
           (count) => t("newSessionName", { count }),
-        ), current.defaultEnhancePrompt),
+        )),
         catalogs,
       );
       return { ...current, activeSessionId: created.id, sessions: [...current.sessions, created] };
     });
   };
   const deleteStudioSession = (id: string) => void (async () => {
+    assertMutable();
+    pendingWorkspaceMutationRef.current += 1;
+    try {
     const deleting = studio.sessions.find((item) => item.id === id);
     if (!deleting || studio.sessions.length === 1) return;
     const deletionDecision = sessionDeletionDecision(deleting);
@@ -3657,6 +4353,7 @@ export default function App() {
       t("deleteSessionHint"),
       t("deleteSession"),
     )) return;
+    assertMutable();
     const deletion = await deleteSessionBlobs(deleting);
     if (deletion.failures.length) {
       const deleted = new Set(deletion.deletedIds);
@@ -3686,6 +4383,9 @@ export default function App() {
       return { ...current, sessions, activeSessionId: current.activeSessionId === id ? sessions[0].id : current.activeSessionId };
     });
     await persistWorkspace(next).catch((error) => toast.error(errorMessage(error)));
+    } finally {
+      pendingWorkspaceMutationRef.current = Math.max(0, pendingWorkspaceMutationRef.current - 1);
+    }
   })();
 
   const exportRecoveryBackup = () => void (async () => {
@@ -3753,7 +4453,7 @@ export default function App() {
   }).catch((error) => toast.error(errorMessage(error)));
 
   const exportWorkspace = () => void (async () => {
-    const payload = persistedStudioPayload(studioRef.current);
+    const payload = losslessStudioPayload(studioRef.current);
     if (isTauriRuntime()) {
       const path = await invoke<string>("export_workspace_state", {
         payload,
@@ -3771,11 +4471,14 @@ export default function App() {
   })().catch((error) => toast.error(errorMessage(error)));
 
   const importWorkspace = () => void (async () => {
+    assertMutable();
     if (!isTauriRuntime()) throw new Error("Workspace import is available in the desktop app.");
     const { open } = await import("@tauri-apps/plugin-dialog");
     const selected = await open({ multiple: false, filters: [{ name: "Fruit Truck workspace", extensions: ["json"] }] });
     if (typeof selected !== "string") return;
+    assertMutable();
     const loaded = await invoke<NativeLoadedWorkspace>("import_workspace_state", { path: selected });
+    assertMutable();
     const result = loadStudioStateWithRecovery({ storage: memoryStudioStorage(loaded.payload) });
     if (result.recovery.requiresUserAction) throw new Error(result.recovery.error ?? result.recovery.reason ?? "The workspace could not be imported safely.");
     setPreparedRequest(null);
@@ -3784,10 +4487,203 @@ export default function App() {
     toast.success(t("workspaceImported"));
   })().catch((error) => toast.error(errorMessage(error)));
 
+  const updateOperationGate = () => inspectActiveUpdateOperations({
+    state: studioRef.current,
+    pendingMaterializationCount: pendingWorkspaceMutationRef.current
+      + managedReconciliationPendingRef.current
+      + migratingAssetIds.current.size
+      + executingThreadIds.size
+      + enhancingThreadIds.size
+      + (polling.current ? 1 : 0),
+    pendingDurableSaveCount: nativeSavePendingRef.current,
+    durableSaveError: nativeSaveErrorRef.current,
+  });
+
+  const prepareLosslessUpdate = async ({
+    fromVersion,
+    toVersion,
+    signal,
+    onProgress,
+  }: UpdatePreparationContext) => {
+    if (updateMutationLockRef.current.active) {
+      throw new Error("Another update preparation is already active.");
+    }
+    pendingUpdateTransactionRef.current = null;
+    replaceUpdateMutationLock({ active: true, reason: "update" });
+    const preparation = (async () => {
+      const assertNotCancelled = () => {
+        if (signal.aborted) throw new Error("Update preparation was cancelled.");
+      };
+      assertNotCancelled();
+      const initialGate = updateOperationGate();
+      const initialBlockers = initialGate.blockers.filter((blocker) => blocker !== "durable_save_pending");
+      if (initialBlockers.length > 0) {
+        throw new Error(initialGate.activeOperationCount > 0
+          ? `Finish or recover ${initialGate.activeOperationCount} active operation(s) before installing the update.`
+          : "The workspace could not be made durable before updating.");
+      }
+
+      onProgress("preparing_workspace", 15);
+      await nativeSaveQueueRef.current;
+      assertNotCancelled();
+      await persistWorkspace(studioRef.current);
+      await nativeSaveQueueRef.current;
+      assertNotCancelled();
+      const settledGate = updateOperationGate();
+      if (!settledGate.allowed) {
+        throw new Error(settledGate.activeOperationCount > 0
+          ? `Finish or recover ${settledGate.activeOperationCount} active operation(s) before installing the update.`
+          : "The workspace changed or could not be saved while the update was being prepared.");
+      }
+
+      onProgress("verifying_assets", 55);
+      const cancelNativePreparation = () => {
+        void invoke<boolean>("cancel_update_snapshot_preparation").catch((error) => {
+          DIAGNOSTIC_LOG.append({
+            level: "error",
+            event: "update.snapshot_cancel_failed",
+            details: { error: errorMessage(error) },
+          });
+        });
+      };
+      signal.addEventListener("abort", cancelNativePreparation, { once: true });
+      let unlistenProgress: (() => void) | undefined;
+      let transaction: NativeUpdateTransaction;
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        unlistenProgress = await listen<NativeUpdatePreparationProgress>("update-preparation-progress", (event) => {
+          if (signal.aborted) return;
+          const progress = event.payload.totalByteSize > 0
+            ? 55 + Math.round((event.payload.totalBytesHashed / event.payload.totalByteSize) * 44)
+            : 99;
+          onProgress("verifying_assets", Math.min(99, progress));
+        });
+        assertNotCancelled();
+        transaction = await invoke<NativeUpdateTransaction>("create_pre_update_snapshot", {
+          fromVersion,
+          toVersion,
+        });
+      } finally {
+        signal.removeEventListener("abort", cancelNativePreparation);
+        unlistenProgress?.();
+      }
+      pendingUpdateTransactionRef.current = transaction;
+      replaceUpdateMutationLock({ active: true, reason: "update", transactionId: transaction.id });
+      assertNotCancelled();
+      const finalGate = updateOperationGate();
+      if (!finalGate.allowed) {
+        throw new Error("The workspace changed after its update snapshot was created.");
+      }
+      onProgress("verifying_assets", 100);
+    })();
+    updatePreparationPromiseRef.current = preparation;
+    await preparation;
+  };
+
+  const abortLosslessUpdate = async () => {
+    await updatePreparationPromiseRef.current?.catch(() => undefined);
+    const transaction = pendingUpdateTransactionRef.current;
+    if (transaction) {
+      if (["installing", "awaiting_restart", "verifying"].includes(transaction.phase)) {
+        replaceUpdateMutationLock({ active: true, reason: "update", transactionId: transaction.id });
+        await requireUpdateRecovery(
+          transaction,
+          "update_relaunch_required",
+          new Error("The app update reached installation and must be verified or restored before the workspace can reopen."),
+        );
+        return;
+      }
+      try {
+        await invoke("abort_update_transaction", { transactionId: transaction.id });
+      } catch (error) {
+        DIAGNOSTIC_LOG.append({
+          level: "error",
+          event: "update.abort_failed",
+          details: { transactionId: transaction.id, error: errorMessage(error) },
+        });
+        replaceUpdateMutationLock({ active: true, reason: "update", transactionId: transaction.id });
+        await requireUpdateRecovery(transaction, "update_relaunch_required", error);
+        throw error;
+      }
+    }
+    pendingUpdateTransactionRef.current = null;
+    updatePreparationPromiseRef.current = null;
+    replaceUpdateMutationLock({ active: false });
+  };
+
+  const requireInstalledUpdateRecovery = async (error: unknown) => {
+    const transaction = pendingUpdateTransactionRef.current;
+    if (!transaction) throw error;
+    replaceUpdateMutationLock({ active: true, reason: "update", transactionId: transaction.id });
+    await requireUpdateRecovery(transaction, "update_relaunch_required", error);
+  };
+
+  const persistUpdateInstallPhase = async (phase: UpdateInstallPhase) => {
+    const transaction = pendingUpdateTransactionRef.current;
+    if (!transaction) throw new Error("The pre-update snapshot transaction is missing.");
+    const nativePhase: UpdateTransactionPhase = phase === "restarting"
+      ? "awaiting_restart"
+      : phase;
+    const updated = await invoke<NativeUpdateTransaction>("set_update_transaction_phase", {
+      transactionId: transaction.id,
+      phase: nativePhase,
+    });
+    pendingUpdateTransactionRef.current = updated;
+  };
+
+  const retryUpdateVerification = async () => {
+    if (!updateRecovery) return;
+    const { getVersion } = await import("@tauri-apps/api/app");
+    const runningVersion = await getVersion();
+    if (runningVersion !== updateRecovery.transaction.toAppVersion) {
+      throw new Error(`Update verification requires app version ${updateRecovery.transaction.toAppVersion}, but this is ${runningVersion}.`);
+    }
+    await verifyPendingNativeUpdate(updateRecovery.transaction);
+  };
+
+  const restorePreUpdateWorkspace = async () => {
+    if (!updateRecovery) return;
+    await invoke("restore_pre_update_snapshot", { transactionId: updateRecovery.transaction.id });
+    const { getVersion } = await import("@tauri-apps/api/app");
+    const runningVersion = await getVersion();
+    if (runningVersion === updateRecovery.transaction.toAppVersion) {
+      await verifyPendingNativeUpdate(updateRecovery.transaction);
+      return;
+    }
+    if (runningVersion === updateRecovery.transaction.fromAppVersion) {
+      await invoke<NativeUpdateTransaction>("abandon_update_transaction_after_source_relaunch", {
+        transactionId: updateRecovery.transaction.id,
+      });
+      pendingUpdateTransactionRef.current = null;
+      replaceUpdateMutationLock({ active: false });
+      window.location.reload();
+      return;
+    }
+    throw new Error(`The restored workspace requires app version ${updateRecovery.transaction.fromAppVersion}, but this is ${runningVersion}.`);
+  };
+
+  const exportPreUpdateWorkspace = async () => {
+    if (!updateRecovery) return;
+    const path = await invoke<string>("export_pre_update_snapshot", {
+      transactionId: updateRecovery.transaction.id,
+    });
+    toast.success(`Pre-update workspace exported to ${path}.`);
+  };
+
+  const openUpdateAssetFolder = async () => {
+    const path = await invoke<string>("update_asset_folder");
+    const { openPath } = await import("@tauri-apps/plugin-opener");
+    await openPath(path);
+  };
+
   const exportSupportBundle = () => void (async () => {
     const storageHealth = isTauriRuntime()
       ? await invoke<unknown>("workspace_storage_health").catch((error) => ({ diagnostic: errorMessage(error) }))
       : { backend: "browser-local-storage" };
+    const updateTransaction = isTauriRuntime()
+      ? pendingUpdateTransactionRef.current
+        ?? await invoke<NativeUpdateTransaction | null>("load_pending_update_transaction").catch((error) => ({ diagnostic: errorMessage(error) }))
+      : null;
     const attempts = studio.sessions.flatMap((candidateSession) => [...candidateSession.threads.image, ...candidateSession.threads.video].flatMap((candidateThread) => candidateThread.attempts.map((attempt) => ({
       sessionId: candidateSession.id,
       threadId: candidateThread.id,
@@ -3862,7 +4758,7 @@ export default function App() {
         directorPlans,
         recovery: studio.recovery,
       },
-      context: { language, connectionState, catalogErrors, storageHealth },
+      context: { language, connectionState, catalogErrors, storageHealth, updateTransaction, updateRecovery },
     });
     const url = URL.createObjectURL(new Blob([serializeSupportBundle(bundle)], { type: "application/json" }));
     const anchor = document.createElement("a");
@@ -3923,6 +4819,7 @@ export default function App() {
   }, [patchActive]);
 
   const dispatchAppCommand = useCallback((id: AppCommandId): boolean => {
+    if (updateMutationLockRef.current.active || workspaceBootState !== "ready") return false;
     if (id === "quit") {
       requestAppQuit();
       return true;
@@ -3990,7 +4887,7 @@ export default function App() {
         return true;
       default: return false;
     }
-  }, [archiveThread, canGenerate, closeTopmostDialog, confirmation, createThread, cycleThread, focusPrompt, focusedAsset, hasActiveAttempt, modalOpen, mode, modeThreads.length, previewAsset, requestAppQuit, rightPanelOpen, session.threads, settingsOpen, shortcutHelpOpen, t, thread.id]);
+  }, [archiveThread, canGenerate, closeTopmostDialog, confirmation, createThread, cycleThread, focusPrompt, focusedAsset, hasActiveAttempt, modalOpen, mode, modeThreads.length, previewAsset, requestAppQuit, rightPanelOpen, session.threads, settingsOpen, shortcutHelpOpen, t, thread.id, workspaceBootState]);
   dispatchCommandRef.current = dispatchAppCommand;
 
   useEffect(() => {
@@ -4040,7 +4937,7 @@ export default function App() {
       generate: !confirmation && !modalOpen && canGenerate,
       settings: !modalOpen || settingsOpen,
       shortcutHelp: !modalOpen || shortcutHelpOpen,
-      quit: true,
+      quit: !updateMutationLock.active && workspaceBootState === "ready",
     },
     checked: {
       toggleSessionSidebar: sessionSidebarOpen,
@@ -4049,7 +4946,7 @@ export default function App() {
       videoMode: mode === "video",
       showAssets: rightPanelOpen,
     },
-  }), [canGenerate, confirmation, focusedAsset, hasActiveAttempt, hasArchivedThread, modalOpen, mode, modeThreads.length, previewAsset, rightPanelOpen, sessionSidebarOpen, settingsOpen, shortcutHelpOpen]);
+  }), [canGenerate, confirmation, focusedAsset, hasActiveAttempt, hasArchivedThread, modalOpen, mode, modeThreads.length, previewAsset, rightPanelOpen, sessionSidebarOpen, settingsOpen, shortcutHelpOpen, updateMutationLock.active, workspaceBootState]);
   nativeMenuStateRef.current = nativeMenuState;
 
   useEffect(() => {
@@ -4077,7 +4974,13 @@ export default function App() {
 
   return (
     <Tooltip.Provider>
-    <div className="app-shell" aria-hidden={onboardingOpen !== false} inert={onboardingOpen !== false ? true : undefined}>
+    <div
+      className="app-shell"
+      data-workspace-boot-state={workspaceBootState}
+      data-update-locked={updateMutationLock.active ? "true" : "false"}
+      aria-hidden={onboardingOpen !== false || workspaceBootState !== "ready" || updateMutationLock.active || Boolean(updateRecovery)}
+      inert={onboardingOpen !== false || workspaceBootState !== "ready" || updateMutationLock.active || updateRecovery ? true : undefined}
+    >
       <header className="topbar" data-tauri-drag-region>
         <div className="brand" data-tauri-drag-region><span className="brand-mark"><FruitTruckMark /></span><strong>Fruit Truck</strong></div>
         <ModelSelector mode={mode} models={models} selectedId={selectedId} loading={catalogLoading} onSelect={selectModel} inherited={!thread.modelOverrideId} onUseDefault={useModeDefaults} onSetDefault={setCurrentAsModeDefault} />
@@ -4184,6 +5087,7 @@ export default function App() {
                 warnings={compiledDirector?.warnings}
                 presets={studio.directorPresets}
                 onPlanChange={(directorPlan) => {
+                  assertMutable();
                   patchDraft({
                     directorPlan,
                     references: synchronizeDirectorFrameReferences(directorPlan, draft.references),
@@ -4191,6 +5095,7 @@ export default function App() {
                   setPreparedRequest(null);
                 }}
                 onCreatePlan={() => {
+                  assertMutable();
                   patchDraft({
                     directorPlan: createDirectorPlanForFrames(
                       draft.references.find((reference) => reference.role === "first_frame")?.assetId,
@@ -4239,6 +5144,7 @@ export default function App() {
               <Field.Root className="edit-mode-row">
                 <Field.Label className="edit-mode-label" nativeLabel={false} render={<div />}><span><strong>{t("editMode")}</strong><small>{t("editModeHint")}</small></span></Field.Label>
                 <Switch checked={draft.imageEditMode} onCheckedChange={(value) => {
+                  assertMutable();
                   const references = draft.references.map((reference) => {
                     const isTarget = value && `@${reference.slot}` === draft.imageEditTarget;
                     if (isTarget) return markReferenceAsEditTarget(reference);
@@ -4248,8 +5154,6 @@ export default function App() {
                   patchDraft({
                     imageEditMode: value,
                     references,
-                    enhancedPrompt: "",
-                    enhancedPromptDirty: false,
                   });
                 }} />
               </Field.Root>
@@ -4263,13 +5167,17 @@ export default function App() {
                   maskStrokes={draft.maskStrokes}
                   maskInstructions={draft.maskInstructions}
                   maskError={maskReferenceError}
-                  onMaskStrokesChange={(maskStrokes) => patchDraft({
-                    maskStrokes,
-                    maskInstructions: maskStrokes.length ? draft.maskInstructions : "",
-                    enhancedPrompt: "",
-                    enhancedPromptDirty: false,
-                  })}
-                  onMaskInstructionsChange={(maskInstructions) => patchDraft({ maskInstructions, enhancedPrompt: "", enhancedPromptDirty: false })}
+                  onMaskStrokesChange={(maskStrokes) => {
+                    assertMutable();
+                    patchDraft({
+                      maskStrokes,
+                      maskInstructions: maskStrokes.length ? draft.maskInstructions : "",
+                    });
+                  }}
+                  onMaskInstructionsChange={(maskInstructions) => {
+                    assertMutable();
+                    patchDraft({ maskInstructions });
+                  }}
                   onDropAsset={setEditTargetAsset}
                   onImport={importEditTarget}
                   onPick={pickEditTarget}
@@ -4291,6 +5199,7 @@ export default function App() {
               limit={referenceLimit}
               error={inputValidationError}
               onChange={(references) => {
+              assertMutable();
               const normalizedReferences = mode === "image" && draft.imageEditMode
                 ? references.map((reference) => `@${reference.slot}` === draft.imageEditTarget
                   ? markReferenceAsEditTarget(reference)
@@ -4306,8 +5215,6 @@ export default function App() {
                 imageEditTarget: mode === "image" && draft.imageEditMode && !targetStillAttached ? "" : draft.imageEditTarget,
                 maskStrokes: mode === "image" && draft.imageEditMode && !targetStillAttached ? [] : draft.maskStrokes,
                 maskInstructions: mode === "image" && draft.imageEditMode && !targetStillAttached ? "" : draft.maskInstructions,
-                enhancedPrompt: "",
-                enhancedPromptDirty: false,
               });
             }} onImport={importFiles} onPick={pickFiles} />
             {inputWarnings.length ? <div className="input-advisories" role="status">
@@ -4332,10 +5239,9 @@ export default function App() {
                   value={draft.prompt}
                   placeholder={mode === "image" ? t("imagePromptPlaceholder") : t("videoPromptPlaceholder")}
                   onChange={(event) => {
+                    assertMutable();
                     patchDraft({
                       prompt: event.target.value,
-                      enhancedPrompt: "",
-                      enhancedPromptDirty: false,
                     });
                     setMentionMenuOpen(/(?:^|\s)@\d*$/.test(event.target.value));
                     setMentionIndex(0);
@@ -4348,7 +5254,8 @@ export default function App() {
                     } else if (event.key === "Enter" || event.key === "Tab") {
                       event.preventDefault();
                       const selected = mentionSuggestions[mentionIndex] ?? mentionSuggestions[0];
-                      patchDraft({ prompt: draft.prompt.replace(/@\d*$/, `@${selected.slot} `), enhancedPrompt: "", enhancedPromptDirty: false });
+                      assertMutable();
+                      patchDraft({ prompt: draft.prompt.replace(/@\d*$/, `@${selected.slot} `) });
                       setMentionMenuOpen(false);
                     } else if (event.key === "Escape") {
                       event.preventDefault();
@@ -4361,7 +5268,7 @@ export default function App() {
                   <div className="mention-menu" id="input-mention-listbox" role="listbox" aria-label={t("numberedInputs")}>
                     {mentionSuggestions.map((reference, index) => {
                       const asset = assetMap.get(reference.assetId);
-                      return <Button type="button" variant="ghost" role="option" id={`input-mention-${reference.slot}`} aria-selected={index === mentionIndex} key={reference.assetId} onMouseEnter={() => setMentionIndex(index)} onClick={() => { patchDraft({ prompt: draft.prompt.replace(/@\d*$/, `@${reference.slot} `) }); setMentionMenuOpen(false); }}><b>@{reference.slot}</b>{asset?.name}</Button>;
+                      return <Button type="button" variant="ghost" role="option" id={`input-mention-${reference.slot}`} aria-selected={index === mentionIndex} key={reference.assetId} onMouseEnter={() => setMentionIndex(index)} onClick={() => { assertMutable(); patchDraft({ prompt: draft.prompt.replace(/@\d*$/, `@${reference.slot} `) }); setMentionMenuOpen(false); }}><b>@{reference.slot}</b>{asset?.name}</Button>;
                     })}
                   </div>
                 ) : null}
@@ -4385,37 +5292,21 @@ export default function App() {
               </div>
             </Field.Root>
 
-            <Field.Root className="enhance-row">
-              <Field.Label className="enhance-label" nativeLabel={false} render={<div />}><span><Sparkles /><span><strong>{t("promptEnhancement")}</strong><small>{studio.promptModel.endsWith("luna") ? "GPT-5.6 Luna · xhigh" : "GPT-5.6 Terra · high"}{displayedEnhancedPrompt && draft.enhancedVisualCount > 0 ? ` · ${t("visualContextIncluded")}` : ""}</small></span></span></Field.Label>
-              <div><Button size="xs" variant="ghost" disabled={enhancing || !hasRunnableInstructions(mode, draft)} onClick={() => void runEnhancement().catch((error) => toast.error(errorMessage(error)))}>{enhancing ? <LoaderCircle className="spin" /> : <RefreshCw />} {displayedEnhancedPrompt ? t("reEnhance") : t("preview")}</Button><Switch checked={draft.enhancePrompt && hasRunnableInstructions(mode, draft)} disabled={!hasRunnableInstructions(mode, draft)} onCheckedChange={(value) => patchDraft({ enhancePrompt: value })} /></div>
-            </Field.Root>
-            {displayedEnhancedPrompt ? (
-              <Collapsible.Root className="enhanced-prompt">
-                <Collapsible.Trigger>{t("enhancedPrompt")} <ChevronRight /></Collapsible.Trigger>
-                <Collapsible.Panel>
-                  <Textarea value={displayedEnhancedPrompt} rows={6} onChange={(event) => patchDraft({ enhancedPrompt: event.target.value, enhancedPromptDirty: true })} />
-                  <small>{t("enhancedPromptHint")}</small>
-                  {draft.enhancementArtifact?.negativePrompt != null ? (
-                    <Field.Root className="enhanced-negative-prompt">
-                      <Field.Label>{t("enhancedNegativePrompt")}</Field.Label>
-                      <Textarea
-                        value={draft.enhancementArtifact.negativePrompt}
-                        rows={3}
-                        onChange={(event) => patchDraft({
-                          enhancementArtifact: draft.enhancementArtifact
-                            ? { ...draft.enhancementArtifact, negativePrompt: event.target.value }
-                            : undefined,
-                          enhancedPromptDirty: true,
-                        })}
-                      />
-                      <small>{t("enhancedNegativePromptHint")}</small>
-                    </Field.Root>
-                  ) : null}
-                </Collapsible.Panel>
-              </Collapsible.Root>
-            ) : null}
+            <PromptEnhancementToolbar
+              modelLabel={selectedPromptModel.label}
+              effortLabel={t("promptReasoningEffortHigh")}
+              availability={selectedPromptModelAvailability}
+              canEnhance={promptEnhancementEnabled}
+              enhancing={enhancing}
+              canUndo={promptEnhancementCanUndo}
+              canRedo={promptEnhancementCanRedo}
+              resultReady={promptEnhancementResultReady}
+              onEnhance={() => void runEnhancement().catch((error) => toast.error(errorMessage(error)))}
+              onUndo={() => navigatePromptEnhancementHistory("undo")}
+              onRedo={() => navigatePromptEnhancementHistory("redo")}
+            />
 
-            <OptionsFields key={`${mode}:${selectedModel?.id ?? ""}`} mode={mode} model={selectedModel} options={draft.options} providerJson={draft.providerJson} providerError={providerError} onOptionsChange={(options) => patchDraft({ options })} onProviderJsonChange={(providerJson) => patchDraft({ providerJson })} />
+            <OptionsFields key={`${mode}:${selectedModel?.id ?? ""}`} mode={mode} model={selectedModel} options={draft.options} providerJson={draft.providerJson} providerError={providerError} onOptionsChange={(options) => { assertMutable(); patchDraft({ options }); }} onProviderJsonChange={(providerJson) => { assertMutable(); patchDraft({ providerJson }); }} />
             <GenerationPresetBar mode={mode} modelId={selectedId} options={draft.options} providerJson={draft.providerJson} presets={studio.generationPresets ?? []} onSave={saveGenerationPreset} onApply={applyGenerationPreset} onDelete={deleteGenerationPreset} />
             {requestBuildError && !providerError ? <div className="field-error request-build-error">{requestBuildError}</div> : null}
             {selectedModel ? <div className="thread-default-controls">
@@ -4436,14 +5327,16 @@ export default function App() {
                 preflightErrors={requestPreflightErrors}
                 status={preparingRequest ? "preparing" : currentPreparedRequest ? "final" : "draft"}
                 estimatedCost={currentPreparedRequest?.costLabel ?? generationCost?.label}
-                plannerModel={draft.enhancePrompt ? studio.promptModel : undefined}
-                plannerCost={currentPreparedRequest?.enhancementArtifact?.actualCostUsd != null ? formatUsd(currentPreparedRequest.enhancementArtifact.actualCostUsd) : undefined}
+                plannerModel={currentEnhancementArtifact ? currentCheckpoint?.plannerModel ?? currentEnhancementArtifact.plannerModel : undefined}
+                plannerCost={(currentPreparedRequest?.enhancementArtifact?.actualCostUsd ?? currentEnhancementArtifact?.actualCostUsd) != null
+                  ? formatUsd((currentPreparedRequest?.enhancementArtifact?.actualCostUsd ?? currentEnhancementArtifact?.actualCostUsd)!)
+                  : undefined}
                 routeSummary={currentPreparedRequest?.routeLabel ?? draftPreparedRequest.route?.providerName ?? draftPreparedRequest.route?.providerSlug}
                 routeDefinitive={currentPreparedRequest?.artifact.routeResolution.definitive ?? draftPreparedRequest.routeResolution.definitive}
                 privacySummary={currentPreparedRequest?.privacyLabel ?? `ZDR: ${draftPreparedRequest.privacy.zdr} · data collection: ${draftPreparedRequest.privacy.dataCollection}${draftPreparedRequest.privacy.warning ? ` · ${draftPreparedRequest.privacy.warning}` : ""}`}
                 transferredBytes={transferBytes}
                 compiledDirector={currentPreparedRequest?.compiledDirector ?? compiledDirector}
-                plannerEnabled={draft.enhancePrompt}
+                plannerEnabled={Boolean(currentEnhancementArtifact)}
                 onPrepare={() => void prepareRequestForReview()}
               />
               </Suspense>
@@ -4488,9 +5381,27 @@ export default function App() {
         status={credential}
         connectionState={connectionState}
         promptModel={studio.promptModel}
-        defaultEnhancePrompt={studio.defaultEnhancePrompt}
-        onPromptModelChange={(promptModel) => setStudio((current) => ({ ...current, promptModel }))}
-        onDefaultEnhancePromptChange={(enabled) => setStudio((current) => applyDefaultEnhancePrompt(current, enabled))}
+        promptModelAvailability={promptModelAvailability}
+        onPromptModelChange={(promptModel) => {
+          assertMutable();
+          setStudio((current) => ({
+          ...current,
+          promptModel,
+          sessions: current.sessions.map((candidateSession) => ({
+            ...candidateSession,
+            threads: {
+              image: candidateSession.threads.image.map((candidateThread) => ({
+                ...candidateThread,
+                draft: { ...candidateThread.draft, promptHistory: invalidatePromptEnhancement(candidateThread.draft.promptHistory) },
+              })),
+              video: candidateSession.threads.video.map((candidateThread) => ({
+                ...candidateThread,
+                draft: { ...candidateThread.draft, promptHistory: invalidatePromptEnhancement(candidateThread.draft.promptHistory) },
+              })),
+            },
+          })),
+          }));
+        }}
         onExportSupport={exportSupportBundle}
         onExportWorkspace={exportWorkspace}
         onImportWorkspace={importWorkspace}
@@ -4503,11 +5414,11 @@ export default function App() {
       />
       </Suspense>
       <ConfirmDialog confirmation={confirmation} onClose={closeConfirmation} />
-      {onboardingOpen === false && !studio.recovery?.requiresUserAction ? <UpdatePrompt
-        getActiveAttemptCount={() => activeDurableOperationCount(studioRef.current)}
-        isDurableSavePending={() => nativeSavePendingRef.current > 0}
-        getDurableSaveError={() => nativeSaveErrorRef.current}
-        onBeforeInstall={() => persistWorkspace(studioRef.current)}
+      {onboardingOpen === false && workspaceBootState === "ready" && !pendingUpdateCompletion && !updateRecovery && !studio.recovery?.requiresUserAction ? <UpdatePrompt
+        onPrepareInstall={prepareLosslessUpdate}
+        onInstallAborted={abortLosslessUpdate}
+        onInstallRecoveryRequired={requireInstalledUpdateRecovery}
+        onInstallPhaseChange={persistUpdateInstallPhase}
       /> : null}
       <WorkflowGuide
         open={workflowGuideOpen}
@@ -4529,7 +5440,27 @@ export default function App() {
         onOpenSafeWorkspace={() => setStudio((current) => current.recovery ? { ...current, recovery: { ...current.recovery, kind: "fresh", status: "fresh", requiresUserAction: false } } : current)}
       /> : null}
     </div>
-    {onboardingOpen !== false && !studio.recovery?.requiresUserAction ? (
+    {isTauriRuntime() && workspaceBootState !== "ready" && workspaceBootState !== "recovery_required" ? (
+      <div className="update-boot-status" role="status" aria-live="polite">
+        <FruitTruckMark />
+        <LoaderCircle className="spin" />
+        <strong>{workspaceBootState === "loading" ? "Loading workspace" : workspaceBootState === "migrating" ? "Migrating workspace" : "Verifying update"}</strong>
+        <span>Your workspace remains read-only until update verification is complete.</span>
+      </div>
+    ) : null}
+    {updateRecovery ? <UpdateRecoveryDialog
+      fromVersion={updateRecovery.transaction.fromAppVersion}
+      toVersion={updateRecovery.transaction.toAppVersion}
+      transactionId={updateRecovery.transaction.id}
+      failureCode={updateRecovery.code}
+      failureMessage={updateRecovery.message}
+      onRetryVerification={retryUpdateVerification}
+      onRestorePreUpdateWorkspace={restorePreUpdateWorkspace}
+      onExportPreUpdateSnapshot={exportPreUpdateWorkspace}
+      onOpenAssetFolder={openUpdateAssetFolder}
+      onExitWithoutChanges={() => invoke("quit_app")}
+    /> : null}
+    {workspaceBootState === "ready" && !updateRecovery && onboardingOpen !== false && !studio.recovery?.requiresUserAction ? (
       <Onboarding
         ready={onboardingOpen === true}
         onSave={async (apiKey) => {
