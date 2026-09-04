@@ -50,6 +50,7 @@ import {
   assessInputConstraints,
   explainGenerationError,
   modelPolicyNotices,
+  videoInputPolicy,
   validateInputConstraints,
   type InputConstraint,
 } from "@/modelPolicies";
@@ -89,17 +90,19 @@ import {
   validateCredential,
   validateProviderConfiguration,
   validateReferenceCoverage,
-  videoReferenceLimit,
+  videoTotalInputLimit,
   type CredentialStatus,
   type CredentialValidationStatus,
   type GenerationMode,
   type GenerationModel,
+  type GenerationRoute,
   type ImageModel,
   type ImageModelEndpoint,
   type PromptEnhancementVisual,
   type PreparedRequest,
   type ReferenceAsset,
   type VideoModel,
+  type VideoModelEndpoint,
 } from "@/openrouter";
 import {
   PROMPT_PLANNER_VERSION,
@@ -144,12 +147,18 @@ import {
   preferredCatalogModel,
   applyDefaultEnhancePrompt,
   recordSessionCost,
+  applyDirectorPreset as applyDirectorPresetToPlan,
+  createDirectorPreset,
+  saveDirectorPreset,
+  deleteDirectorPreset,
   reconcileManagedAssetIndex,
   type NativeManagedAsset,
   type GenerationDraftState,
   type GenerationAttempt,
+  type DraftReference,
   type GenerationThread,
   type GenerationPreset,
+  type DirectorPreset,
   type SessionAsset,
   type StudioSession,
   type StudioState,
@@ -161,6 +170,12 @@ import { NATIVE_MENU_COMMAND_IDS, commandForKeyboardEvent, type AppCommandId } f
 import { activeDurableOperationCount, reconcilePersistedAttempts, sessionDeletionDecision } from "@/attemptRecovery";
 import { localizedAttemptAction, localizedAttemptMessage } from "@/attemptPresentation";
 import { buildSupportBundle, localDiagnosticLog, serializeSupportBundle } from "@/diagnostics";
+import { resolveRunnableDirectorCapability } from "@/director/capabilities";
+import { compileDirectorPlan, type DirectorCompilationResult } from "@/director/compiler";
+import { synchronizeDirectorFrameReferences, synchronizeDirectorPlanFrames } from "@/director/bindings";
+import { createDefaultDirectorPlan, createDefaultDirectorShot, createDirectorId } from "@/director/defaults";
+import { directorDiagnosticSummary } from "@/director/diagnostics";
+import type { CompiledDirector, DirectorFrameBinding, DirectorPlan } from "@/director/types";
 import {
   VIDEO_POLL_INTERVAL_MS,
   createResilientPollScheduler,
@@ -173,6 +188,7 @@ const SettingsDialog = lazy(() => import("@/components/SettingsDialog").then((mo
 const ImageEditPanel = lazy(() => import("@/components/EditMediaPanel").then((module) => ({ default: module.ImageEditPanel })));
 const RequestPreviewDialog = lazy(() => import("@/components/RequestPreviewDialog").then((module) => ({ default: module.RequestPreviewDialog })));
 const GenerationResultDialog = lazy(() => import("@/components/GenerationResultDialog").then((module) => ({ default: module.GenerationResultDialog })));
+const DirectorPanel = lazy(() => import("@/components/DirectorPanel").then((module) => ({ default: module.DirectorPanel })));
 
 function errorMessage(error: unknown) {
   const raw = error instanceof Error ? error.message : String(error);
@@ -259,7 +275,63 @@ type PreparedGenerationRequest = {
   costLabel: string;
   routeLabel: string;
   privacyLabel: string;
+  compiledDirector?: CompiledDirector;
 };
+
+type DirectorDraftReference = DraftReference & {
+  timestampSeconds?: number;
+};
+
+function directorMaxInputReferences(
+  model: VideoModel | null,
+  route: GenerationRoute | null | undefined,
+): number | undefined {
+  const endpoint = route?.mode === "video" ? route.endpoint as VideoModelEndpoint | undefined : undefined;
+  return endpoint?.max_input_references
+    ?? endpoint?.supported_parameters?.input_references?.max
+    ?? model?.max_input_references
+    ?? route?.capabilities.input_references?.max;
+}
+
+function compileDraftDirector({
+  plan,
+  duration,
+  references,
+  model,
+  route,
+  availableAssetIds,
+  basePrompt,
+  capability = resolveRunnableDirectorCapability(model, route),
+}: {
+  plan?: DirectorPlan;
+  duration: unknown;
+  references: readonly DraftReference[];
+  model: VideoModel | null;
+  route?: GenerationRoute | null;
+  availableAssetIds: ReadonlySet<string>;
+  basePrompt: string;
+  capability?: ReturnType<typeof resolveRunnableDirectorCapability>;
+}): DirectorCompilationResult | undefined {
+  if (!plan) return undefined;
+  const durationSeconds = Number(duration);
+  return compileDirectorPlan({
+    plan,
+    capability,
+    availableAssetIds,
+    durationSeconds: Number.isFinite(durationSeconds) && durationSeconds > 0 ? durationSeconds : undefined,
+    maxDurationSeconds: model?.supported_durations?.length
+      ? Math.max(...model.supported_durations)
+      : undefined,
+    basePrompt,
+    promptProfileId: model ? promptProfileForModel("video", model.id).id : undefined,
+    existingFrameBindings: references.map((reference) => ({
+      assetId: reference.assetId,
+      role: reference.role,
+    })),
+    maxInputReferences: directorMaxInputReferences(model, route),
+    allowMixedFrameAndReferences: Boolean(model && videoInputPolicy(model.id).combination === "allow"),
+  });
+}
 
 function preparationKeyFor(
   session: StudioSession,
@@ -290,7 +362,126 @@ function preparationKeyFor(
     imageEditTarget: draft.imageEditTarget,
     maskInstructions: draft.maskInstructions,
     maskStrokes: draft.maskStrokes,
+    directorPlan: draft.directorPlan,
   });
+}
+
+function draftReferencesWithDirectorBindings(
+  references: readonly DraftReference[],
+  bindings: readonly DirectorFrameBinding[],
+  assets: readonly SessionAsset[],
+  visualInstructions: readonly CompiledDirector["visualInstructions"][number][] = [],
+): DirectorDraftReference[] {
+  const available = new Map(assets.map((asset) => [asset.id, asset]));
+  const merged: DirectorDraftReference[] = references.map((reference) => ({ ...reference }));
+  let nextSlot = merged.reduce((maximum, reference) => Math.max(maximum, reference.slot), 0) + 1;
+  for (const binding of bindings) {
+    const asset = available.get(binding.assetId);
+    if (!asset || asset.storageAvailability === "missing" || (binding.role !== "reference" && asset.kind !== "image")) continue;
+    if (merged.some((reference) => reference.assetId === binding.assetId
+      && reference.role === binding.role
+      && reference.timestampSeconds === binding.timestampSeconds)) continue;
+    const reusable = binding.role === "reference" || binding.timestampSeconds !== undefined
+      ? undefined
+      : merged.find((reference) => reference.assetId === binding.assetId && reference.role === "reference" && reference.timestampSeconds === undefined);
+    if (reusable) {
+      reusable.role = binding.role;
+      reusable.purpose = defaultReferencePurpose(asset.kind, binding.role);
+      continue;
+    }
+    merged.push({
+      assetId: binding.assetId,
+      slot: nextSlot,
+      role: binding.role,
+      purpose: defaultReferencePurpose(asset.kind, binding.role),
+      ...(binding.timestampSeconds === undefined ? {} : { timestampSeconds: binding.timestampSeconds }),
+    });
+    nextSlot += 1;
+  }
+  for (const instruction of visualInstructions) {
+    const asset = available.get(instruction.sourceAssetId);
+    if (!asset || asset.storageAvailability === "missing" || merged.some((reference) => reference.assetId === instruction.sourceAssetId)) continue;
+    merged.push({
+      assetId: instruction.sourceAssetId,
+      slot: nextSlot,
+      role: "reference",
+      purpose: "composition",
+    });
+    nextSlot += 1;
+  }
+  return merged;
+}
+
+function directorVisualReferenceAssets(
+  instructions: readonly CompiledDirector["visualInstructions"][number][],
+  startSlot: number,
+): ReferenceAsset[] {
+  const transparentPng = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAEAQH/2Zq7WQAAAABJRU5ErkJggg==";
+  return instructions.map((_, index) => ({
+    id: `director-visual-${index + 1}`,
+    name: `Director motion guide ${index + 1}.png`,
+    mediaType: "image/png",
+    dataUrl: transparentPng,
+    byteSize: 70,
+    role: "reference",
+    purpose: "motion",
+    slot: startSlot + index,
+  }));
+}
+
+function previewAssetTransportUrl(asset: SessionAsset, slot: number): string {
+  const external = asset.externalUrl?.trim().toLowerCase();
+  if (external?.startsWith("https://")) return `https://fruit-truck.invalid/reference-${slot}`;
+  if (external?.startsWith("http://")) return `http://fruit-truck.invalid/reference-${slot}`;
+  return `data:${asset.mimeType};base64,AA==`;
+}
+
+async function rasterizeDirectorVisualReferenceAssets(
+  instructions: readonly CompiledDirector["visualInstructions"][number][],
+  startSlot: number,
+): Promise<ReferenceAsset[]> {
+  return Promise.all(instructions.map(async (instruction, index) => {
+    const source = URL.createObjectURL(new Blob([instruction.overlay], { type: "image/svg+xml" }));
+    try {
+      const image = new Image();
+      await new Promise<void>((resolve, reject) => {
+        image.onload = () => resolve();
+        image.onerror = () => reject(new Error("The Director visual guide could not be decoded."));
+        image.src = source;
+      });
+      const canvas = document.createElement("canvas");
+      canvas.width = 1000;
+      canvas.height = 1000;
+      const context = canvas.getContext("2d");
+      if (!context) throw new Error("The Director visual guide canvas is unavailable.");
+      context.clearRect(0, 0, canvas.width, canvas.height);
+      context.drawImage(image, 0, 0, canvas.width, canvas.height);
+      const blob = await new Promise<Blob>((resolve, reject) => canvas.toBlob((value) => {
+        if (value) resolve(value);
+        else reject(new Error("The Director visual guide could not be encoded as PNG."));
+      }, "image/png"));
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => typeof reader.result === "string"
+          ? resolve(reader.result)
+          : reject(new Error("The Director visual guide PNG could not be read."));
+        reader.onerror = () => reject(reader.error ?? new Error("The Director visual guide PNG could not be read."));
+        reader.readAsDataURL(blob);
+      });
+      return {
+        id: `director-visual-${index + 1}`,
+        name: `Director motion guide ${index + 1}.png`,
+        mediaType: "image/png",
+        dataUrl,
+        byteSize: blob.size,
+        role: "reference" as const,
+        purpose: "motion" as const,
+        slot: startSlot + index,
+      };
+    } finally {
+      URL.revokeObjectURL(source);
+    }
+  }));
 }
 
 function hasRunnableInstructions(mode: GenerationMode, draft: GenerationDraftState) {
@@ -441,6 +632,8 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [shortcutHelpOpen, setShortcutHelpOpen] = useState(false);
   const [workflowGuideOpen, setWorkflowGuideOpen] = useState(false);
+  const [directorOpen, setDirectorOpen] = useState(false);
+  const [directorAssetUrls, setDirectorAssetUrls] = useState<Record<string, string>>({});
   const [executingThreadIds, setExecutingThreadIds] = useState<Set<string>>(new Set());
   const [enhancingThreadIds, setEnhancingThreadIds] = useState<Set<string>>(new Set());
   const [selectedAssetIds, setSelectedAssetIds] = useState<Set<string>>(new Set());
@@ -535,8 +728,79 @@ export default function App() {
   const roles = useMemo(() => [...new Set(Object.values(roleOptions).flat())], [roleOptions]);
   const referenceLimit = mode === "image"
     ? imageReferenceLimit(selectedModel as ImageModel | null)
-    : 0;
+    : videoTotalInputLimit(selectedModel as VideoModel | null);
   const assetMap = useMemo(() => new Map(session.assets.map((asset) => [asset.id, asset])), [session.assets]);
+  const availableAssetIds = useMemo(() => new Set(session.assets
+    .filter((asset) => asset.storageAvailability !== "missing")
+    .map((asset) => asset.id)), [session.assets]);
+  const directorRoute = useMemo(() => mode === "video" && selectedModel
+    ? resolveEligibleRoute({
+      mode: "video",
+      model: selectedModel,
+      options: draft.options,
+      providerJson: draft.providerJson,
+    }).selected
+    : undefined, [draft.options, draft.providerJson, mode, selectedModel]);
+  const directorCapability = useMemo(() => resolveRunnableDirectorCapability(
+    mode === "video" ? selectedModel as VideoModel | null : null,
+    directorRoute,
+  ), [directorRoute, mode, selectedModel]);
+  const compiledDirector = useMemo<DirectorCompilationResult | undefined>(() => {
+    if (mode !== "video" || !draft.directorPlan) return undefined;
+    return compileDraftDirector({
+      plan: draft.directorPlan,
+      duration: draft.options.duration,
+      references: draft.references,
+      model: selectedModel as VideoModel | null,
+      route: directorRoute,
+      capability: directorCapability,
+      availableAssetIds,
+      basePrompt: draft.prompt,
+    });
+  }, [availableAssetIds, directorCapability, directorRoute, draft.directorPlan, draft.options.duration, draft.prompt, draft.references, mode, selectedModel]);
+  const generationReferences = useMemo(() => draftReferencesWithDirectorBindings(
+    draft.references,
+    compiledDirector?.frameBindings ?? [],
+    session.assets,
+    compiledDirector?.visualInstructions ?? [],
+  ), [compiledDirector?.frameBindings, compiledDirector?.visualInstructions, draft.references, session.assets]);
+  const directorSourceAsset = useMemo(() => {
+    const sourceAssetId = draft.directorPlan?.sourceAssetId
+      ?? draft.references.find((reference) => reference.role === "first_frame")?.assetId;
+    const asset = sourceAssetId ? assetMap.get(sourceAssetId) : undefined;
+    return asset?.kind === "image" && asset.storageAvailability !== "missing" ? asset : null;
+  }, [assetMap, draft.directorPlan?.sourceAssetId, draft.references]);
+
+  useEffect(() => {
+    let disposed = false;
+    const resolvedUrls: string[] = [];
+    setDirectorAssetUrls({});
+    const requestedIds = new Set([
+      draft.directorPlan?.sourceAssetId,
+      ...(draft.directorPlan?.subjects.map((subject) => subject.sourceAssetId) ?? []),
+    ].filter((id): id is string => Boolean(id)));
+    void Promise.all([...requestedIds].map(async (assetId) => {
+      const asset = assetMap.get(assetId);
+      if (!asset || asset.kind !== "image" || asset.storageAvailability === "missing") return undefined;
+      try {
+        const url = await assetRequestUrl(asset);
+        resolvedUrls.push(url);
+        return [assetId, url] as const;
+      } catch {
+        return undefined;
+      }
+    })).then((entries) => {
+      if (!disposed) setDirectorAssetUrls(Object.fromEntries(entries.filter((entry): entry is readonly [string, string] => Boolean(entry))));
+    });
+    return () => {
+      disposed = true;
+      resolvedUrls.filter((url) => url.startsWith("blob:")).forEach((url) => URL.revokeObjectURL(url));
+    };
+  }, [assetMap, draft.directorPlan?.sourceAssetId, draft.directorPlan?.subjects]);
+
+  useEffect(() => {
+    if (mode !== "video" && directorOpen) setDirectorOpen(false);
+  }, [directorOpen, mode]);
   const currentEnhancementContext = useMemo(() => selectedModel
     ? enhancementContext(session, thread, draft, selectedModel, studio.promptModel)
     : null, [draft, selectedModel, session, studio.promptModel, thread]);
@@ -696,6 +960,32 @@ export default function App() {
     });
   }, [patchActive]);
 
+  const createDirectorPlanForFrames = useCallback((sourceAssetId?: string, lastFrameAssetId?: string): DirectorPlan => {
+    const plan = createDefaultDirectorPlan({ sourceAssetId });
+    const shot = createDefaultDirectorShot();
+    const firstKeyframe = sourceAssetId ? {
+      id: createDirectorId("keyframe"), assetId: sourceAssetId, role: "first" as const, time: 0,
+    } : undefined;
+    const lastKeyframe = lastFrameAssetId ? {
+      id: createDirectorId("keyframe"), assetId: lastFrameAssetId, role: "last" as const, time: 1,
+    } : undefined;
+    const keyframes = [firstKeyframe, lastKeyframe].filter((keyframe): keyframe is NonNullable<typeof keyframe> => Boolean(keyframe));
+    return {
+      ...plan,
+      keyframes,
+      shots: [{ ...shot, keyframeIds: keyframes.map((keyframe) => keyframe.id) }],
+    };
+  }, []);
+
+  const openDirector = useCallback(() => {
+    if (!draft.directorPlan) {
+      const firstFrameAssetId = draft.references.find((reference) => reference.role === "first_frame")?.assetId;
+      const lastFrameAssetId = draft.references.find((reference) => reference.role === "last_frame")?.assetId;
+      patchDraft({ directorPlan: createDirectorPlanForFrames(firstFrameAssetId, lastFrameAssetId) });
+    }
+    setDirectorOpen(true);
+  }, [createDirectorPlanForFrames, draft.directorPlan, draft.references, patchDraft]);
+
   const recordGenerationCost = useCallback((
     sessionId: string,
     mode: GenerationMode,
@@ -801,7 +1091,7 @@ export default function App() {
         recovery: {
           kind: "corrupt",
           status: "corrupt",
-          targetSchemaVersion: 6,
+          targetSchemaVersion: 8,
           rawStateAvailable: true,
           requiresUserAction: true,
           reason: "The native workspace could not be loaded. Its files were retained and automatic saving is paused.",
@@ -1581,14 +1871,79 @@ export default function App() {
   const importEditTarget = async (files: FileList | File[]) => applyImportedEditTarget(await importFiles(files));
   const pickEditTarget = async () => applyImportedEditTarget(await pickFiles());
 
-  const routeImageToVideo = (_assetId: string, notice?: GenerationResultNotice) => {
-    toast.error(t("videoReferencesUnavailable"));
-    if (notice) {
-      patchSession(notice.sessionId, (current) => ({ ...current, mode: "video" }));
-      setStudio((current) => ({ ...current, activeSessionId: notice.sessionId }));
-    } else {
-      switchMode("video");
-    }
+  const routeImageToVideo = (assetId: string, notice?: GenerationResultNotice) => {
+    const patchTarget = notice
+      ? (update: (current: StudioSession) => StudioSession) => patchSession(notice.sessionId, update)
+      : patchActive;
+    patchTarget((current) => {
+      const asset = current.assets.find((candidate) => candidate.id === assetId);
+      if (!asset || asset.kind !== "image") return current;
+      const targetId = current.activeThreadIds.video;
+      return {
+        ...current,
+        mode: "video",
+        threads: {
+          ...current.threads,
+          video: current.threads.video.map((candidate) => {
+            if (candidate.id !== targetId) return candidate;
+            const existing = candidate.draft.references.find((reference) => reference.assetId === assetId);
+            const references = candidate.draft.references.map((reference) => reference.role === "first_frame"
+              ? { ...reference, role: "reference" as const, purpose: defaultReferencePurpose("image", "reference") }
+              : reference);
+            if (existing) {
+              const index = references.findIndex((reference) => reference.assetId === assetId);
+              references[index] = {
+                ...references[index],
+                role: "first_frame",
+                purpose: defaultReferencePurpose("image", "first_frame"),
+              };
+            } else {
+              references.push({
+                assetId,
+                slot: nextReferenceSlot(references),
+                role: "first_frame",
+                purpose: defaultReferencePurpose("image", "first_frame"),
+              });
+            }
+            const directorPlan = candidate.draft.directorPlan ?? createDirectorPlanForFrames(
+              assetId,
+              candidate.draft.references.find((reference) => reference.role === "last_frame")?.assetId,
+            );
+            const previousSourceAssetId = directorPlan.sourceAssetId;
+            const existingFirst = directorPlan.keyframes.find((keyframe) => keyframe.role === "first");
+            const firstKeyframeId = existingFirst?.id ?? createDirectorId("keyframe");
+            const firstShotId = [...directorPlan.shots].sort((left, right) => left.order - right.order)[0]?.id;
+            const planWithSource: DirectorPlan = {
+              ...directorPlan,
+              sourceAssetId: assetId,
+              subjects: directorPlan.subjects.map((subject) => subject.sourceAssetId === previousSourceAssetId
+                ? { ...subject, sourceAssetId: assetId }
+                : subject),
+              keyframes: [
+                ...directorPlan.keyframes.filter((keyframe) => keyframe.role !== "first"),
+                { id: firstKeyframeId, assetId, role: "first", time: 0 },
+              ],
+              shots: directorPlan.shots.map((shot) => {
+                const keyframeIds = shot.keyframeIds.filter((id) => id !== existingFirst?.id && id !== firstKeyframeId);
+                return {
+                  ...shot,
+                  keyframeIds: shot.id === firstShotId ? [...keyframeIds, firstKeyframeId] : keyframeIds,
+                };
+              }),
+              updatedAt: new Date().toISOString(),
+            };
+            return {
+              ...candidate,
+              draft: { ...candidate.draft, references, directorPlan: planWithSource },
+              revision: candidate.revision + 1,
+              updatedAt: new Date().toISOString(),
+            };
+          }),
+        },
+      };
+    });
+    if (notice) setStudio((current) => ({ ...current, activeSessionId: notice.sessionId }));
+    setDirectorOpen(true);
   };
 
   const selectStageModel = async (targetMode: GenerationMode, id: string) => {
@@ -1674,23 +2029,30 @@ export default function App() {
     return null;
   }, [draft.providerJson, selectedModel, t]);
 
-  const previewReferences = useMemo<ReferenceAsset[]>(() => draft.references.flatMap((reference) => {
-    const asset = assetMap.get(reference.assetId);
-    const masked = mode === "image"
-      && draft.imageEditMode
-      && `@${reference.slot}` === draft.imageEditTarget.trim()
-      && draft.maskStrokes.length > 0;
-    return asset ? [{
-      id: asset.id,
-      name: masked ? `${asset.name} (transparent edit mask)` : asset.name,
-      mediaType: masked ? "image/png" : asset.mimeType,
-      dataUrl: `local-asset://#${reference.slot}/${asset.name}`,
-      byteSize: asset.byteSize,
-      role: reference.role,
-      purpose: reference.purpose,
-      slot: reference.slot,
-    }] : [];
-  }), [assetMap, draft.imageEditMode, draft.imageEditTarget, draft.maskStrokes.length, draft.references, mode]);
+  const previewReferences = useMemo<ReferenceAsset[]>(() => {
+    const references: ReferenceAsset[] = generationReferences.flatMap((reference) => {
+      const asset = assetMap.get(reference.assetId);
+      const masked = mode === "image"
+        && draft.imageEditMode
+        && `@${reference.slot}` === draft.imageEditTarget.trim()
+        && draft.maskStrokes.length > 0;
+      return asset ? [{
+        id: asset.id,
+        name: masked ? `${asset.name} (transparent edit mask)` : asset.name,
+        mediaType: masked ? "image/png" : asset.mimeType,
+        dataUrl: previewAssetTransportUrl(asset, reference.slot),
+        byteSize: asset.byteSize,
+        role: reference.role,
+        purpose: reference.purpose,
+        slot: reference.slot,
+        ...(reference.timestampSeconds === undefined ? {} : { timestampSeconds: reference.timestampSeconds }),
+      }] : [];
+    });
+    return [...references, ...directorVisualReferenceAssets(
+      compiledDirector?.visualInstructions ?? [],
+      generationReferences.reduce((maximum, reference) => Math.max(maximum, reference.slot), 0) + 1,
+    )];
+  }, [assetMap, compiledDirector?.visualInstructions, draft.imageEditMode, draft.imageEditTarget, draft.maskStrokes.length, generationReferences, mode]);
 
   const hasCurrentEnhancement = Boolean(
     currentEnhancementContext
@@ -1731,7 +2093,8 @@ export default function App() {
       ? Number(draft.imageEditTarget.match(/^@(\d+)$/)?.[1] ?? 0) || undefined
       : undefined,
     negativePrompt: hasCurrentEnhancement ? draft.enhancementArtifact?.negativePrompt : undefined,
-  }), [draft.enhancementArtifact?.negativePrompt, draft.imageEditMode, draft.imageEditTarget, draft.options, draft.providerJson, hasCurrentEnhancement, mode, preparedPrompt, previewReferences, selectedId]);
+    director: compiledDirector,
+  }), [compiledDirector, draft.enhancementArtifact?.negativePrompt, draft.imageEditMode, draft.imageEditTarget, draft.options, draft.providerJson, hasCurrentEnhancement, mode, preparedPrompt, previewReferences, selectedId]);
   const draftPreparedRequest = useMemo(() => prepareOpenRouterRequest(previewGenerationDraft, selectedModel, {
     final: false,
     catalogFingerprint: currentCatalogFingerprint,
@@ -1805,14 +2168,14 @@ export default function App() {
   }, [t]);
 
   const inputIssues = useMemo(() => {
-    const unsupported = draft.references.find((reference) => {
+    const unsupported = generationReferences.find((reference) => {
       const asset = assetMap.get(reference.assetId);
       return !asset || !allowedAssetRolesForKind(mode, selectedModel, asset.kind).includes(reference.role);
     });
     return [
       ...(unsupported ? [{ code: "unsupported_reference" as const, severity: "error" as const, slot: unsupported.slot }] : []),
       ...assessInputConstraints({
-      references: draft.references.map((reference) => {
+      references: generationReferences.map((reference) => {
         const asset = assetMap.get(reference.assetId);
         return {
           ...reference,
@@ -1829,13 +2192,13 @@ export default function App() {
       }),
       allowedRoles: roles,
       limit: referenceLimit,
-      referenceLimit: mode === "video" ? videoReferenceLimit(selectedModel as VideoModel | null) : referenceLimit,
+      referenceLimit: mode === "video" ? videoTotalInputLimit(selectedModel as VideoModel | null) : referenceLimit,
       mode,
       modelId: selectedModel?.id,
       options: draft.options,
       }),
     ];
-  }, [assetMap, draft.options, draft.references, mode, referenceLimit, roles, selectedModel]);
+  }, [assetMap, draft.options, generationReferences, mode, referenceLimit, roles, selectedModel]);
   const inputValidationError = inputConstraintMessage(inputIssues.find((issue) => issue.severity === "error") ?? null);
   const inputWarnings = inputIssues.filter((issue) => issue.severity === "warning").map(inputConstraintMessage).filter(Boolean) as string[];
 
@@ -1849,10 +2212,11 @@ export default function App() {
 
   const generationValidationError = editTargetError
     ?? maskReferenceError
-    ?? (mode === "video" && draft.references.length ? t("videoReferencesUnavailable") : null);
+    ?? compiledDirector?.blockingIssues[0]?.message
+    ?? null;
 
   const sessionSpendUsd = session.costLedger.reduce((total, entry) => total + entry.actualCostUsd, 0);
-  const transferBytes = draft.references.reduce((total, reference) => total + (assetMap.get(reference.assetId)?.byteSize ?? 0), 0);
+  const transferBytes = previewReferences.reduce((total, reference) => total + (reference.byteSize ?? 0), 0);
   const generationCost = selectedModel ? draftPreparedRequest.cost : undefined;
   const generationEstimate = generationCost?.totalMaxUsd;
   const budgetError = sessionBudgetUsd != null && generationEstimate != null && sessionSpendUsd + generationEstimate > sessionBudgetUsd
@@ -1870,6 +2234,7 @@ export default function App() {
     ...draftPreparedRequest.issues.map((issue) => issue.message),
     inputValidationError,
     generationValidationError,
+    ...(compiledDirector?.blockingIssues.map((issue) => issue.message) ?? []),
     budgetError,
   ].filter((value): value is string => Boolean(value));
 
@@ -1947,7 +2312,6 @@ export default function App() {
         ? t("enterPromptOrMaskInstructions")
         : t("enterPromptFirst"));
     }
-    if (targetThread.mode === "video" && targetDraft.references.length) throw new Error(t("videoReferencesUnavailable"));
     if (targetThread.enhancementAttempts?.at(-1)?.status === "uncertain" && !await confirmAction(
       t("uncertainEnhancementTitle"),
       t("uncertainEnhancementHint"),
@@ -2101,10 +2465,23 @@ export default function App() {
     }
   };
 
-  const hydrateThreadReferences = async (targetSession: StudioSession, targetThread: GenerationThread, targetDraft: GenerationDraftState): Promise<ReferenceAsset[]> => Promise.all(targetDraft.references.map(async (reference) => {
+  const hydrateThreadReferences = async (
+    targetSession: StudioSession,
+    targetThread: GenerationThread,
+    targetDraft: GenerationDraftState,
+    director?: CompiledDirector,
+  ): Promise<ReferenceAsset[]> => {
+    const directorReferences = draftReferencesWithDirectorBindings(
+      targetDraft.references,
+      director?.frameBindings ?? [],
+      targetSession.assets,
+      director?.visualInstructions ?? [],
+    );
+    const hydrated: ReferenceAsset[] = await Promise.all(directorReferences.map(async (reference) => {
     const targetAssetMap = new Map(targetSession.assets.map((asset) => [asset.id, asset]));
     const asset = targetAssetMap.get(reference.assetId);
     if (!asset) throw new Error(t("missingReference", { slot: reference.slot }));
+    if (asset.storageAvailability === "missing") throw new Error(`Reference @${reference.slot} is missing from local storage and must be relinked.`);
     const masked = targetThread.mode === "image"
       && targetDraft.imageEditMode
       && `@${reference.slot}` === targetDraft.imageEditTarget.trim()
@@ -2131,8 +2508,14 @@ export default function App() {
       role: reference.role,
       purpose: reference.purpose,
       slot: reference.slot,
+      ...(reference.timestampSeconds === undefined ? {} : { timestampSeconds: reference.timestampSeconds }),
     };
-  }));
+    }));
+    return [...hydrated, ...await rasterizeDirectorVisualReferenceAssets(
+      director?.visualInstructions ?? [],
+      directorReferences.reduce((maximum, reference) => Math.max(maximum, reference.slot), 0) + 1,
+    )];
+  };
 
   const validateThreadForRun = (targetSession: StudioSession, targetThread: GenerationThread) => {
     if (activeGenerationAttempt(targetThread)) return "This thread already has an active generation.";
@@ -2146,7 +2529,6 @@ export default function App() {
         ? t("enterPromptOrMaskInstructions")
         : t("enterPromptFirst");
     }
-    if (targetThread.mode === "video" && targetDraft.references.length) return t("videoReferencesUnavailable");
     if (targetDraft.providerJson.trim()) {
       try {
         const value = JSON.parse(targetDraft.providerJson) as unknown;
@@ -2157,19 +2539,7 @@ export default function App() {
         return errorMessage(error);
       }
     }
-    const targetRoles = allowedAssetRoles(targetThread.mode, model);
     const targetAssets = new Map(targetSession.assets.map((asset) => [asset.id, asset]));
-    const unsupported = targetDraft.references.find((reference) => {
-      const asset = targetAssets.get(reference.assetId);
-      if (!asset) return true;
-      return !allowedAssetRolesForKind(targetThread.mode, model, asset.kind).includes(reference.role);
-    });
-    if (unsupported) return t("unsupportedReference", { slot: unsupported.slot });
-    if (targetThread.mode === "image") {
-      const minimum = imageReferenceMinimum(model as ImageModel);
-      const imageCount = targetDraft.references.filter((reference) => targetAssets.get(reference.assetId)?.kind === "image").length;
-      if (imageCount < minimum) return `This model requires at least ${minimum} image reference${minimum === 1 ? "" : "s"}.`;
-    }
     const routeResolution = resolveEligibleRoute({
       mode: targetThread.mode,
       model,
@@ -2178,6 +2548,40 @@ export default function App() {
     });
     if (routeResolution.errors.length) return routeResolution.errors[0].message;
     if (!routeResolution.selected) return routeResolution.warnings[0] ?? "No eligible provider endpoint is available.";
+    const targetCompiledDirector = targetThread.mode === "video"
+      ? compileDraftDirector({
+        plan: targetDraft.directorPlan,
+        duration: targetDraft.options.duration,
+        references: targetDraft.references,
+        model: model as VideoModel,
+        route: routeResolution.selected,
+        availableAssetIds: new Set([...targetAssets.values()]
+          .filter((asset) => asset.storageAvailability !== "missing")
+          .map((asset) => asset.id)),
+        basePrompt: targetDraft.prompt,
+      })
+      : undefined;
+    if (targetCompiledDirector && !targetCompiledDirector.canGenerate) {
+      return targetCompiledDirector.blockingIssues[0]?.message ?? "The Director plan must be corrected before generation.";
+    }
+    const targetReferences = draftReferencesWithDirectorBindings(
+      targetDraft.references,
+      targetCompiledDirector?.frameBindings ?? [],
+      targetSession.assets,
+      targetCompiledDirector?.visualInstructions ?? [],
+    );
+    const targetRoles = allowedAssetRoles(targetThread.mode, model);
+    const unsupported = targetReferences.find((reference) => {
+      const asset = targetAssets.get(reference.assetId);
+      if (!asset) return true;
+      return !allowedAssetRolesForKind(targetThread.mode, model, asset.kind).includes(reference.role);
+    });
+    if (unsupported) return t("unsupportedReference", { slot: unsupported.slot });
+    if (targetThread.mode === "image") {
+      const minimum = imageReferenceMinimum(model as ImageModel);
+      const imageCount = targetReferences.filter((reference) => targetAssets.get(reference.assetId)?.kind === "image").length;
+      if (imageCount < minimum) return `This model requires at least ${minimum} image reference${minimum === 1 ? "" : "s"}.`;
+    }
     const preflightPrompt = targetThread.mode === "image" && targetDraft.imageEditMode
       ? composeEditPrompt({
         prompt: targetDraft.prompt,
@@ -2186,29 +2590,35 @@ export default function App() {
         maskInstructions: targetDraft.maskInstructions,
       })
       : targetDraft.prompt.trim();
+    const targetPreviewReferences: ReferenceAsset[] = targetReferences.flatMap((reference) => {
+      const asset = targetAssets.get(reference.assetId);
+      return asset ? [{
+        id: asset.id,
+        name: asset.name,
+        mediaType: asset.mimeType,
+        dataUrl: previewAssetTransportUrl(asset, reference.slot),
+        byteSize: asset.byteSize,
+        role: reference.role,
+        purpose: reference.purpose,
+        slot: reference.slot,
+        ...(reference.timestampSeconds === undefined ? {} : { timestampSeconds: reference.timestampSeconds }),
+      }] : [];
+    });
     const strictPreflight = prepareOpenRouterRequest({
       mode: targetThread.mode,
       model: modelId,
       prompt: preflightPrompt,
-      assets: targetDraft.references.flatMap((reference) => {
-        const asset = targetAssets.get(reference.assetId);
-        return asset ? [{
-          id: asset.id,
-          name: asset.name,
-          mediaType: asset.mimeType,
-          dataUrl: `local-asset://#${reference.slot}/${asset.name}`,
-          byteSize: asset.byteSize,
-          role: reference.role,
-          purpose: reference.purpose,
-          slot: reference.slot,
-        }] : [];
-      }),
+      assets: [...targetPreviewReferences, ...directorVisualReferenceAssets(
+        targetCompiledDirector?.visualInstructions ?? [],
+        targetReferences.reduce((maximum, reference) => Math.max(maximum, reference.slot), 0) + 1,
+      )],
       options: targetDraft.options,
       providerJson: targetDraft.providerJson,
       editTargetSlot: targetDraft.imageEditMode
         ? Number(targetDraft.imageEditTarget.match(/^@(\d+)$/)?.[1] ?? 0) || undefined
         : undefined,
       negativePrompt: targetDraft.enhancementArtifact?.negativePrompt,
+      director: targetCompiledDirector,
     }, model, {
       final: false,
       route: routeResolution.selected,
@@ -2217,15 +2627,15 @@ export default function App() {
     if (strictPreflight.status !== "ready") return strictPreflight.issues[0]?.message ?? "The request cannot be prepared.";
     const targetLimit = targetThread.mode === "image"
       ? imageReferenceLimit(model as ImageModel)
-      : 0;
+      : videoTotalInputLimit(model as VideoModel);
     return inputConstraintMessage(validateInputConstraints({
-      references: targetDraft.references.map((reference) => {
+      references: targetReferences.map((reference) => {
         const asset = targetAssets.get(reference.assetId);
         return { ...reference, kind: asset?.kind ?? "image", byteSize: asset?.byteSize, width: asset?.width, height: asset?.height, duration: asset?.duration, fps: asset?.fps, mimeType: asset?.mimeType, codec: asset?.codec, facePresence: asset?.facePresence };
       }),
       allowedRoles: targetRoles,
       limit: targetLimit,
-      referenceLimit: targetThread.mode === "video" ? videoReferenceLimit(model as VideoModel) : targetLimit,
+      referenceLimit: targetThread.mode === "video" ? videoTotalInputLimit(model as VideoModel) : targetLimit,
       mode: targetThread.mode,
       modelId: model.id,
       options: targetDraft.options,
@@ -2273,7 +2683,29 @@ export default function App() {
       const finalPrompt = targetThread.mode === "image" && targetDraft.imageEditMode
         ? composeEditPrompt({ prompt, target: targetDraft.imageEditTarget.trim(), hasMask: targetDraft.maskStrokes.length > 0, maskInstructions: targetDraft.maskInstructions })
         : prompt;
-      const hydratedReferences = await hydrateThreadReferences(targetSession, targetThread, targetDraft);
+      const finalRoute = resolveEligibleRoute({
+        mode: targetThread.mode,
+        model: targetModel,
+        options: targetDraft.options,
+        providerJson: targetDraft.providerJson,
+      }).selected;
+      const finalCompiledDirector = targetThread.mode === "video"
+        ? compileDraftDirector({
+          plan: targetDraft.directorPlan,
+          duration: targetDraft.options.duration,
+          references: targetDraft.references,
+          model: targetModel as VideoModel,
+          route: finalRoute,
+          availableAssetIds: new Set(targetSession.assets
+            .filter((asset) => asset.storageAvailability !== "missing")
+            .map((asset) => asset.id)),
+          basePrompt: finalPrompt,
+        })
+        : undefined;
+      if (finalCompiledDirector && !finalCompiledDirector.canGenerate) {
+        throw new Error(finalCompiledDirector.blockingIssues.map((issue) => issue.message).join("\n"));
+      }
+      const hydratedReferences = await hydrateThreadReferences(targetSession, targetThread, targetDraft, finalCompiledDirector);
       const generationDraft = {
         mode: targetThread.mode,
         model: targetModelId,
@@ -2285,13 +2717,8 @@ export default function App() {
           ? Number(targetDraft.imageEditTarget.match(/^@(\d+)$/)?.[1] ?? 0) || undefined
           : undefined,
         negativePrompt: artifact?.negativePrompt,
+        director: finalCompiledDirector,
       };
-      const finalRoute = resolveEligibleRoute({
-        mode: targetThread.mode,
-        model: targetModel,
-        options: targetDraft.options,
-        providerJson: targetDraft.providerJson,
-      }).selected;
       const finalRequest = prepareOpenRouterRequest(generationDraft, targetModel, {
         final: true,
         route: finalRoute,
@@ -2331,6 +2758,7 @@ export default function App() {
         costLabel: finalRequest.cost.label,
         routeLabel: finalRequest.route?.providerName ?? finalRequest.route?.providerSlug ?? targetModel.name,
         privacyLabel: `ZDR: ${finalRequest.privacy.zdr} · data collection: ${finalRequest.privacy.dataCollection}${finalRequest.privacy.plannerSeparate ? " · planner route separate" : ""}${finalRequest.privacy.warning ? ` · ${finalRequest.privacy.warning}` : ""}`,
+        compiledDirector: finalCompiledDirector,
       });
       toast.success(t("requestFinal"));
     } catch (error) {
@@ -2400,6 +2828,12 @@ export default function App() {
     )) return;
     const attemptId = crypto.randomUUID();
     const createdAt = new Date().toISOString();
+    const attemptReferences = draftReferencesWithDirectorBindings(
+      targetDraft.references,
+      reviewedRequest.compiledDirector?.frameBindings ?? [],
+      targetSession.assets,
+      reviewedRequest.compiledDirector?.visualInstructions ?? [],
+    );
     const attempt: GenerationAttempt = {
       id: attemptId,
       status: "submitting",
@@ -2422,8 +2856,9 @@ export default function App() {
         imageEditTarget: targetDraft.imageEditTarget,
         maskInstructions: targetDraft.maskInstructions,
         maskStrokes: structuredClone(targetDraft.maskStrokes),
+        directorPlan: targetDraft.directorPlan ? structuredClone(targetDraft.directorPlan) : undefined,
       },
-      inputAssetIds: targetDraft.references.map((reference) => reference.assetId),
+      inputAssetIds: [...new Set(attemptReferences.map((reference) => reference.assetId))],
       assetIds: [],
       request: JSON.parse(reviewedRequest.request) as Record<string, unknown>,
     };
@@ -2708,6 +3143,7 @@ export default function App() {
             imageEditTarget: snapshot.imageEditTarget,
             maskInstructions: snapshot.maskInstructions,
             maskStrokes: structuredClone(snapshot.maskStrokes),
+            directorPlan: snapshot.directorPlan ? structuredClone(snapshot.directorPlan) : undefined,
           },
           revision: item.revision + 1,
           updatedAt: new Date().toISOString(),
@@ -2750,6 +3186,7 @@ export default function App() {
           imageEditTarget: snapshot.imageEditTarget,
           maskInstructions: snapshot.maskInstructions,
           maskStrokes: structuredClone(snapshot.maskStrokes),
+          directorPlan: snapshot.directorPlan ? structuredClone(snapshot.directorPlan) : undefined,
         },
       };
       return {
@@ -3034,6 +3471,34 @@ export default function App() {
       ...current,
       generationPresets: (current.generationPresets ?? []).filter((preset) => preset.id !== id),
     }));
+    void persistWorkspace(next).catch((error) => toast.error(errorMessage(error)));
+  };
+
+  const saveCurrentDirectorPreset = (name: string) => {
+    if (!draft.directorPlan) return;
+    try {
+      const preset = createDirectorPreset(name, draft.directorPlan);
+      const next = commitStudioNow((current) => saveDirectorPreset(current, preset));
+      void persistWorkspace(next).catch((error) => toast.error(errorMessage(error)));
+      toast.success(t("presetSaved", { name: preset.name }));
+    } catch (error) {
+      toast.error(errorMessage(error));
+    }
+  };
+
+  const applySavedDirectorPreset = (preset: DirectorPreset) => {
+    if (!draft.directorPlan) return;
+    try {
+      patchDraft({ directorPlan: applyDirectorPresetToPlan(draft.directorPlan, preset) });
+      setPreparedRequest(null);
+      toast.success(t("presetApplied", { name: preset.name }));
+    } catch (error) {
+      toast.error(errorMessage(error));
+    }
+  };
+
+  const deleteSavedDirectorPreset = (presetId: string) => {
+    const next = commitStudioNow((current) => deleteDirectorPreset(current, presetId));
     void persistWorkspace(next).catch((error) => toast.error(errorMessage(error)));
   };
 
@@ -3341,6 +3806,48 @@ export default function App() {
     const activeStages = attempts
       .filter((attempt) => ["enhancing", "submitting", "in_progress"].includes(attempt.status))
       .map((attempt) => `${attempt.mode}:${attempt.status}`);
+    const directorPlans = studio.sessions.flatMap((candidateSession) => {
+      const candidateAssets = new Set(candidateSession.assets
+        .filter((asset) => asset.storageAvailability !== "missing")
+        .map((asset) => asset.id));
+      return candidateSession.threads.video.flatMap((candidateThread) => {
+        const candidatePlan = candidateThread.draft.directorPlan;
+        if (!candidatePlan) return [];
+        const candidateModel = (catalogs.video.find((model) => model.id === effectiveThreadModelId(candidateSession, candidateThread)) ?? null) as VideoModel | null;
+        let candidateRoute: GenerationRoute | undefined;
+        if (candidateModel) {
+          try {
+            candidateRoute = resolveEligibleRoute({
+              mode: "video",
+              model: candidateModel,
+              options: candidateThread.draft.options,
+              providerJson: candidateThread.draft.providerJson,
+            }).selected;
+          } catch {
+            candidateRoute = undefined;
+          }
+        }
+        const diagnosticCompilation = compileDraftDirector({
+          plan: candidatePlan,
+          duration: candidateThread.draft.options.duration,
+          references: candidateThread.draft.references,
+          model: candidateModel,
+          route: candidateRoute,
+          availableAssetIds: candidateAssets,
+          basePrompt: candidateThread.draft.prompt,
+        })!;
+        return [{
+          sessionId: candidateSession.id,
+          threadId: candidateThread.id,
+          summary: directorDiagnosticSummary(
+            candidatePlan,
+            candidateAssets,
+            diagnosticCompilation,
+            diagnosticCompilation.blockingIssues.map((issue) => issue.code),
+          ),
+        }];
+      });
+    });
     const bundle = buildSupportBundle({
       appVersion: __APP_VERSION__,
       platform: navigator.platform,
@@ -3352,6 +3859,7 @@ export default function App() {
         schemaVersion: studio.schemaVersion,
         sessionCount: studio.sessions.length,
         assetCount: studio.sessions.reduce((count, candidate) => count + candidate.assets.length, 0),
+        directorPlans,
         recovery: studio.recovery,
       },
       context: { language, connectionState, catalogErrors, storageHealth },
@@ -3658,11 +4166,46 @@ export default function App() {
             <div className="composer-header-meta">
               {selectedModel ? <div className="model-meta"><span>{providerLabel(selectedModel)}</span>{mode === "image" && imageEndpoints[selectedId]?.length ? <span>{t("endpointsVerified", { count: imageEndpoints[selectedId].length })}</span> : null}</div> : null}
               <div className="composer-header-utilities">
+                {mode === "video" ? <Button type="button" className="director-trigger" variant={directorOpen ? "secondary" : "outline"} size="xs" aria-expanded={directorOpen} onClick={() => directorOpen ? setDirectorOpen(false) : openDirector()}><Video /> {t(directorOpen ? "closeDirector" : "openDirector")}</Button> : null}
                 {resultQueuePaused && resultQueue.length ? <Button type="button" className="pending-results-trigger" variant="outline" size="xs" onClick={() => setResultQueuePaused(false)}><ImageIcon /> {t("pendingResults", { count: resultQueue.length })}</Button> : null}
                 <AttemptHistoryPopover attempts={thread.attempts} availableAssetIds={new Set(session.assets.map((asset) => asset.id))} onCancel={cancelAttemptTracking} onDuplicate={duplicateAttemptSnapshot} onRestore={restoreAttemptSnapshot} onRecheck={recheckAttemptStatus} onRepairInputs={repairAttemptInputs} onRecoverResults={(attempt) => void recoverAttemptResults(attempt)} />
               </div>
             </div>
           </header>
+          {mode === "video" && directorOpen ? (
+            <Suspense fallback={<div className="director-loading"><LoaderCircle className="spin" /> {t("preparing")}</div>}>
+              <DirectorPanel
+                plan={draft.directorPlan ?? null}
+                sourceAsset={directorSourceAsset}
+                assetUrls={directorAssetUrls}
+                availableAssets={session.assets.filter((asset) => asset.kind === "image" && asset.storageAvailability !== "missing").map((asset) => ({ id: asset.id, name: asset.name }))}
+                capability={directorCapability}
+                fidelityByControlId={compiledDirector?.fidelityByControlId}
+                warnings={compiledDirector?.warnings}
+                presets={studio.directorPresets}
+                onPlanChange={(directorPlan) => {
+                  patchDraft({
+                    directorPlan,
+                    references: synchronizeDirectorFrameReferences(directorPlan, draft.references),
+                  });
+                  setPreparedRequest(null);
+                }}
+                onCreatePlan={() => {
+                  patchDraft({
+                    directorPlan: createDirectorPlanForFrames(
+                      draft.references.find((reference) => reference.role === "first_frame")?.assetId,
+                      draft.references.find((reference) => reference.role === "last_frame")?.assetId,
+                    ),
+                  });
+                  setPreparedRequest(null);
+                }}
+                onSavePreset={saveCurrentDirectorPreset}
+                onApplyPreset={applySavedDirectorPreset}
+                onDeletePreset={deleteSavedDirectorPreset}
+                onClose={() => setDirectorOpen(false)}
+              />
+            </Suspense>
+          ) : null}
           {policyNotices.length || latestGenerationFailure ? <div className="generation-guidance-stack">
             {policyNotices.map((notice) => (
               <section className="model-policy-notice" data-policy={notice.code} key={notice.code} aria-label={t("modelPolicyNotice")}>
@@ -3754,8 +4297,12 @@ export default function App() {
                   : reference)
                 : references;
               const targetStillAttached = normalizedReferences.some((reference) => `@${reference.slot}` === draft.imageEditTarget);
+              const directorPlan = mode === "video" && draft.directorPlan
+                ? synchronizeDirectorPlanFrames(draft.directorPlan, draft.references, normalizedReferences)
+                : draft.directorPlan;
               patchDraft({
                 references: normalizedReferences,
+                directorPlan,
                 imageEditTarget: mode === "image" && draft.imageEditMode && !targetStillAttached ? "" : draft.imageEditTarget,
                 maskStrokes: mode === "image" && draft.imageEditMode && !targetStillAttached ? [] : draft.maskStrokes,
                 maskInstructions: mode === "image" && draft.imageEditMode && !targetStillAttached ? "" : draft.maskInstructions,
@@ -3895,6 +4442,7 @@ export default function App() {
                 routeDefinitive={currentPreparedRequest?.artifact.routeResolution.definitive ?? draftPreparedRequest.routeResolution.definitive}
                 privacySummary={currentPreparedRequest?.privacyLabel ?? `ZDR: ${draftPreparedRequest.privacy.zdr} · data collection: ${draftPreparedRequest.privacy.dataCollection}${draftPreparedRequest.privacy.warning ? ` · ${draftPreparedRequest.privacy.warning}` : ""}`}
                 transferredBytes={transferBytes}
+                compiledDirector={currentPreparedRequest?.compiledDirector ?? compiledDirector}
                 plannerEnabled={draft.enhancePrompt}
                 onPrepare={() => void prepareRequestForReview()}
               />

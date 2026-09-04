@@ -2,6 +2,7 @@ import { Dialog } from "@base-ui/react/dialog";
 import { Braces, CheckCircle2, Cloud, LoaderCircle, ShieldAlert, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import type { CompiledDirector, DirectorFidelity } from "@/director/types";
 import { useI18n, type MessageKey } from "@/i18n";
 import type { ReferenceAsset, ReferenceCoverage } from "@/openrouter";
 import type { ReferencePurpose } from "@/prompting";
@@ -22,6 +23,14 @@ const PURPOSE_LABEL_KEYS: Record<ReferencePurpose, MessageKey> = {
   context: "purposeContext",
 };
 
+const FIDELITY_LABEL_KEYS: Record<DirectorFidelity, MessageKey> = {
+  native: "directorFidelityNative",
+  keyframe: "directorFidelityKeyframe",
+  visual: "directorFidelityVisual",
+  prompt: "directorFidelityPrompt",
+  unsupported: "directorFidelityUnsupported",
+};
+
 export function RequestPreviewDialog({
   mode,
   request,
@@ -38,6 +47,7 @@ export function RequestPreviewDialog({
   routeSummary,
   routeDefinitive = false,
   privacySummary,
+  compiledDirector,
   onPrepare,
 }: {
   mode: "image" | "video";
@@ -55,10 +65,12 @@ export function RequestPreviewDialog({
   routeSummary?: string;
   routeDefinitive?: boolean;
   privacySummary?: string;
+  compiledDirector?: CompiledDirector;
   onPrepare?: () => void;
 }) {
   const { t } = useI18n();
   const uniquePreflightErrors = [...new Set(preflightErrors)];
+  const directorFidelity = compiledDirector ? Object.entries(compiledDirector.fidelityByControlId) : [];
   return (
     <Dialog.Root>
       <Dialog.Trigger render={<Button variant="outline" size="sm" className="request-dialog-trigger" />}><Braces /> {t("request")}</Dialog.Trigger>
@@ -98,7 +110,10 @@ export function RequestPreviewDialog({
                   {references.map((reference) => {
                     const entry = coverage?.find((candidate) => candidate.slot === reference.slot);
                     return (
-                    <span key={reference.id} data-coverage={entry?.severity ?? "unknown"}>
+                    <span
+                      key={`${reference.id}:${reference.slot}:${reference.role}:${reference.timestampSeconds ?? ""}`}
+                      data-coverage={entry?.severity ?? "unknown"}
+                    >
                       <b>@{reference.slot}</b>
                       <span>{reference.name}</span>
                       <code>
@@ -112,7 +127,62 @@ export function RequestPreviewDialog({
                   })}
                 </div>
               ) : null}
-              <pre>{request}</pre>
+              {compiledDirector ? (
+                <section className="director-request-preview" aria-labelledby="director-request-preview-title">
+                  <header className="director-request-preview-header">
+                    <div>
+                      <span className="dialog-eyebrow">{t("directorCompiledOutput")}</span>
+                      <h3 id="director-request-preview-title">{t("directorRequestPreview")}</h3>
+                    </div>
+                    <span className="director-control-count">{t("directorControlCount", { count: directorFidelity.length })}</span>
+                  </header>
+
+                  <div className="director-preview-section director-preview-fidelity">
+                    <h4>{t("directorFidelityByControl")}</h4>
+                    <p>{t("directorFidelityHint")}</p>
+                    {directorFidelity.length ? (
+                      <ul>
+                        {directorFidelity.map(([controlId, fidelity]) => (
+                          <li key={controlId} data-fidelity={fidelity}>
+                            <code>{controlId}</code>
+                            <strong aria-label={t("directorFidelityAccessible", { control: controlId, fidelity: t(FIDELITY_LABEL_KEYS[fidelity]) })}>
+                              {t(FIDELITY_LABEL_KEYS[fidelity])}
+                            </strong>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : <span className="director-preview-empty">{t("directorNoControls")}</span>}
+                  </div>
+
+                  {compiledDirector.warnings.length ? (
+                    <div className="director-preview-warnings" role="alert">
+                      <strong><ShieldAlert /> {t("directorWarnings")}</strong>
+                      <ul>{compiledDirector.warnings.map((warning, index) => <li key={`${index}-${warning}`}>{warning}</li>)}</ul>
+                    </div>
+                  ) : null}
+
+                  <div className="director-preview-section">
+                    <h4>{t("directorProviderOptions")}</h4>
+                    <p>{t("directorProviderOptionsHint")}</p>
+                    <pre>{JSON.stringify(compiledDirector.providerOptions, null, 2)}</pre>
+                  </div>
+
+                  <div className="director-preview-section director-preview-brief">
+                    <h4>{t("directorBrief")}</h4>
+                    <p>{t("directorBriefHint")}</p>
+                    <pre>{compiledDirector.promptBrief || t("directorNoPromptBrief")}</pre>
+                  </div>
+
+                  {compiledDirector.frameBindings.length || compiledDirector.visualInstructions.length ? (
+                    <div className="director-preview-section">
+                      <h4>{t("directorTransports")}</h4>
+                      <p>{t("directorTransportsHint")}</p>
+                      <pre>{JSON.stringify({ frameBindings: compiledDirector.frameBindings, visualInstructions: compiledDirector.visualInstructions }, null, 2)}</pre>
+                    </div>
+                  ) : null}
+                </section>
+              ) : null}
+              <pre className="request-payload">{request}</pre>
               <p>{t("localPlaceholderHint")}</p>
               {onPrepare && status !== "final" ? (
                 <Button type="button" size="lg" className="request-prepare-button" disabled={status === "preparing" || Boolean(error) || uniquePreflightErrors.length > 0} onClick={onPrepare}>
