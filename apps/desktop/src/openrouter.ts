@@ -28,6 +28,7 @@ import {
   type PromptWorkflow,
   type ReferencePurpose,
 } from "./prompting/index.ts";
+import type { CompiledDirector } from "./director/types.ts";
 
 export type GenerationMode = "image" | "video";
 export type ReferenceRole = "reference" | "first_frame" | "last_frame";
@@ -124,6 +125,8 @@ export type VideoModelEndpoint = {
   privacy?: EndpointPrivacy;
   zdr?: boolean | null;
   data_collection?: string | null;
+  /** Explicit provider metadata preserved for Director capability resolution. */
+  director_capabilities?: Record<string, unknown>;
 };
 
 export type EndpointPrivacy = {
@@ -156,6 +159,8 @@ export type VideoModel = {
   reference_transports?: Partial<Record<InputMediaKind, VideoReferenceTransport[]>> | VideoReferenceTransport[] | null;
   reference_transport_source?: "openrouter_endpoint" | "contract_fixture" | "unknown" | null;
   privacy?: EndpointPrivacy;
+  /** Explicit live-catalog metadata. It is never inferred from the model name. */
+  director_capabilities?: Record<string, unknown>;
 };
 
 export type GenerationModel = ImageModel | VideoModel;
@@ -321,6 +326,7 @@ function normalizeVideoEndpoint(raw: unknown): VideoModelEndpoint | null {
     ...(normalizePrivacy(raw) ? { privacy: normalizePrivacy(raw) } : {}),
     ...(typeof raw.zdr === "boolean" || raw.zdr === null ? { zdr: raw.zdr } : {}),
     ...(typeof raw.data_collection === "string" || raw.data_collection === null ? { data_collection: raw.data_collection } : {}),
+    ...(isRecord(raw.director_capabilities) ? { director_capabilities: { ...raw.director_capabilities } } : {}),
   };
 }
 
@@ -402,6 +408,7 @@ export function normalizeVideoModel(raw: unknown): VideoModel | null {
       ? { reference_transport_source: raw.reference_transport_source }
       : {}),
     ...(normalizePrivacy(raw) ? { privacy: normalizePrivacy(raw) } : {}),
+    ...(isRecord(raw.director_capabilities) ? { director_capabilities: { ...raw.director_capabilities } } : {}),
   };
 }
 
@@ -810,6 +817,8 @@ export type ReferenceAsset = {
   slot: number;
   /** Optional native byte size, used for bounded preflight accounting. */
   byteSize?: number;
+  /** Timestamped Director keyframes are serialized with their shot-relative time. */
+  timestampSeconds?: number;
 };
 
 export type DraftOptions = Record<string, string | number | boolean | undefined>;
@@ -823,6 +832,8 @@ export type GenerationDraft = {
   providerJson: string;
   editTargetSlot?: number;
   negativePrompt?: string;
+  /** Model-independent Director controls compiled immediately before preparation. */
+  director?: CompiledDirector;
 };
 
 export type ReferenceCoverage = {
@@ -1749,7 +1760,11 @@ function assetMediaKind(asset: Pick<ReferenceAsset, "mediaType">): InputMediaKin
 function asReference(asset: ReferenceAsset) {
   const kind = assetMediaKind(asset);
   const type = `${kind}_url`;
-  return { type, [type]: { url: asset.dataUrl } };
+  return {
+    type,
+    [type]: { url: asset.dataUrl },
+    ...(asset.timestampSeconds === undefined ? {} : { timestamp_seconds: asset.timestampSeconds }),
+  };
 }
 
 function providerReferenceLabels(mode: GenerationMode, assets: ReferenceAsset[], runwaySyntax: boolean) {
@@ -2023,6 +2038,15 @@ function buildRequestInternal(
       }));
     }
   }
+  if (draft.director) {
+    const protectedFields = new Set(["model", "prompt", "provider", "input_references", "frame_images"]);
+    for (const [name, value] of Object.entries(draft.director.providerOptions)) {
+      if (!protectedFields.has(name) && value !== undefined) payload[name] = value;
+    }
+    if (draft.director.promptBrief.trim()) {
+      payload.prompt = `${String(payload.prompt).trim()}\n\n[Director Brief]\n${draft.director.promptBrief.trim()}`;
+    }
+  }
   const provider = parseProviderConfiguration(draft.providerJson);
   validateProviderPassthrough(provider, model, route);
   if (strict && route && !route.providerSlug && route.contractSource !== "video_catalog") {
@@ -2050,7 +2074,7 @@ function buildRequestInternal(
     } else if (draft.mode === "video" && nativeVideoPassthrough?.includes("negative_prompt")) {
       payload.negative_prompt = draft.negativePrompt.trim();
     } else {
-      payload.prompt = `${draft.prompt.trim()}\nConstraints: ${draft.negativePrompt.trim()}`;
+      payload.prompt = `${String(payload.prompt).trim()}\nConstraints: ${draft.negativePrompt.trim()}`;
     }
   }
   const promptTokens = [...String(payload.prompt).matchAll(/@(\d+)/g)];
@@ -2266,6 +2290,7 @@ function prepareSource(draft: GenerationDraft, model: GenerationModel | null, co
     draftModel: draft.model,
     prompt: draft.prompt,
     negativePrompt: draft.negativePrompt ?? "",
+    director: draft.director ?? null,
     options: draft.options,
     providerJson: draft.providerJson,
     editTargetSlot: draft.editTargetSlot ?? null,
@@ -2733,8 +2758,8 @@ export async function cacheVideo(jobId: string): Promise<string> {
 
 export function prettyRequest(payload: Readonly<Record<string, unknown>>): string {
   return JSON.stringify(payload, (_key, value) => {
-    if (typeof value === "string" && value.startsWith("data:") && value.length > 120) {
-      return `<media payload omitted · ${Math.round(value.length / 1024)} KB>`;
+    if (typeof value === "string" && value.startsWith("data:")) {
+      return `<media payload omitted | ${Math.round(value.length / 1024)} KB>`;
     }
     return value;
   }, 2);

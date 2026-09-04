@@ -216,7 +216,7 @@ test("verified endpoint permits HTTPS video references but never HTTP/data/local
   assert.equal(matrix.entries.find((entry) => entry.kind === "image" && entry.transport === "https_url")?.supported, true);
   assert.equal(matrix.entries.find((entry) => entry.kind === "image" && entry.transport === "data_url")?.supported, false);
   assert.equal(videoReferenceTransportForUrl("http://example.com/a.png"), "http_url");
-  assert.equal(videoReferenceTransportForUrl("fruit-truck-local:/tmp/a.png"), "local_file");
+  assert.equal(videoReferenceTransportForUrl("fruit-truck-local:/tmp/a.png"), "data_url");
   assert.equal(videoReferenceTransportForUrl("https://example.com/a.png"), "https_url");
 });
 

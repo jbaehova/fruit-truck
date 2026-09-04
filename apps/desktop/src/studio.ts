@@ -13,6 +13,11 @@ import {
   type ReferencePurpose,
 } from "./prompting/index.ts";
 import { migrateLegacyInputMentions } from "./inputMentions.ts";
+import type { DirectorPlan } from "./director/types.ts";
+import {
+  cloneDirectorPlan,
+  ensureDirectorPlan,
+} from "./director/defaults.ts";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 
 export type AssetKind = "image" | "video" | "audio";
@@ -89,6 +94,7 @@ export type GenerationDraftState = {
   imageEditTarget: string;
   maskInstructions: string;
   maskStrokes: MaskStroke[];
+  directorPlan?: DirectorPlan;
 };
 
 export type SessionVideoJob = VideoResult & {
@@ -137,6 +143,7 @@ export type GenerationAttemptSnapshot = {
   imageEditTarget: string;
   maskInstructions: string;
   maskStrokes: MaskStroke[];
+  directorPlan?: DirectorPlan;
   referenceCoverage?: ReferenceCoverage[];
   videoWorkflow?: VideoWorkflow;
 };
@@ -243,6 +250,14 @@ export type GenerationPreset = {
   updatedAt: string;
 };
 
+export type DirectorPreset = {
+  id: string;
+  name: string;
+  plan: Omit<DirectorPlan, "sourceAssetId" | "subjects" | "keyframes">;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type StudioSession = {
   id: string;
   name: string;
@@ -260,12 +275,13 @@ export type StudioSession = {
 };
 
 export type StudioState = {
-  schemaVersion: 6;
+  schemaVersion: 8;
   activeSessionId: string;
   promptModel: PromptModel;
   defaultEnhancePrompt: boolean;
   sessions: StudioSession[];
   generationPresets?: GenerationPreset[];
+  directorPresets: DirectorPreset[];
   /** Ephemeral startup/persistence diagnostics; never serialized. */
   recovery?: StudioRecoveryState;
 };
@@ -311,7 +327,7 @@ export type StudioRecoveryState = {
   status: StudioRecoveryKind;
   sourceKey?: string;
   sourceSchemaVersion?: number;
-  targetSchemaVersion: 6;
+  targetSchemaVersion: 8;
   backupKey?: string;
   lastKnownGoodKey?: string;
   rawStateAvailable: boolean;
@@ -323,7 +339,7 @@ export type StudioRecoveryState = {
 
 export type StudioMigrationReport = {
   fromVersion: number;
-  toVersion: 6;
+  toVersion: 8;
   steps: string[];
 };
 
@@ -353,7 +369,7 @@ export type ManagedAssetReconciliation = {
 
 /** Export the current metadata without ephemeral recovery diagnostics or history truncation. */
 export type StudioStateExport = {
-  schemaVersion: 6;
+  schemaVersion: 8;
   json: string;
 };
 
@@ -366,6 +382,9 @@ export type StudioSaveOptions = {
   storage?: StudioStorage;
   now?: () => Date;
 };
+
+export const STUDIO_SCHEMA_VERSION = 8 as const;
+export const MAX_DIRECTOR_PLAN_BYTES = 512 * 1024;
 
 export class StudioPersistenceError extends Error {
   readonly code: "backup_failed" | "write_failed" | "recovery_required";
@@ -381,6 +400,179 @@ export class StudioPersistenceError extends Error {
     this.code = code;
     this.cause = cause;
   }
+}
+
+function directorJsonByteSize(value: unknown): number {
+  try {
+    return new TextEncoder().encode(JSON.stringify(value)).byteLength;
+  } catch (error) {
+    throw new Error(`Director data must be JSON serializable: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function assertDirectorPlanSize(plan: unknown, label: string): void {
+  if (directorJsonByteSize(plan) > MAX_DIRECTOR_PLAN_BYTES) {
+    throw new Error(`${label} exceeds the 512 KB persistence limit.`);
+  }
+}
+
+function normalizeDirectorPlan(value: unknown, label = "directorPlan"): DirectorPlan | undefined {
+  if (value === undefined || value === null) return undefined;
+  const plan = asRecord(value, label);
+  if (plan.schemaVersion !== 1) throw new Error(`${label}.schemaVersion is unsupported.`);
+  assertDirectorPlanSize(plan, label);
+  // Rich Director validation lives in director/validation. Persistence only
+  // enforces the versioned envelope and clones the complete payload so newer
+  // valid controls are never silently discarded by an older normalizer.
+  return cloneDirectorPlan(plan as DirectorPlan);
+}
+
+function normalizeDirectorPresetPlan(
+  value: unknown,
+  label: string,
+): DirectorPreset["plan"] {
+  const plan = normalizeDirectorPlan(value, label);
+  if (!plan) throw new Error(`${label} is required.`);
+  const {
+    sourceAssetId: _sourceAssetId,
+    subjects: _subjects,
+    keyframes: _keyframes,
+    ...portablePlan
+  } = plan;
+  return portablePlan;
+}
+
+/** Create the Director plan only when the Director UI explicitly opens. */
+export function ensureDraftDirectorPlan(
+  draft: GenerationDraftState,
+  options?: Parameters<typeof ensureDirectorPlan>[1],
+): GenerationDraftState {
+  return {
+    ...draft,
+    directorPlan: cloneDirectorPlan(ensureDirectorPlan(draft.directorPlan, options)),
+  };
+}
+
+/** Copy a draft without sharing mutable Director state with its source. */
+export function cloneGenerationDraft(draft: GenerationDraftState): GenerationDraftState {
+  return {
+    ...structuredClone(draft),
+    directorPlan: draft.directorPlan ? cloneDirectorPlan(draft.directorPlan) : undefined,
+  };
+}
+
+/** Capture or copy attempt state without aliasing a thread's Director plan. */
+export function cloneGenerationAttemptSnapshot(
+  snapshot: GenerationAttemptSnapshot,
+): GenerationAttemptSnapshot {
+  return {
+    ...structuredClone(snapshot),
+    directorPlan: snapshot.directorPlan ? cloneDirectorPlan(snapshot.directorPlan) : undefined,
+  };
+}
+
+/** Restore the editable fields represented by a historical attempt snapshot. */
+export function restoreDraftFromAttemptSnapshot(
+  currentDraft: GenerationDraftState,
+  snapshot: GenerationAttemptSnapshot,
+): GenerationDraftState {
+  return {
+    ...currentDraft,
+    prompt: snapshot.prompt,
+    enhancePrompt: snapshot.enhancePrompt,
+    enhancedPrompt: snapshot.enhancedPrompt,
+    enhancedPromptDirty: false,
+    enhancementArtifact: snapshot.enhancementArtifact
+      ? structuredClone(snapshot.enhancementArtifact)
+      : undefined,
+    references: structuredClone(snapshot.assetBindings),
+    options: structuredClone(snapshot.options),
+    providerJson: snapshot.providerJson,
+    imageEditMode: snapshot.imageEditMode,
+    imageEditTarget: snapshot.imageEditTarget,
+    maskInstructions: snapshot.maskInstructions,
+    maskStrokes: structuredClone(snapshot.maskStrokes),
+    directorPlan: snapshot.directorPlan ? cloneDirectorPlan(snapshot.directorPlan) : undefined,
+  };
+}
+
+export function createDirectorPreset(
+  name: string,
+  plan: DirectorPlan,
+  options: { id?: string; now?: string | (() => string) } = {},
+): DirectorPreset {
+  const normalizedName = name.trim();
+  if (!normalizedName) throw new Error("Director preset name is required.");
+  const timestamp = typeof options.now === "function"
+    ? options.now()
+    : options.now ?? new Date().toISOString();
+  return {
+    id: options.id ?? crypto.randomUUID(),
+    name: normalizedName,
+    plan: normalizeDirectorPresetPlan(plan, "director preset plan"),
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+}
+
+/** Apply portable controls while keeping this thread's asset associations. */
+export function applyDirectorPreset(
+  currentPlan: DirectorPlan,
+  preset: DirectorPreset,
+  now: string | (() => string) = () => new Date().toISOString(),
+): DirectorPlan {
+  const portablePlan = normalizeDirectorPresetPlan(preset.plan, "director preset plan");
+  const updatedAt = typeof now === "function" ? now() : now;
+  const portableSubjectIds = [...new Set(portablePlan.motions.flatMap((motion) =>
+    motion.targetType === "subject" && motion.targetId ? [motion.targetId] : []))];
+  if (portablePlan.cameraRig.focusSubjectId && !portableSubjectIds.includes(portablePlan.cameraRig.focusSubjectId)) {
+    portableSubjectIds.push(portablePlan.cameraRig.focusSubjectId);
+  }
+  const subjectIdMap = new Map(portableSubjectIds.flatMap((subjectId, index) => {
+    const currentSubject = currentPlan.subjects[index];
+    return currentSubject ? [[subjectId, currentSubject.id] as const] : [];
+  }));
+  const motions = portablePlan.motions.map((motion) => motion.targetType === "subject"
+    ? { ...motion, targetId: motion.targetId ? subjectIdMap.get(motion.targetId) ?? motion.targetId : undefined }
+    : motion);
+  const currentKeyframeIds = new Set(currentPlan.keyframes.map((keyframe) => keyframe.id));
+  const shots = portablePlan.shots.map((shot) => ({
+    ...shot,
+    keyframeIds: [...(currentPlan.shots.find((candidate) => candidate.order === shot.order)?.keyframeIds ?? [])]
+      .filter((keyframeId) => currentKeyframeIds.has(keyframeId)),
+  }));
+  const focusSubjectId = portablePlan.cameraRig.focusSubjectId
+    ? subjectIdMap.get(portablePlan.cameraRig.focusSubjectId) ?? portablePlan.cameraRig.focusSubjectId
+    : undefined;
+  return cloneDirectorPlan({
+    ...portablePlan,
+    cameraRig: {
+      ...portablePlan.cameraRig,
+      ...(focusSubjectId ? { focusSubjectId } : { focusSubjectId: undefined }),
+    },
+    motions,
+    shots,
+    sourceAssetId: currentPlan.sourceAssetId,
+    subjects: currentPlan.subjects,
+    keyframes: currentPlan.keyframes,
+    updatedAt,
+  });
+}
+
+export function saveDirectorPreset(state: StudioState, preset: DirectorPreset): StudioState {
+  const normalized = normalizeDirectorPreset(preset, state.directorPresets.length);
+  const index = state.directorPresets.findIndex((item) => item.id === normalized.id);
+  if (index === -1) return { ...state, directorPresets: [...state.directorPresets, normalized] };
+  const directorPresets = [...state.directorPresets];
+  directorPresets[index] = normalized;
+  return { ...state, directorPresets };
+}
+
+export function deleteDirectorPreset(state: StudioState, id: string): StudioState {
+  const directorPresets = state.directorPresets.filter((preset) => preset.id !== id);
+  return directorPresets.length === state.directorPresets.length
+    ? state
+    : { ...state, directorPresets };
 }
 
 export function recordSessionCost(session: StudioSession, entry: SessionCostEntry): StudioSession {
@@ -521,6 +713,7 @@ export function createGenerationThread(
   draft: GenerationDraftState = emptyDraft(),
 ): GenerationThread {
   const createdAt = new Date().toISOString();
+  const clonedDraft = cloneGenerationDraft(draft);
   return {
     id: crypto.randomUUID(),
     name: threadName(mode, index),
@@ -528,9 +721,9 @@ export function createGenerationThread(
     createdAt,
     updatedAt: createdAt,
     revision: 0,
-    optionOverrides: { ...draft.options },
-    providerJsonOverride: draft.providerJson || undefined,
-    draft: { ...draft, options: {}, providerJson: "" },
+    optionOverrides: { ...clonedDraft.options },
+    providerJsonOverride: clonedDraft.providerJson || undefined,
+    draft: { ...clonedDraft, options: {}, providerJson: "" },
     attempts: [],
   };
 }
@@ -680,7 +873,7 @@ const LEGACY_ATTEMPT_STATUSES = new Set([
   "cancelled",
   "expired",
 ]);
-const STUDIO_SCHEMA_VERSIONS = new Set([1, 2, 3, 4, 5, 6]);
+const STUDIO_SCHEMA_VERSIONS = new Set([1, 2, 3, 4, 5, 6, 7, STUDIO_SCHEMA_VERSION]);
 
 function isRecord(value: unknown): value is JsonRecord {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -731,7 +924,7 @@ function createRecovery(kind: StudioRecoveryKind, overrides: Partial<StudioRecov
   return {
     kind,
     status: kind,
-    targetSchemaVersion: 6,
+    targetSchemaVersion: STUDIO_SCHEMA_VERSION,
     rawStateAvailable: false,
     requiresUserAction: false,
     attempts: [],
@@ -746,17 +939,18 @@ function stateWithRecovery(state: StudioState, recovery: StudioRecoveryState): S
 function createInitialStudioState(): StudioState {
   const session = createSession("First session");
   return {
-    schemaVersion: 6,
+    schemaVersion: STUDIO_SCHEMA_VERSION,
     activeSessionId: session.id,
     promptModel: "openai/gpt-5.6-luna",
     defaultEnhancePrompt: true,
     generationPresets: [],
+    directorPresets: [],
     sessions: [session],
   };
 }
 
-function isLegacySchemaVersion(value: unknown): value is 1 | 2 | 3 | 4 | 5 {
-  return typeof value === "number" && [1, 2, 3, 4, 5].includes(value);
+function isLegacySchemaVersion(value: unknown): value is 1 | 2 | 3 | 4 | 5 | 6 | 7 {
+  return typeof value === "number" && [1, 2, 3, 4, 5, 6, 7].includes(value);
 }
 
 function validEnvelope(value: unknown): value is JsonRecord & {
@@ -777,7 +971,10 @@ function validEnvelope(value: unknown): value is JsonRecord & {
 }
 
 function validCurrentState(value: unknown): value is StudioState {
-  if (!validEnvelope(value) || value.schemaVersion !== 6 || typeof value.defaultEnhancePrompt !== "boolean") return false;
+  if (!validEnvelope(value)
+    || value.schemaVersion !== STUDIO_SCHEMA_VERSION
+    || typeof value.defaultEnhancePrompt !== "boolean"
+    || !Array.isArray(value.directorPresets)) return false;
   return value.sessions.every((session) => {
     const threads = session.threads;
     if (!Array.isArray(session.assets)
@@ -802,12 +999,33 @@ function validCurrentState(value: unknown): value is StudioState {
         || !Array.isArray(thread.attempts)) {
         return false;
       }
-      return thread.attempts.every((attempt) => isRecord(attempt)
-        && typeof attempt.id === "string"
-        && typeof attempt.status === "string"
-        && CURRENT_ATTEMPT_STATUSES.has(attempt.status as GenerationAttemptStatus));
+      try {
+        normalizeDirectorPlan(thread.draft.directorPlan, `thread ${thread.id}.draft.directorPlan`);
+        return thread.attempts.every((attempt) => {
+          if (!isRecord(attempt)
+            || typeof attempt.id !== "string"
+            || typeof attempt.status !== "string"
+            || !CURRENT_ATTEMPT_STATUSES.has(attempt.status as GenerationAttemptStatus)) return false;
+          if (isRecord(attempt.snapshot)) {
+            normalizeDirectorPlan(
+              attempt.snapshot.directorPlan,
+              `thread ${thread.id}.attempt ${attempt.id}.snapshot.directorPlan`,
+            );
+          }
+          return true;
+        });
+      } catch {
+        return false;
+      }
     }));
-  });
+  }) && (() => {
+    try {
+      normalizeDirectorPresets(value.directorPresets);
+      return true;
+    } catch {
+      return false;
+    }
+  })();
 }
 
 function normalizeReference(value: unknown, index: number): DraftReference {
@@ -883,6 +1101,7 @@ function normalizeDraft(value: unknown, defaultEnhancePrompt: boolean, migrateLe
     imageEditTarget: migrate(draft.imageEditTarget, "draft.imageEditTarget"),
     maskInstructions: migrate(draft.maskInstructions, "draft.maskInstructions"),
     maskStrokes,
+    directorPlan: normalizeDirectorPlan(draft.directorPlan, "draft.directorPlan"),
   };
 }
 
@@ -969,6 +1188,7 @@ function normalizeSnapshot(value: unknown, defaultMode: GenerationMode, defaultE
     imageEditTarget: snapshot.imageEditTarget,
     maskInstructions: snapshot.maskInstructions,
     maskStrokes: snapshot.maskStrokes,
+    directorPlan: snapshot.directorPlan,
   }, defaultEnhancePrompt, migrateLegacyMentions);
   return {
     ...snapshot,
@@ -984,6 +1204,9 @@ function normalizeSnapshot(value: unknown, defaultMode: GenerationMode, defaultE
     imageEditTarget: normalizedDraft.imageEditTarget,
     maskInstructions: normalizedDraft.maskInstructions,
     maskStrokes: normalizedDraft.maskStrokes,
+    directorPlan: normalizedDraft.directorPlan
+      ? cloneDirectorPlan(normalizedDraft.directorPlan)
+      : undefined,
   } as GenerationAttemptSnapshot;
 }
 
@@ -1391,6 +1614,50 @@ function migrateV5ToV6(value: JsonRecord): JsonRecord {
   return { ...value, schemaVersion: 6, defaultEnhancePrompt, sessions };
 }
 
+/**
+ * Phase 2 is intentionally not implemented in this release. Keep v6 bytes
+ * intact while reserving the v7 migration boundary required by the update
+ * chain, then let the v7 to v8 step add only Director-owned fields.
+ */
+function migrateV6ToV7(value: JsonRecord): JsonRecord {
+  return { ...value, schemaVersion: 7 };
+}
+
+function migrateV7ToV8(value: JsonRecord): JsonRecord {
+  const sessions = (value.sessions as unknown[]).map((sessionValue) => {
+    const session = asRecord(sessionValue, "session");
+    const rawThreads = asRecord(session.threads, "session.threads");
+    const mapThreads = (threads: unknown, label: string) => {
+      if (!Array.isArray(threads)) throw new Error(`${label} must be an array.`);
+      return threads.map((threadValue, index) => {
+        const thread = asRecord(threadValue, `${label}[${index}]`);
+        const draft = asRecord(thread.draft, `${label}[${index}].draft`);
+        return {
+          ...thread,
+          draft: {
+            ...draft,
+            directorPlan: draft.directorPlan,
+          },
+        };
+      });
+    };
+    return {
+      ...session,
+      threads: {
+        ...rawThreads,
+        image: mapThreads(rawThreads.image, "session.threads.image"),
+        video: mapThreads(rawThreads.video, "session.threads.video"),
+      },
+    };
+  });
+  return {
+    ...value,
+    schemaVersion: STUDIO_SCHEMA_VERSION,
+    sessions,
+    directorPresets: value.directorPresets ?? [],
+  };
+}
+
 function normalizeCurrentState(value: JsonRecord): StudioState {
   const defaultEnhancePrompt = value.defaultEnhancePrompt as boolean;
   const sessions = (value.sessions as unknown[]).map((sessionValue) => {
@@ -1422,11 +1689,12 @@ function normalizeCurrentState(value: JsonRecord): StudioState {
   });
   return {
     ...value,
-    schemaVersion: 6,
+    schemaVersion: STUDIO_SCHEMA_VERSION,
     activeSessionId: typeof value.activeSessionId === "string" && sessions.some((session) => session.id === value.activeSessionId) ? value.activeSessionId : sessions[0].id,
     promptModel: PROMPT_MODELS.some((model) => model.id === value.promptModel) ? value.promptModel : "openai/gpt-5.6-luna",
     defaultEnhancePrompt,
     generationPresets: normalizeGenerationPresets(value.generationPresets),
+    directorPresets: normalizeDirectorPresets(value.directorPresets),
     sessions,
   } as StudioState;
 }
@@ -1452,11 +1720,33 @@ function normalizeGenerationPresets(value: unknown): GenerationPreset[] {
   });
 }
 
+function normalizeDirectorPreset(value: unknown, index: number): DirectorPreset {
+  const preset = asRecord(value, `director preset ${index}`);
+  const createdAt = asString(
+    preset.createdAt,
+    `director preset ${index}.createdAt`,
+    new Date(0).toISOString(),
+  );
+  return {
+    id: asString(preset.id, `director preset ${index}.id`),
+    name: asString(preset.name, `director preset ${index}.name`),
+    plan: normalizeDirectorPresetPlan(preset.plan, `director preset ${index}.plan`),
+    createdAt,
+    updatedAt: asString(preset.updatedAt, `director preset ${index}.updatedAt`, createdAt),
+  };
+}
+
+function normalizeDirectorPresets(value: unknown): DirectorPreset[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) throw new Error("directorPresets must be an array.");
+  return value.map(normalizeDirectorPreset);
+}
+
 function migrateState(value: JsonRecord): { state: StudioState; report: StudioMigrationReport } {
   const fromVersion = value.schemaVersion as number;
   let current = value;
   const steps: string[] = [];
-  while (typeof current.schemaVersion === "number" && current.schemaVersion < 6) {
+  while (typeof current.schemaVersion === "number" && current.schemaVersion < STUDIO_SCHEMA_VERSION) {
     const version = current.schemaVersion;
     switch (version) {
       case 1: current = migrateV1ToV2(current); steps.push("v1→v2"); break;
@@ -1464,13 +1754,15 @@ function migrateState(value: JsonRecord): { state: StudioState; report: StudioMi
       case 3: current = migrateV3ToV4(current); steps.push("v3→v4"); break;
       case 4: current = migrateV4ToV5(current); steps.push("v4→v5"); break;
       case 5: current = migrateV5ToV6(current); steps.push("v5→v6"); break;
+      case 6: current = migrateV6ToV7(current); steps.push("v6→v7"); break;
+      case 7: current = migrateV7ToV8(current); steps.push("v7→v8"); break;
       default: throw new Error(`Unsupported studio schema version ${String(current.schemaVersion)}.`);
     }
   }
   if (!validCurrentState(current)) throw new Error("Migrated studio state failed schema validation.");
   const state = normalizeCurrentState(current);
   if (!validCurrentState(state)) throw new Error("Normalized studio state failed schema validation.");
-  return { state, report: { fromVersion, toVersion: 6, steps } };
+  return { state, report: { fromVersion, toVersion: STUDIO_SCHEMA_VERSION, steps } };
 }
 
 function classifyAttempt(state: StudioState, now: string): { state: StudioState; recovery: StartupAttemptRecovery[]; changed: boolean } {
@@ -1560,7 +1852,23 @@ export function reconcileStartupAttempts(state: StudioState, now: Date = new Dat
 
 export const reconcileStudioAttempts = reconcileStartupAttempts;
 
+function assertDirectorPersistenceState(state: StudioState): void {
+  normalizeDirectorPresets(state.directorPresets);
+  for (const session of state.sessions) {
+    for (const thread of [...session.threads.image, ...session.threads.video]) {
+      normalizeDirectorPlan(thread.draft.directorPlan, `thread ${thread.id}.draft.directorPlan`);
+      for (const attempt of thread.attempts) {
+        normalizeDirectorPlan(
+          attempt.snapshot?.directorPlan,
+          `thread ${thread.id}.attempt ${attempt.id}.snapshot.directorPlan`,
+        );
+      }
+    }
+  }
+}
+
 function serializedState(state: StudioState, boundHistory: boolean): string {
+  assertDirectorPersistenceState(state);
   const { recovery: _recovery, ...persistedState } = state;
   const bounded = {
     ...persistedState,
@@ -1696,7 +2004,9 @@ function recoveryStateFallback(
     try {
       const parsed = JSON.parse(knownGoodRaw) as unknown;
       if (validEnvelope(parsed)) {
-        const migrated = parsed.schemaVersion === 6 ? { state: normalizeCurrentState(parsed), report: undefined } : migrateState(parsed);
+        const migrated = parsed.schemaVersion === STUDIO_SCHEMA_VERSION
+          ? { state: normalizeCurrentState(parsed), report: undefined }
+          : migrateState(parsed);
         if (validCurrentState(migrated.state)) {
           const reconciled = reconcileStartupAttempts(migrated.state, now);
           const recovery = createRecovery("recovered_last_known_good", {
@@ -1763,15 +2073,15 @@ export function loadStudioStateWithRecovery(options: StudioLoadOptions = {}): St
     return recoveryStateFallback(storage, source, "unsupported", new Error("Studio state has an unsupported or incompatible shape."), options.now?.() ?? new Date());
   }
   const sourceVersion = parsed.schemaVersion;
-  // A v6 envelope with malformed required fields is corrupt, not an empty
+  // A current envelope with malformed required fields is corrupt, not an empty
   // workspace. Give the last-known-good snapshot a chance before reporting
   // recovery-required to the caller.
-  if (sourceVersion === 6 && !validCurrentState(parsed)) {
+  if (sourceVersion === STUDIO_SCHEMA_VERSION && !validCurrentState(parsed)) {
     return recoveryStateFallback(storage, source, "corrupt", new Error("Current studio state failed schema validation."), options.now?.() ?? new Date());
   }
   try {
     let migrated: { state: StudioState; report?: StudioMigrationReport };
-    if (sourceVersion === 6) {
+    if (sourceVersion === STUDIO_SCHEMA_VERSION) {
       migrated = { state: normalizeCurrentState(parsed) };
     } else if (isLegacySchemaVersion(sourceVersion)) {
       migrated = migrateState(parsed);
@@ -1781,7 +2091,7 @@ export function loadStudioStateWithRecovery(options: StudioLoadOptions = {}): St
     const reconciled = reconcileStartupAttempts(migrated.state, options.now?.() ?? new Date());
     const state = reconciled.state;
     if (!validCurrentState(state)) throw new Error("Studio state failed validation after startup reconciliation.");
-    const needsWrite = sourceVersion !== 6 || source.key !== STORAGE_KEY || reconciled.changed;
+    const needsWrite = sourceVersion !== STUDIO_SCHEMA_VERSION || source.key !== STORAGE_KEY || reconciled.changed;
     let durable: { backupKey?: string; lastKnownGoodKey?: string } = {};
     if (needsWrite) {
       let previousCurrentRaw: string | null = null;
@@ -1795,14 +2105,14 @@ export function loadStudioStateWithRecovery(options: StudioLoadOptions = {}): St
         serializedState(state, false),
         options.now ?? (() => new Date()),
         source.raw,
-        sourceVersion !== 6,
+        sourceVersion !== STUDIO_SCHEMA_VERSION,
         previousCurrentRaw,
       );
     }
     if (needsWrite && source.key.startsWith(STUDIO_PENDING_KEY_PREFIX)) {
       try { storage.removeItem(source.key); } catch { /* stale temp cleanup is best effort */ }
     }
-    const recovery = createRecovery(sourceVersion === 6 && !needsWrite ? "loaded" : "migrated", {
+    const recovery = createRecovery(sourceVersion === STUDIO_SCHEMA_VERSION && !needsWrite ? "loaded" : "migrated", {
       sourceKey: source.key,
       sourceSchemaVersion: sourceVersion,
       backupKey: durable.backupKey,
@@ -1818,7 +2128,9 @@ export function loadStudioStateWithRecovery(options: StudioLoadOptions = {}): St
       try { hasLastKnownGood = storage.getItem(STUDIO_LAST_KNOWN_GOOD_KEY) !== null; } catch { /* preserve the explicit migration failure below */ }
       if (hasLastKnownGood) return recoveryStateFallback(storage, source, "corrupt", error, options.now?.() ?? new Date());
     }
-    const failureKind = error instanceof StudioPersistenceError ? "write_failed" : sourceVersion === 6 ? "write_failed" : "migration_failed";
+    const failureKind = error instanceof StudioPersistenceError
+      ? "write_failed"
+      : sourceVersion === STUDIO_SCHEMA_VERSION ? "write_failed" : "migration_failed";
     const recovery = createRecovery(failureKind, {
       sourceKey: source.key,
       sourceSchemaVersion: sourceVersion,
@@ -1840,7 +2152,7 @@ export function loadStudioState(options: StudioLoadOptions = {}): StudioState {
 export const loadStudioStateResult = loadStudioStateWithRecovery;
 
 export function exportStudioState(state: StudioState): StudioStateExport {
-  return { schemaVersion: 6, json: serializedState(acknowledgeStudioRecovery(state), false) };
+  return { schemaVersion: STUDIO_SCHEMA_VERSION, json: serializedState(acknowledgeStudioRecovery(state), false) };
 }
 
 export const exportStudioStateJson = (state: StudioState): string => exportStudioState(state).json;

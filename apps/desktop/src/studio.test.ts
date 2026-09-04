@@ -110,7 +110,7 @@ test("incompatible pre-v6 metadata retains original bytes and exposes recovery",
 
     const result = loadStudioStateWithRecovery();
     const state = result.state;
-    assert.equal(state.schemaVersion, 6);
+    assert.equal(state.schemaVersion, 8);
     assert.equal(result.recovery.kind, "migration_failed");
     assert.equal(result.recovery.requiresUserAction, true);
     assert.equal(result.recovery.rawStateAvailable, true);
@@ -333,8 +333,10 @@ test("migrates every legacy schema version sequentially without dropping workspa
         ...(version <= 3 ? ["v3→v4"] : []),
         ...(version <= 4 ? ["v4→v5"] : []),
         "v5→v6",
+        "v6→v7",
+        "v7→v8",
       ]);
-      assert.equal(state.schemaVersion, 6);
+      assert.equal(state.schemaVersion, 8);
       assert.equal(state.activeSessionId, "legacy-session");
       assert.equal(state.promptModel, "openai/gpt-5.6-terra");
       const session = state.sessions[0];
@@ -403,7 +405,7 @@ test("migrates the serialized v0.6.2 schema-v5 production fixture losslessly", (
   });
   const session = result.state.sessions[0];
   assert.equal(result.migration?.fromVersion, 5);
-  assert.deepEqual(result.migration?.steps, ["v5→v6"]);
+  assert.deepEqual(result.migration?.steps, ["v5→v6", "v6→v7", "v7→v8"]);
   assert.equal(session.id, "v062-session");
   assert.equal(session.mode, "video");
   assert.deepEqual(session.assets.map(({ id, localPath, jobId }) => ({ id, localPath, jobId })), [
@@ -456,10 +458,11 @@ test("last-known-good recovery does not overwrite corrupt primary state", () => 
   withLocalStorage((writes) => {
     const first = createSession("First durable state");
     const firstState: StudioState = {
-      schemaVersion: 6,
+      schemaVersion: 8,
       activeSessionId: first.id,
       promptModel: "openai/gpt-5.6-luna",
       defaultEnhancePrompt: true,
+      directorPresets: [],
       sessions: [first],
     };
     saveStudioState(firstState, { now: () => new Date("2026-01-01T00:00:00.000Z") });
@@ -497,10 +500,11 @@ test("startup reconciliation classifies resumable jobs, uncertain submissions, a
   video.attempts = [{ id: "resumable-video", status: "in_progress", draftRevision: 1, createdAt: now, updatedAt: now, inputAssetIds: [], assetIds: [], jobId: "job-resume" }];
   video.enhancementAttempts = [{ id: "interrupted-enhancement", requestKey: "enhance:1", status: "in_progress", threadRevision: 1, originalPrompt: "truck", createdAt: now, updatedAt: now }];
   const state: StudioState = {
-    schemaVersion: 6,
+    schemaVersion: 8,
     activeSessionId: session.id,
     promptModel: "openai/gpt-5.6-luna",
     defaultEnhancePrompt: true,
+    directorPresets: [],
     sessions: [session],
   };
   const reconciled = reconcileStartupAttempts(state, new Date("2026-01-03T00:00:00.000Z"));
@@ -532,15 +536,16 @@ test("state export and managed-asset references omit ephemeral recovery diagnost
     byteSize: 12,
   });
   const state: StudioState = {
-    schemaVersion: 6,
+    schemaVersion: 8,
     activeSessionId: session.id,
     promptModel: "openai/gpt-5.6-luna",
     defaultEnhancePrompt: true,
+    directorPresets: [],
     sessions: [session],
     recovery: {
       kind: "loaded",
       status: "loaded",
-      targetSchemaVersion: 6,
+      targetSchemaVersion: 8,
       rawStateAvailable: true,
       requiresUserAction: false,
       attempts: [],
@@ -548,7 +553,7 @@ test("state export and managed-asset references omit ephemeral recovery diagnost
   };
   const exported = exportStudioState(state);
   const parsed = JSON.parse(exported.json) as Record<string, unknown>;
-  assert.equal(exported.schemaVersion, 6);
+  assert.equal(exported.schemaVersion, 8);
   assert.equal(parsed.recovery, undefined);
   assert.deepEqual(session.assets[0], {
     id: "managed-image",
@@ -575,10 +580,11 @@ test("prompt enhancement default applies to every thread and future work", () =>
   first.threads.image.push(createSiblingGenerationThread(first.threads.image[0], 2));
   const second = createSession("Second");
   const state: StudioState = {
-    schemaVersion: 6,
+    schemaVersion: 8,
     activeSessionId: first.id,
     promptModel: "openai/gpt-5.6-luna",
     defaultEnhancePrompt: true,
+    directorPresets: [],
     sessions: [first, second],
   };
 
@@ -626,14 +632,15 @@ test("session cost ledger records generation and enhancement once per id", () =>
   assert.equal(corrected.costLedger.reduce((sum, entry) => sum + entry.actualCostUsd, 0), 0.28);
 });
 
-test("current v6 metadata preserves its global enhancement preference", () => {
+test("current v8 metadata preserves its global enhancement preference", () => {
   withLocalStorage((writes) => {
     const session = createSession("Current", false);
     const state: StudioState = {
-      schemaVersion: 6,
+      schemaVersion: 8,
       activeSessionId: session.id,
       promptModel: "openai/gpt-5.6-luna",
       defaultEnhancePrompt: false,
+      directorPresets: [],
       sessions: [session],
     };
     saveStudioState(state);
@@ -647,10 +654,11 @@ test("named generation presets survive a durable state round trip", () => {
   withLocalStorage(() => {
     const session = createSession("Preset workspace");
     const state: StudioState = {
-      schemaVersion: 6,
+      schemaVersion: 8,
       activeSessionId: session.id,
       promptModel: "openai/gpt-5.6-luna",
       defaultEnhancePrompt: true,
+      directorPresets: [],
       sessions: [session],
       generationPresets: [{
         id: "preset-cinematic",
@@ -683,10 +691,11 @@ test("current metadata preserves reference purposes and enhancement artifacts", 
     }];
     thread.draft.enhancementArtifact = artifact;
     const state: StudioState = {
-      schemaVersion: 6,
+      schemaVersion: 8,
       activeSessionId: session.id,
       promptModel: "openai/gpt-5.6-luna",
       defaultEnhancePrompt: true,
+      directorPresets: [],
       sessions: [session],
     };
 
@@ -708,10 +717,11 @@ test("load supplies semantic purposes for saved references from before purpose p
       { id: "legacy-audio", name: "legacy.mp3", kind: "audio", mimeType: "audio/mpeg", origin: "upload", createdAt },
     );
     const state: StudioState = {
-      schemaVersion: 6,
+      schemaVersion: 8,
       activeSessionId: session.id,
       promptModel: "openai/gpt-5.6-luna",
       defaultEnhancePrompt: true,
+      directorPresets: [],
       sessions: [session],
     };
     const persisted = JSON.parse(JSON.stringify(state)) as {
@@ -871,7 +881,7 @@ test("managed-file reconciliation marks missing assets, repairs moved paths, and
     { id: "moved", name: "moved.png", kind: "image", mimeType: "image/png", origin: "upload", createdAt: "2026-01-01T00:00:00.000Z", localPath: "/managed/old.png", fingerprint: "moved:2:image/png" },
     { id: "missing", name: "missing.png", kind: "image", mimeType: "image/png", origin: "upload", createdAt: "2026-01-01T00:00:00.000Z", localPath: "/managed/missing.png", fingerprint: "missing:3:image/png" },
   ];
-  const studio: StudioState = { schemaVersion: 6, activeSessionId: state.id, sessions: [state], defaultEnhancePrompt: true, promptModel: "openai/gpt-5.6-luna" };
+  const studio: StudioState = { schemaVersion: 8, activeSessionId: state.id, sessions: [state], defaultEnhancePrompt: true, promptModel: "openai/gpt-5.6-luna", directorPresets: [] };
   const result = reconcileManagedAssetIndex(studio, [
     { id: "scan-exact", name: "exact.png", kind: "image", mimeType: "image/png", origin: "upload", createdAt: "2026-01-02T00:00:00.000Z", localPath: "/managed/exact.png", byteSize: 1, fingerprint: "exact:1:image/png" },
     { id: "scan-moved", name: "moved.png", kind: "image", mimeType: "image/png", origin: "upload", createdAt: "2026-01-02T00:00:00.000Z", localPath: "/managed/new.png", byteSize: 2, fingerprint: "moved:2:image/png" },

@@ -11,9 +11,60 @@ import {
   sessionDeletionDecision,
   stableAttemptIdempotencyKey,
 } from "./attemptRecovery.ts";
-import { createSession, type GenerationAttempt, type StudioState } from "./studio.ts";
+import type { DirectorPlan } from "./director/types.ts";
+import {
+  createSession,
+  restoreDraftFromAttemptSnapshot,
+  type GenerationAttempt,
+  type StudioState,
+} from "./studio.ts";
 
 const NOW = "2026-08-27T12:00:00.000Z";
+
+function directorPlan(): DirectorPlan {
+  return {
+    schemaVersion: 1,
+    enabled: true,
+    sourceAssetId: "asset-first-frame",
+    cameraRig: {
+      id: "camera-rig-1",
+      sensorPreset: "cinema",
+      lensPreset: "anamorphic",
+      focalLengthMm: 50,
+      aperture: 2.8,
+    },
+    subjects: [{
+      id: "subject-1",
+      label: "Fruit truck",
+      sourceAssetId: "asset-first-frame",
+      region: { type: "box", x: 0.1, y: 0.25, width: 0.3, height: 0.35 },
+    }],
+    motions: [{
+      id: "motion-1",
+      targetType: "subject",
+      targetId: "subject-1",
+      kind: "translate",
+      path: [{ x: 0.25, y: 0.5 }, { x: 0.75, y: 0.4 }],
+      intensity: 0.65,
+      start: 0.1,
+      end: 0.9,
+      easing: "ease_in_out",
+      order: 1,
+      actionLabel: "Truck crosses the frame",
+    }],
+    keyframes: [{ id: "keyframe-first", assetId: "asset-first-frame", role: "first", time: 0 }],
+    shots: [{
+      id: "shot-1",
+      order: 1,
+      durationSeconds: 5,
+      promptFragment: "Keep the truck centered.",
+      motionIds: ["motion-1"],
+      keyframeIds: ["keyframe-first"],
+      speed: "linear",
+    }],
+    updatedAt: NOW,
+  };
+}
 
 function attempt(overrides: Partial<GenerationAttempt> = {}): GenerationAttempt {
   return {
@@ -47,11 +98,12 @@ function stateWithAttempts(attempts: GenerationAttempt[]): StudioState {
   const session = createSession("Recovery test");
   session.threads.video[0].attempts = attempts;
   return {
-    schemaVersion: 6,
+    schemaVersion: 8,
     activeSessionId: session.id,
     promptModel: "openai/gpt-5.6-luna",
     defaultEnhancePrompt: true,
     sessions: [session],
+    directorPresets: [],
   };
 }
 
@@ -176,4 +228,22 @@ test("paid POST transport failures become uncertain unless idempotency is guaran
 test("stable attempt keys are deterministic and reject missing ids", () => {
   assert.equal(stableAttemptIdempotencyKey(" attempt-7 "), "fruit-truck-attempt:attempt-7");
   assert.throws(() => stableAttemptIdempotencyKey("  "), /attempt id/);
+});
+
+test("attempt restoration preserves the exact Director plan without aliasing snapshot data", () => {
+  const snapshotPlan = directorPlan();
+  const source = attempt({
+    snapshot: {
+      ...attempt().snapshot!,
+      directorPlan: snapshotPlan,
+    },
+  });
+  const session = createSession("Director restore");
+  const restored = restoreDraftFromAttemptSnapshot(session.threads.video[0].draft, source.snapshot!);
+
+  assert.deepEqual(restored.directorPlan, snapshotPlan);
+  assert.notEqual(restored.directorPlan, snapshotPlan);
+  assert.notEqual(restored.directorPlan?.motions, snapshotPlan.motions);
+  restored.directorPlan!.motions[0]!.actionLabel = "Changed after restore";
+  assert.equal(snapshotPlan.motions[0]!.actionLabel, "Truck crosses the frame");
 });

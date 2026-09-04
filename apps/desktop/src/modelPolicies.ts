@@ -423,7 +423,10 @@ export function assessVideoReferenceTransport(
 export function videoReferenceTransportForUrl(value: string): VideoReferenceTransport {
   const normalized = value.trim().toLowerCase();
   if (normalized.startsWith("data:")) return "data_url";
-  if (normalized.startsWith("fruit-truck-local:") || normalized.startsWith("file:") || normalized.startsWith("/")) return "local_file";
+  // The desktop bridge replaces this private managed-file marker with a data
+  // URL inside the reviewed payload before sending it to the provider.
+  if (normalized.startsWith("fruit-truck-local:")) return "data_url";
+  if (normalized.startsWith("file:") || normalized.startsWith("/")) return "local_file";
   if (normalized.startsWith("https://")) return "https_url";
   if (normalized.startsWith("http://")) return "http_url";
   return "local_file";
