@@ -649,6 +649,7 @@ export function DirectorPanel({
         <DirectorShotTimeline
           shots={plan.shots}
           motions={plan.motions}
+          keyframes={plan.keyframes}
           activeShotId={activeShot?.id}
           totalDurationSeconds={totalDurationSeconds}
           previewProgress={previewProgress}

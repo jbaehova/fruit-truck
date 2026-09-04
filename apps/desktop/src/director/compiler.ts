@@ -175,6 +175,32 @@ function cameraMotionNativeOption(
   return undefined;
 }
 
+type CameraMotionDetail = "intensity" | "start" | "end" | "easing" | "actionLabel";
+
+function cameraMotionDetailCandidates(nativeOptionName: string, detail: CameraMotionDetail): string[] {
+  const suffixes: Record<CameraMotionDetail, string[]> = {
+    intensity: ["intensity"],
+    start: ["start", "start_time"],
+    end: ["end", "end_time"],
+    easing: ["easing"],
+    actionLabel: ["action_label"],
+  };
+  return [...new Set(suffixes[detail].flatMap((suffix) => [
+    `${nativeOptionName}_${suffix}`,
+    `camera_motion_${suffix}`,
+    `camera_move_${suffix}`,
+    `camera_${suffix}`,
+  ]))];
+}
+
+function cameraMotionDetailText(motion: DirectorMotion, detail: CameraMotionDetail): string {
+  if (detail === "intensity") return `intensity ${motion.intensity}`;
+  if (detail === "start") return `start ${percent(motion.start)}`;
+  if (detail === "end") return `end ${percent(motion.end)}`;
+  if (detail === "easing") return `easing ${motion.easing.replaceAll("_", " ")}`;
+  return `action label "${motion.actionLabel?.trim() ?? ""}"`;
+}
+
 function compactPathText(path: readonly { x: number; y: number }[]): string {
   if (!path.length) return "";
   const indexes = [...new Set([0, Math.floor((path.length - 1) / 2), path.length - 1])];
@@ -392,8 +418,34 @@ function compileMotions(
       const nativeOption = cameraMotionNativeOption(capability, motion);
       if (nativeOption && output.providerOptions[nativeOption.name] === undefined) {
         output.providerOptions[nativeOption.name] = nativeOption.value;
-        setFidelity(output, motion.id, "native");
-        continue;
+        const detailValues: Array<{ detail: CameraMotionDetail; value: unknown }> = [
+          { detail: "intensity", value: motion.intensity },
+          { detail: "start", value: motion.start },
+          { detail: "end", value: motion.end },
+          { detail: "easing", value: motion.easing },
+          ...(motion.actionLabel?.trim()
+            ? [{ detail: "actionLabel" as const, value: motion.actionLabel.trim() }]
+            : []),
+        ];
+        const missingDetails: CameraMotionDetail[] = [];
+        for (const { detail, value } of detailValues) {
+          const parameter = availableParameter(capability, cameraMotionDetailCandidates(nativeOption.name, detail));
+          const nativeValue = parameter ? compatibleScalarValue(capability, parameter, value) : undefined;
+          if (parameter && nativeValue !== undefined && output.providerOptions[parameter] === undefined) {
+            output.providerOptions[parameter] = nativeValue;
+          } else {
+            missingDetails.push(detail);
+          }
+        }
+        if (!missingDetails.length) {
+          setFidelity(output, motion.id, "native");
+          continue;
+        }
+        const nativeDescription = `${motion.kind.replaceAll("_", " ")}${directionText(motion)}`;
+        const fallbackDetails = missingDetails.map((detail) => cameraMotionDetailText(motion, detail));
+        setFidelity(output, motion.id, "prompt");
+        output.promptLines.push(`Native Camera Move supplement for ${controlLabel(plan, motion.id)}: the structured ${nativeOption.name} option preserves ${nativeDescription}, while the Director Brief supplies ${fallbackDetails.join(", ")}.`);
+        output.warnings.push(`Partial native Camera Move support for ${controlLabel(plan, motion.id)}: ${nativeOption.name} preserves move kind and direction, but ${fallbackDetails.join(", ")} require Director Brief guidance. Prompt fidelity is reported for the complete control.`);
       }
     }
 

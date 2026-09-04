@@ -87,11 +87,24 @@ test("native structured controls, keyframes, and shots compile without prompt du
   const result = compileDirectorPlan({
     plan: nativePlan,
     capability: capability({
-      cameraParameters: new Set(["focal_length_mm", "camera_motion"]),
+      cameraParameters: new Set([
+        "focal_length_mm",
+        "camera_motion",
+        "camera_motion_intensity",
+        "camera_motion_start",
+        "camera_motion_end",
+        "camera_motion_easing",
+        "camera_motion_action_label",
+      ]),
       allowedPassthroughParameters: new Set(["aperture", "aspect_ratio"]),
       parameterDescriptors: {
         focal_length_mm: { type: "range", min: 12, max: 300 },
         camera_motion: { type: "enum", values: ["dolly_in"] },
+        camera_motion_intensity: { type: "range", min: 0, max: 1 },
+        camera_motion_start: { type: "range", min: 0, max: 1 },
+        camera_motion_end: { type: "range", min: 0, max: 1 },
+        camera_motion_easing: { type: "enum", values: ["ease_in_out"] },
+        camera_motion_action_label: { type: "enum", values: ["dolly in"] },
       },
       supportsFirstFrame: true,
       supportsLastFrame: true,
@@ -113,12 +126,57 @@ test("native structured controls, keyframes, and shots compile without prompt du
   assert.equal(result.providerOptions.aperture, 2.8);
   assert.equal(result.providerOptions.aspect_ratio, "16:9");
   assert.equal(result.providerOptions.camera_motion, "dolly_in");
+  assert.equal(result.providerOptions.camera_motion_intensity, 0.8);
+  assert.equal(result.providerOptions.camera_motion_start, 0);
+  assert.equal(result.providerOptions.camera_motion_end, 1);
+  assert.equal(result.providerOptions.camera_motion_easing, "ease_in_out");
+  assert.equal(result.providerOptions.camera_motion_action_label, "dolly in");
   assert.equal(Array.isArray(result.providerOptions.shots), true);
   assert.deepEqual(result.frameBindings, [
     { assetId: "first-asset", role: "first_frame" },
     { assetId: "last-asset", role: "last_frame" },
   ]);
   assert.doesNotMatch(result.promptBrief, /sweep right/i);
+});
+
+test("partial native camera moves preserve structured direction and disclose prompt-only details", () => {
+  const partialNativePlan = plan({
+    keyframes: [],
+    motions: [{
+      id: "motion-1",
+      targetType: "camera",
+      kind: "dolly",
+      direction: "in",
+      intensity: 0.37,
+      start: 0.15,
+      end: 0.82,
+      easing: "ease_out",
+      order: 1,
+      actionLabel: "close on the fruit crate",
+    }],
+  });
+  const result = compileDirectorPlan({
+    plan: partialNativePlan,
+    capability: capability({
+      cameraParameters: new Set(["camera_motion"]),
+      parameterDescriptors: {
+        camera_motion: { type: "enum", values: ["dolly_in"] },
+      },
+    }),
+    availableAssetIds: ["source"],
+    durationSeconds: 4,
+  });
+
+  assert.equal(result.providerOptions.camera_motion, "dolly_in");
+  assert.equal(result.fidelityByControlId["motion-1"], "prompt");
+  assert.match(result.promptBrief, /Native Camera Move supplement/i);
+  assert.match(result.promptBrief, /close on the fruit crate/i);
+  assert.match(result.promptBrief, /start 15%/i);
+  assert.match(result.promptBrief, /end 82%/i);
+  assert.match(result.promptBrief, /intensity 0\.37/i);
+  assert.match(result.promptBrief, /easing ease out/i);
+  assert.match(result.warnings.join(" "), /Partial native Camera Move support/i);
+  assert.match(result.warnings.join(" "), /Prompt fidelity is reported/i);
 });
 
 test("golden three-shot plan preserves the complete fallback contract", () => {

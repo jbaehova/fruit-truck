@@ -1,6 +1,6 @@
 import { ChevronDown, ChevronUp, Copy, Pause, Play, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { DIRECTOR_LIMITS, type DirectorCapability, type DirectorFidelity, type DirectorMotion, type DirectorShot, type DirectorShotSpeed } from "@/director/types";
+import { DIRECTOR_LIMITS, type DirectorCapability, type DirectorFidelity, type DirectorKeyframe, type DirectorKeyframeRole, type DirectorMotion, type DirectorShot, type DirectorShotSpeed } from "@/director/types";
 import { useI18n, type MessageKey } from "@/i18n";
 
 const SPEED_KEYS: Record<DirectorShotSpeed, MessageKey> = {
@@ -17,9 +17,17 @@ const FIDELITY_KEYS: Record<DirectorFidelity, MessageKey> = {
   unsupported: "directorFidelityUnsupported",
 };
 
+const KEYFRAME_ROLE_KEYS: Record<DirectorKeyframeRole, MessageKey> = {
+  first: "directorKeyframeFirst",
+  middle: "directorKeyframeMiddle",
+  last: "directorKeyframeLast",
+  timestamped: "directorKeyframeTimestamped",
+};
+
 export type DirectorShotTimelineProps = {
   shots: DirectorShot[];
   motions: DirectorMotion[];
+  keyframes: DirectorKeyframe[];
   activeShotId?: string;
   totalDurationSeconds: number;
   previewProgress: number;
@@ -41,6 +49,7 @@ export type DirectorShotTimelineProps = {
 export function DirectorShotTimeline({
   shots,
   motions,
+  keyframes,
   activeShotId,
   totalDurationSeconds,
   previewProgress,
@@ -66,6 +75,18 @@ export function DirectorShotTimeline({
   const assignedIds = new Set(activeShot?.motionIds ?? []);
   const assignedCameraCount = motions.filter((motion) => assignedIds.has(motion.id) && motion.targetType === "camera").length;
   const fidelity = activeShot ? fidelityByControlId?.[activeShot.id] : undefined;
+  const keyframesById = new Map(keyframes.map((keyframe) => [keyframe.id, keyframe]));
+  let elapsedSeconds = 0;
+  const keyframeMarkers = orderedShots.flatMap((shot) => {
+    const shotStart = elapsedSeconds;
+    elapsedSeconds += shot.durationSeconds;
+    return shot.keyframeIds.flatMap((keyframeId) => {
+      const keyframe = keyframesById.get(keyframeId);
+      if (!keyframe) return [];
+      const timeSeconds = shotStart + keyframe.time * shot.durationSeconds;
+      return [{ keyframe, timeSeconds, progress: totalDurationSeconds > 0 ? timeSeconds / totalDurationSeconds : 0 }];
+    });
+  });
 
   return (
     <section className="director-shot-timeline" aria-labelledby="director-shots-title">
@@ -131,6 +152,19 @@ export function DirectorShotTimeline({
             </button>
           );
         })}
+        {keyframeMarkers.map(({ keyframe, timeSeconds, progress }) => (
+          <span
+            key={keyframe.id}
+            className="director-keyframe-marker"
+            data-role={keyframe.role}
+            role="img"
+            aria-label={`${t(KEYFRAME_ROLE_KEYS[keyframe.role])}: ${timeSeconds.toFixed(1)}s`}
+            title={`${t(KEYFRAME_ROLE_KEYS[keyframe.role])}: ${timeSeconds.toFixed(1)}s`}
+            style={{ left: `clamp(8px, ${Math.min(100, Math.max(0, progress * 100))}%, calc(100% - 8px))` }}
+          >
+            {keyframe.role === "first" ? "F" : keyframe.role === "last" ? "L" : keyframe.role === "middle" ? "M" : "T"}
+          </span>
+        ))}
       </div>
 
       {orderedShots.length >= maxShots ? (
