@@ -1,4 +1,5 @@
 mod legacy_cleanup;
+mod update_transaction;
 mod workspace_storage;
 
 use legacy_cleanup::cleanup_legacy_installations;
@@ -54,14 +55,18 @@ const KEYCHAIN_SERVICE: &str = "ui.fruittruck.desktop";
 const KEYCHAIN_ACCOUNT: &str = "openrouter-api-key";
 static MEDIA_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 static ALLOW_APP_EXIT: AtomicBool = AtomicBool::new(false);
+static UPDATE_PREPARATION_ACTIVE: AtomicBool = AtomicBool::new(false);
+static UPDATE_PREPARATION_CANCELLED: AtomicBool = AtomicBool::new(false);
 static CREDENTIALS_LOCK: Mutex<()> = Mutex::new(());
 static WORKSPACE_STORAGE_LOCK: Mutex<()> = Mutex::new(());
+static MANAGED_ASSET_MUTATION_LOCK: Mutex<()> = Mutex::new(());
 static NETWORK_SEMAPHORE: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
 static OPENROUTER_CANCELLATIONS: OnceLock<
     Mutex<HashMap<String, tokio::sync::watch::Sender<bool>>>,
 > = OnceLock::new();
 
 const EVENT_QUIT_REQUESTED: &str = "app-quit-requested";
+const EVENT_UPDATE_PREPARATION_PROGRESS: &str = "update-preparation-progress";
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -218,6 +223,37 @@ fn credentials_directory(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 
 fn credentials_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(credentials_directory(app)?.join(CREDENTIALS_FILE))
+}
+
+fn assert_update_mutations_allowed(app: &tauri::AppHandle) -> Result<(), String> {
+    if UPDATE_PREPARATION_ACTIVE.load(Ordering::SeqCst)
+        || update_transaction::update_transaction_blocks_mutation(&credentials_directory(app)?)?
+    {
+        return Err("The workspace is locked while an update is being prepared.".into());
+    }
+    Ok(())
+}
+
+fn lock_managed_asset_mutation(
+    app: &tauri::AppHandle,
+) -> Result<std::sync::MutexGuard<'static, ()>, String> {
+    lock_managed_asset_mutation_checked(&MANAGED_ASSET_MUTATION_LOCK, || {
+        assert_update_mutations_allowed(app)
+    })
+}
+
+fn lock_managed_asset_mutation_checked<'a, F>(
+    lock: &'a Mutex<()>,
+    check: F,
+) -> Result<std::sync::MutexGuard<'a, ()>, String>
+where
+    F: FnOnce() -> Result<(), String>,
+{
+    let guard = lock
+        .lock()
+        .map_err(|_| "Managed asset storage is unavailable.".to_string())?;
+    check()?;
+    Ok(guard)
 }
 
 fn generated_directory(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -1370,6 +1406,7 @@ fn append_asset_chunk(
         }
     };
     let root = upload_asset_root(&app, origin)?;
+    let _mutation_lock = lock_managed_asset_mutation(&app)?;
     append_asset_chunk_to_root(&root, upload_id, bytes)
 }
 
@@ -1381,6 +1418,7 @@ fn finish_asset_upload(
 ) -> Result<CachedMedia, String> {
     validate_managed_asset_input(&input)?;
     let root = upload_asset_root(&app, input.origin.as_deref())?;
+    let _mutation_lock = lock_managed_asset_mutation(&app)?;
     finish_asset_upload_to_root(&root, &upload_id, &input)
 }
 
@@ -1406,6 +1444,7 @@ fn abort_asset_upload(
     origin: Option<String>,
 ) -> Result<(), String> {
     let root = upload_asset_root(&app, origin.as_deref())?;
+    let _mutation_lock = lock_managed_asset_mutation(&app)?;
     let temporary = asset_upload_path(&root, &upload_id)?;
     match std::fs::remove_file(temporary) {
         Ok(()) => Ok(()),
@@ -1416,6 +1455,7 @@ fn abort_asset_upload(
 
 #[tauri::command]
 async fn pick_and_import_assets(app: tauri::AppHandle) -> Result<Vec<ManagedAssetFile>, String> {
+    assert_update_mutations_allowed(&app)?;
     let selection = app
         .dialog()
         .file()
@@ -1432,6 +1472,7 @@ async fn pick_and_import_assets(app: tauri::AppHandle) -> Result<Vec<ManagedAsse
     };
     let root = assets_directory(&app)?;
     let emitter = app.clone();
+    let mutation_app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let mut paths = Vec::with_capacity(files.len());
         let mut errors = Vec::new();
@@ -1441,6 +1482,7 @@ async fn pick_and_import_assets(app: tauri::AppHandle) -> Result<Vec<ManagedAsse
                 Err(error) => errors.push(format!("Could not read selected media path: {error}")),
             }
         }
+        let _mutation_lock = lock_managed_asset_mutation(&mutation_app)?;
         let (assets, import_errors) = import_media_files_preserving_successes(&paths, &root);
         errors.extend(import_errors);
         if !errors.is_empty() && !assets.is_empty() {
@@ -1458,6 +1500,7 @@ async fn pick_and_import_assets(app: tauri::AppHandle) -> Result<Vec<ManagedAsse
 
 #[tauri::command]
 fn delete_managed_asset(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    let _mutation_lock = lock_managed_asset_mutation(&app)?;
     let roots = managed_roots(&app)?.to_vec();
     if let Some(canonical) = validate_managed_deletion_path(Path::new(&path), &roots)? {
         std::fs::remove_file(canonical).map_err(|error| error.to_string())?;
@@ -1599,6 +1642,7 @@ fn normalize_generated_image(
     resolution: Option<String>,
     aspect_ratio: Option<String>,
 ) -> Result<String, String> {
+    let _mutation_lock = lock_managed_asset_mutation(&app)?;
     let source = validate_managed_media_path(&app, Path::new(&path))?;
     if !source.starts_with(generated_directory(&app)?) {
         return Err("Only generated images may be normalized.".into());
@@ -2108,7 +2152,7 @@ fn openrouter_url(path: &str) -> Result<reqwest::Url, String> {
     ) || safe_job_id
         || safe_endpoint_lookup;
     let allowed_query = match normalized_path {
-        "/models" => url.query() == Some("output_modalities=video"),
+        "/models" => url.query().is_none() || url.query() == Some("output_modalities=video"),
         _ => url.query().is_none(),
     };
     if !allowed_path || !allowed_query {
@@ -2777,12 +2821,15 @@ async fn materialize_openrouter_image_urls(app: &tauri::AppHandle, payload: &mut
             .to_string();
         match download_public_image(url, &root).await {
             Ok((file, mime_type)) => {
-                let materialized = write_managed_media_from_temp(
-                    &root,
-                    media_name_for_mime(&mime_type),
-                    &file.path,
-                    "image",
-                );
+                let materialized = (|| {
+                    let _mutation_lock = lock_managed_asset_mutation(app)?;
+                    write_managed_media_from_temp(
+                        &root,
+                        media_name_for_mime(&mime_type),
+                        &file.path,
+                        "image",
+                    )
+                })();
                 match materialized {
                     Ok(materialized) => {
                         object.insert("local_path".into(), Value::String(materialized.local_path));
@@ -2992,6 +3039,7 @@ async fn openrouter_request_inner(
     .await?;
     let response_path = response_file.path;
     let parsed = if path == "/images" {
+        let _mutation_lock = lock_managed_asset_mutation(&app)?;
         if is_image_sse {
             parse_openrouter_image_sse_response(&response_path, &response_root)
         } else {
@@ -3137,6 +3185,7 @@ async fn cache_video_content(app: tauri::AppHandle, job_id: String) -> Result<Ca
     {
         return Err("Invalid video job id.".into());
     }
+    assert_update_mutations_allowed(&app)?;
     let api_key = read_api_key(&app)?
         .map(|stored| stored.value)
         .ok_or("Add an OpenRouter API key in Settings first.")?;
@@ -3181,12 +3230,15 @@ async fn cache_video_content(app: tauri::AppHandle, job_id: String) -> Result<Ca
     };
     let temporary =
         stream_response_to_temp(response, &directory, MAX_VIDEO_BYTES, "Generated video").await?;
-    let managed = match write_managed_media_from_temp(
-        &directory,
-        &format!("{job_id}.{extension}"),
-        &temporary.path,
-        "video",
-    ) {
+    let managed = match (|| {
+        let _mutation_lock = lock_managed_asset_mutation(&app)?;
+        write_managed_media_from_temp(
+            &directory,
+            &format!("{job_id}.{extension}"),
+            &temporary.path,
+            "video",
+        )
+    })() {
         Ok(managed) => managed,
         Err(error) => {
             let _ = std::fs::remove_file(&temporary.path);
@@ -3194,7 +3246,9 @@ async fn cache_video_content(app: tauri::AppHandle, job_id: String) -> Result<Ca
         }
     };
     if let Err(error) = inspect_managed_asset(app.clone(), managed.local_path.clone()).await {
-        let _ = std::fs::remove_file(&managed.local_path);
+        if let Ok(_mutation_lock) = lock_managed_asset_mutation(&app) {
+            let _ = std::fs::remove_file(&managed.local_path);
+        }
         return Err(format!(
             "Generated video metadata is outside the safety policy: {error}"
         ));
@@ -3583,6 +3637,7 @@ fn save_workspace_state(
     let _lock = WORKSPACE_STORAGE_LOCK
         .lock()
         .map_err(|_| "The workspace store is unavailable.".to_string())?;
+    assert_update_mutations_allowed(&app)?;
     workspace_storage::save(&credentials_directory(&app)?, payload)
 }
 
@@ -3603,6 +3658,7 @@ fn reconcile_workspace_state(
     let _lock = WORKSPACE_STORAGE_LOCK
         .lock()
         .map_err(|_| "The workspace store is unavailable.".to_string())?;
+    assert_update_mutations_allowed(&app)?;
     workspace_storage::reconcile(&credentials_directory(&app)?)
 }
 
@@ -3614,6 +3670,7 @@ fn import_workspace_state(
     let _lock = WORKSPACE_STORAGE_LOCK
         .lock()
         .map_err(|_| "The workspace store is unavailable.".to_string())?;
+    assert_update_mutations_allowed(&app)?;
     let source = PathBuf::from(path);
     let _ = credentials_directory(&app)?;
     workspace_storage::import_file(&source)
@@ -3670,6 +3727,7 @@ fn restore_workspace_backup(
     let _lock = WORKSPACE_STORAGE_LOCK
         .lock()
         .map_err(|_| "The workspace store is unavailable.".to_string())?;
+    assert_update_mutations_allowed(&app)?;
     workspace_storage::restore_backup(&credentials_directory(&app)?, &source)
 }
 
@@ -3681,6 +3739,244 @@ fn workspace_storage_health(
         .lock()
         .map_err(|_| "The workspace store is unavailable.".to_string())?;
     workspace_storage::health(&credentials_directory(&app)?)
+}
+
+#[tauri::command]
+fn create_pre_update_snapshot(
+    app: tauri::AppHandle,
+    from_version: String,
+    to_version: String,
+) -> Result<update_transaction::UpdateTransaction, String> {
+    if UPDATE_PREPARATION_ACTIVE.swap(true, Ordering::SeqCst) {
+        return Err("Another update snapshot is already being prepared.".into());
+    }
+    UPDATE_PREPARATION_CANCELLED.store(false, Ordering::SeqCst);
+    let result = (|| {
+        let _lock = WORKSPACE_STORAGE_LOCK
+            .lock()
+            .map_err(|_| "The workspace store is unavailable.".to_string())?;
+        let _asset_lock = MANAGED_ASSET_MUTATION_LOCK
+            .lock()
+            .map_err(|_| "Managed asset storage is unavailable.".to_string())?;
+        update_transaction::create_pre_update_snapshot_with_observer(
+            &credentials_directory(&app)?,
+            from_version,
+            to_version,
+            |progress| {
+                app.emit(EVENT_UPDATE_PREPARATION_PROGRESS, progress)
+                    .map_err(|error| error.to_string())
+            },
+            || UPDATE_PREPARATION_CANCELLED.load(Ordering::SeqCst),
+        )
+    })();
+    UPDATE_PREPARATION_CANCELLED.store(false, Ordering::SeqCst);
+    UPDATE_PREPARATION_ACTIVE.store(false, Ordering::SeqCst);
+    result
+}
+
+#[tauri::command]
+fn cancel_update_snapshot_preparation() -> bool {
+    if !UPDATE_PREPARATION_ACTIVE.load(Ordering::SeqCst) {
+        return false;
+    }
+    UPDATE_PREPARATION_CANCELLED.store(true, Ordering::SeqCst);
+    true
+}
+
+#[tauri::command]
+fn save_verified_update_workspace(
+    app: tauri::AppHandle,
+    transaction_id: String,
+    payload: Value,
+) -> Result<workspace_storage::StorageStatus, String> {
+    let _lock = WORKSPACE_STORAGE_LOCK
+        .lock()
+        .map_err(|_| "The workspace store is unavailable.".to_string())?;
+    let root = credentials_directory(&app)?;
+    let running_version = app.package_info().version.to_string();
+    update_transaction::assert_update_transaction_target_version(
+        &root,
+        &transaction_id,
+        &running_version,
+    )?;
+    update_transaction::save_verified_update_workspace(&root, &transaction_id, payload)
+}
+
+#[tauri::command]
+fn load_pending_update_transaction(
+    app: tauri::AppHandle,
+) -> Result<Option<update_transaction::UpdateTransaction>, String> {
+    let _lock = WORKSPACE_STORAGE_LOCK
+        .lock()
+        .map_err(|_| "The workspace store is unavailable.".to_string())?;
+    update_transaction::load_pending_update_transaction(&credentials_directory(&app)?)
+}
+
+#[tauri::command]
+fn load_pre_update_snapshot(
+    app: tauri::AppHandle,
+    transaction_id: String,
+) -> Result<workspace_storage::LoadedWorkspace, String> {
+    let _lock = WORKSPACE_STORAGE_LOCK
+        .lock()
+        .map_err(|_| "The workspace store is unavailable.".to_string())?;
+    update_transaction::load_pre_update_snapshot(&credentials_directory(&app)?, &transaction_id)
+}
+
+#[tauri::command]
+fn set_update_transaction_phase(
+    app: tauri::AppHandle,
+    transaction_id: String,
+    phase: update_transaction::UpdateTransactionPhase,
+) -> Result<update_transaction::UpdateTransaction, String> {
+    let _lock = WORKSPACE_STORAGE_LOCK
+        .lock()
+        .map_err(|_| "The workspace store is unavailable.".to_string())?;
+    let root = credentials_directory(&app)?;
+    if phase == update_transaction::UpdateTransactionPhase::Verifying {
+        return update_transaction::begin_update_verification(
+            &root,
+            &transaction_id,
+            &app.package_info().version.to_string(),
+        );
+    }
+    if matches!(
+        phase,
+        update_transaction::UpdateTransactionPhase::Installing
+            | update_transaction::UpdateTransactionPhase::AwaitingRestart
+    ) {
+        update_transaction::set_update_transaction_phase_for_process(
+            &root,
+            &transaction_id,
+            phase,
+            std::process::id(),
+        )
+    } else {
+        update_transaction::set_update_transaction_phase(&root, &transaction_id, phase)
+    }
+}
+
+#[tauri::command]
+fn fail_update_transaction(
+    app: tauri::AppHandle,
+    transaction_id: String,
+    code: String,
+    message: String,
+) -> Result<update_transaction::UpdateTransaction, String> {
+    let _lock = WORKSPACE_STORAGE_LOCK
+        .lock()
+        .map_err(|_| "The workspace store is unavailable.".to_string())?;
+    update_transaction::fail_update_transaction(
+        &credentials_directory(&app)?,
+        &transaction_id,
+        code,
+        message,
+    )
+}
+
+#[tauri::command]
+fn verify_update_assets(
+    app: tauri::AppHandle,
+    transaction_id: String,
+) -> Result<update_transaction::AssetVerificationReport, String> {
+    let _lock = WORKSPACE_STORAGE_LOCK
+        .lock()
+        .map_err(|_| "The workspace store is unavailable.".to_string())?;
+    let root = credentials_directory(&app)?;
+    update_transaction::begin_update_verification(
+        &root,
+        &transaction_id,
+        &app.package_info().version.to_string(),
+    )?;
+    update_transaction::verify_update_assets(&root, transaction_id)
+}
+
+#[tauri::command]
+fn complete_update_transaction(
+    app: tauri::AppHandle,
+    transaction_id: String,
+) -> Result<(), String> {
+    let _lock = WORKSPACE_STORAGE_LOCK
+        .lock()
+        .map_err(|_| "The workspace store is unavailable.".to_string())?;
+    let root = credentials_directory(&app)?;
+    update_transaction::assert_update_transaction_target_version(
+        &root,
+        &transaction_id,
+        &app.package_info().version.to_string(),
+    )?;
+    update_transaction::complete_update_transaction(&root, transaction_id)
+}
+
+#[tauri::command]
+fn cleanup_completed_update_snapshots(app: tauri::AppHandle) -> Result<usize, String> {
+    let _lock = WORKSPACE_STORAGE_LOCK
+        .lock()
+        .map_err(|_| "The workspace store is unavailable.".to_string())?;
+    assert_update_mutations_allowed(&app)?;
+    update_transaction::cleanup_completed_update_snapshots(&credentials_directory(&app)?)
+}
+
+#[tauri::command]
+fn restore_pre_update_snapshot(
+    app: tauri::AppHandle,
+    transaction_id: String,
+) -> Result<workspace_storage::StorageStatus, String> {
+    let _lock = WORKSPACE_STORAGE_LOCK
+        .lock()
+        .map_err(|_| "The workspace store is unavailable.".to_string())?;
+    update_transaction::restore_pre_update_snapshot(&credentials_directory(&app)?, transaction_id)
+}
+
+#[tauri::command]
+fn export_pre_update_snapshot(
+    app: tauri::AppHandle,
+    transaction_id: String,
+) -> Result<String, String> {
+    let _lock = WORKSPACE_STORAGE_LOCK
+        .lock()
+        .map_err(|_| "The workspace store is unavailable.".to_string())?;
+    let downloads = app
+        .path()
+        .download_dir()
+        .map_err(|error| error.to_string())?;
+    update_transaction::export_pre_update_snapshot(
+        &credentials_directory(&app)?,
+        &downloads,
+        transaction_id,
+    )
+}
+
+#[tauri::command]
+fn update_asset_folder(app: tauri::AppHandle) -> Result<String, String> {
+    update_transaction::asset_root(&credentials_directory(&app)?)
+}
+
+#[tauri::command]
+fn abort_update_transaction(
+    app: tauri::AppHandle,
+    transaction_id: String,
+) -> Result<update_transaction::UpdateTransaction, String> {
+    let _lock = WORKSPACE_STORAGE_LOCK
+        .lock()
+        .map_err(|_| "The workspace store is unavailable.".to_string())?;
+    update_transaction::abort_update_transaction(&credentials_directory(&app)?, &transaction_id)
+}
+
+#[tauri::command]
+fn abandon_update_transaction_after_source_relaunch(
+    app: tauri::AppHandle,
+    transaction_id: String,
+) -> Result<update_transaction::UpdateTransaction, String> {
+    let _lock = WORKSPACE_STORAGE_LOCK
+        .lock()
+        .map_err(|_| "The workspace store is unavailable.".to_string())?;
+    update_transaction::abandon_update_transaction_after_source_relaunch(
+        &credentials_directory(&app)?,
+        &transaction_id,
+        &app.package_info().version.to_string(),
+        std::process::id(),
+    )
 }
 
 fn cleanup_managed_temporary_files(app: &tauri::AppHandle) -> Result<(), String> {
@@ -3759,11 +4055,18 @@ pub fn run() {
             configure_runtime_asset_scope(&app_handle).map_err(
                 |error| -> Box<dyn std::error::Error> { Box::new(std::io::Error::other(error)) },
             )?;
-            if let Err(error) = cleanup_managed_temporary_files(&app_handle) {
-                eprintln!("Fruit Truck could not clean managed temporary files: {error}");
-            }
-            if let Err(error) = cleanup_download_temporary_files(&app_handle) {
-                eprintln!("Fruit Truck could not clean download temporary files: {error}");
+            let cleanup_allowed = update_transaction::update_transaction_blocks_mutation(
+                &credentials_directory(&app_handle)?,
+            )
+            .map(|blocked| !blocked)
+            .unwrap_or(false);
+            if cleanup_allowed {
+                if let Err(error) = cleanup_managed_temporary_files(&app_handle) {
+                    eprintln!("Fruit Truck could not clean managed temporary files: {error}");
+                }
+                if let Err(error) = cleanup_download_temporary_files(&app_handle) {
+                    eprintln!("Fruit Truck could not clean download temporary files: {error}");
+                }
             }
             tauri::async_runtime::spawn_blocking(move || {
                 if let Err(error) = cleanup_legacy_installations(&app_handle) {
@@ -3782,8 +4085,12 @@ pub fn run() {
                 let emitter = window.clone();
                 let paths = paths.clone();
                 tauri::async_runtime::spawn_blocking(move || {
-                    let result = assets_directory(&app)
-                        .map(|root| import_media_files_preserving_successes(&paths, &root));
+                    let result: Result<(Vec<ManagedAssetFile>, Vec<String>), String> = (|| {
+                        let _mutation_lock = lock_managed_asset_mutation(&app)?;
+                        let root = assets_directory(&app)?;
+                        Ok(import_media_files_preserving_successes(&paths, &root))
+                    })(
+                    );
                     match result {
                         Ok((assets, errors)) => {
                             if !assets.is_empty() {
@@ -3828,6 +4135,21 @@ pub fn run() {
             export_workspace_snapshot,
             restore_workspace_backup,
             workspace_storage_health,
+            create_pre_update_snapshot,
+            cancel_update_snapshot_preparation,
+            save_verified_update_workspace,
+            load_pending_update_transaction,
+            load_pre_update_snapshot,
+            set_update_transaction_phase,
+            fail_update_transaction,
+            verify_update_assets,
+            complete_update_transaction,
+            cleanup_completed_update_snapshots,
+            restore_pre_update_snapshot,
+            export_pre_update_snapshot,
+            update_asset_folder,
+            abort_update_transaction,
+            abandon_update_transaction_after_source_relaunch,
             quit_app
         ])
         .build(tauri::generate_context!())
@@ -4100,6 +4422,10 @@ mod tests {
     fn openrouter_key_endpoint_is_allowlisted_without_open_proxying() {
         assert!(openrouter_url("/key").is_ok());
         assert!(openrouter_url("/key?x=1").is_err());
+        assert!(openrouter_url("/models").is_ok());
+        assert!(openrouter_url("/models?output_modalities=video").is_ok());
+        assert!(openrouter_url("/models?output_modalities=image").is_err());
+        assert!(openrouter_url("/models?x=1").is_err());
         assert!(openrouter_url("/anything").is_err());
         assert!(openrouter_url("/images/models/openai%2Fgpt-image-1/endpoints").is_ok());
         assert!(openrouter_url("/images/models/a/b/endpoints").is_err());
@@ -4308,5 +4634,37 @@ mod tests {
         assert_eq!(assets.len(), 1);
         assert_eq!(errors.len(), 1);
         assert!(Path::new(&assets[0].local_path).is_file());
+    }
+
+    #[test]
+    fn managed_asset_lock_rechecks_update_guard_after_waiting() {
+        let lock = Arc::new(Mutex::new(()));
+        let blocked = Arc::new(AtomicBool::new(false));
+        let held_by_snapshot = lock.lock().expect("snapshot lock");
+        let (attempting_tx, attempting_rx) = std::sync::mpsc::channel();
+        let thread_lock = Arc::clone(&lock);
+        let thread_blocked = Arc::clone(&blocked);
+        let writer = std::thread::spawn(move || {
+            attempting_tx.send(()).expect("attempting signal");
+            lock_managed_asset_mutation_checked(&thread_lock, || {
+                if thread_blocked.load(Ordering::SeqCst) {
+                    Err("update transaction is active".into())
+                } else {
+                    Ok(())
+                }
+            })
+            .map(|_guard| ())
+        });
+
+        attempting_rx.recv().expect("writer attempting lock");
+        blocked.store(true, Ordering::SeqCst);
+        drop(held_by_snapshot);
+        assert_eq!(
+            writer
+                .join()
+                .expect("writer thread")
+                .expect_err("blocked writer"),
+            "update transaction is active"
+        );
     }
 }

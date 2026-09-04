@@ -14,7 +14,7 @@ const SCHEMA_VERSION: u8 = 1;
 const MAX_STATE_BYTES: u64 = 64 * 1024 * 1024;
 static STORAGE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StorageStatus {
     pub path: String,
@@ -24,7 +24,7 @@ pub struct StorageStatus {
     pub recovered: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LoadedWorkspace {
     pub payload: Value,
@@ -172,11 +172,13 @@ fn temporary_path(parent: &Path, prefix: &str) -> PathBuf {
     parent.join(format!(".{prefix}-{}-{sequence}.tmp", std::process::id()))
 }
 
-fn sync_directory(path: &Path) {
+fn sync_directory(path: &Path) -> Result<(), String> {
     #[cfg(unix)]
-    if let Ok(directory) = std::fs::File::open(path) {
-        let _ = directory.sync_all();
+    {
+        let directory = std::fs::File::open(path).map_err(|error| error.to_string())?;
+        directory.sync_all().map_err(|error| error.to_string())?;
     }
+    Ok(())
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -200,7 +202,7 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
         file.flush().map_err(|error| error.to_string())?;
         file.sync_all().map_err(|error| error.to_string())?;
         std::fs::rename(&temporary, path).map_err(|error| error.to_string())?;
-        sync_directory(parent);
+        sync_directory(parent)?;
         Ok(())
     })();
     if result.is_err() {
@@ -240,7 +242,7 @@ fn atomic_copy(source: &Path, destination: &Path) -> Result<(), String> {
             return Err("Workspace backup copy was incomplete.".into());
         }
         std::fs::rename(&temporary, destination).map_err(|error| error.to_string())?;
-        sync_directory(parent);
+        sync_directory(parent)?;
         Ok(())
     })();
     if result.is_err() {
@@ -330,6 +332,69 @@ fn parse_snapshot_bytes(path: &Path) -> Result<(LoadedWorkspace, Vec<u8>), Strin
         },
         bytes,
     ))
+}
+
+/// Create and validate a private directory for update transaction storage.
+///
+/// Kept crate-visible so the update transaction layer shares the exact same
+/// symlink and permission policy as the primary workspace store.
+pub(crate) fn ensure_private_directory(path: &Path) -> Result<(), String> {
+    ensure_directory(path)
+}
+
+/// Atomically install private bytes using a synced temporary file and rename.
+pub(crate) fn atomic_write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    atomic_write(path, bytes)
+}
+
+/// Atomically copy a validated private file without reserializing it.
+pub(crate) fn atomic_copy_private(source: &Path, destination: &Path) -> Result<(), String> {
+    atomic_copy(source, destination)
+}
+
+/// Read and validate the exact bytes of a workspace envelope.
+pub(crate) fn read_validated_envelope(path: &Path) -> Result<(LoadedWorkspace, Vec<u8>), String> {
+    parse_snapshot_bytes(path)
+}
+
+/// Resolve the primary workspace envelope path under the allowlisted root.
+pub(crate) fn current_state_file(root: &Path) -> Result<PathBuf, String> {
+    Ok(state_paths(root)?.0)
+}
+
+/// Sync a private directory and propagate durability failures to the caller.
+pub(crate) fn sync_private_directory(path: &Path) -> Result<(), String> {
+    sync_directory(path)
+}
+
+/// Validate and atomically restore an exact update snapshot as current state.
+///
+/// This is deliberately source-path based only at the crate boundary. Public
+/// commands must resolve the source from a validated transaction ID first.
+pub(crate) fn restore_exact_snapshot(
+    root: &Path,
+    source_path: &Path,
+) -> Result<StorageStatus, String> {
+    let (loaded, bytes) = parse_snapshot_bytes(source_path)?;
+    let (current, backup_one, backup_two) = state_paths(root)?;
+    if entry_exists(&backup_one) {
+        atomic_copy(&backup_one, &backup_two)?;
+    }
+    if entry_exists(&current) {
+        atomic_copy(&current, &backup_one)?;
+    }
+    atomic_write(&current, &bytes)?;
+
+    Ok(StorageStatus {
+        path: current.to_string_lossy().into_owned(),
+        backup_paths: vec![
+            backup_one.to_string_lossy().into_owned(),
+            backup_two.to_string_lossy().into_owned(),
+        ],
+        byte_size: bytes.len() as u64,
+        checksum: loaded.checksum,
+        recovered: true,
+    })
 }
 
 fn snapshot_path<'a>(
