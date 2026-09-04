@@ -113,6 +113,10 @@ jobs:
             -p "$RUNNER_TEMP/updater-public.key" \
             -x "$RUNNER_TEMP/updater-signature.minisig"
 
+      - name: Verify lossless update fixtures and managed assets
+        working-directory: apps/desktop
+        run: node --experimental-strip-types scripts/verify-lossless-update.mjs
+
   release-macos:
     needs: preflight
     runs-on: macos-15
@@ -151,6 +155,12 @@ jobs:
 
       - name: Prepare self-contained Apple Silicon assets
         run: bash apps/desktop/scripts/prepare-macos-release-assets.sh
+
+      - name: Verify native lossless update transactions
+        run: |
+          cargo test --locked \
+            --manifest-path apps/desktop/src-tauri/Cargo.toml \
+            update_transaction::tests
 
       - name: Revalidate immutable release tag
         env:
@@ -248,6 +258,32 @@ jobs:
           xcrun stapler validate "$DMG_PATH"
           spctl --assess --type execute --verbose=2 "$APP_PATH"
           spctl --assess --type open --context context:primary-signature --verbose=2 "$DMG_PATH"
+
+      - name: Verify real signed packaged updater and lossless migration
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          APP_PATH=$(find apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos -name 'Fruit Truck.app' -print -quit)
+          UPDATER_PATH=$(find apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle -name '*.app.tar.gz' -print -quit)
+          test -n "$APP_PATH"
+          test -n "$UPDATER_PATH"
+          test -s "$UPDATER_PATH.sig"
+
+          gh release list --limit 100 --json tagName,isDraft,isPrerelease > "$RUNNER_TEMP/published-releases.json"
+          PRIOR_TAG=$(node apps/desktop/scripts/packaged-update-smoke.mjs select-prior \
+            --releases "$RUNNER_TEMP/published-releases.json" \
+            --to-version "${RELEASE_TAG#v}" | jq -er '.tag')
+
+          bash apps/desktop/scripts/smoke-native-app.sh \
+            "$APP_PATH" \
+            "$UPDATER_PATH" \
+            "$UPDATER_PATH.sig" \
+            "$PRIOR_TAG"
 
       - name: Replace the release DMG with the notarized build
         env:

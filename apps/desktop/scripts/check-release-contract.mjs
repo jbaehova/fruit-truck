@@ -133,6 +133,21 @@ assert.match(mediaBuildScript, /--disable-ffmpeg/, "The release media build stil
 assert.ok(!mediaBuildScript.includes('INSTALL_DIR}/bin/ffmpeg"'), "The release media build still copies the removed FFmpeg program.");
 
 assert.match(releaseWorkflow, /verify-github-release\.sh/, "Release workflow does not run the GitHub release verifier.");
+assert.match(
+  releaseWorkflow,
+  /verify-lossless-update\.mjs/,
+  "Release workflow does not verify the lossless update fixtures.",
+);
+assert.match(
+  releaseWorkflow,
+  /update_transaction::tests/,
+  "Release workflow does not verify native update transactions.",
+);
+assert.match(
+  releaseWorkflow,
+  /smoke-native-app\.sh/,
+  "Release workflow does not run the packaged lossless update migration smoke.",
+);
 assert.deepEqual(
   workflowFiles.map(([name]) => name),
   ["release.yml"],

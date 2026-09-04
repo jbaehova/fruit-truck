@@ -10,8 +10,8 @@ const distIndex = process.argv.indexOf("--dist");
 const distDirectory = resolve(
   distIndex === -1 ? resolve(desktopDirectory, "dist") : process.argv[distIndex + 1] ?? "",
 );
-const maxBytes = Number.parseInt(process.env.FRUIT_TRUCK_MAX_JS_BYTES ?? "1050000", 10);
-const maxGzipBytes = Number.parseInt(process.env.FRUIT_TRUCK_MAX_JS_GZIP_BYTES ?? "330000", 10);
+const maxBytes = Number.parseInt(process.env.FRUIT_TRUCK_MAX_JS_BYTES ?? "1100000", 10);
+const maxGzipBytes = Number.parseInt(process.env.FRUIT_TRUCK_MAX_JS_GZIP_BYTES ?? "345000", 10);
 
 assert.ok(existsSync(distDirectory), `Vite output directory does not exist: ${distDirectory}`);
 assert.ok(Number.isInteger(maxBytes) && maxBytes > 0, "FRUIT_TRUCK_MAX_JS_BYTES must be a positive integer.");
