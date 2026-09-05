@@ -2136,9 +2136,16 @@ fn openrouter_url(path: &str) -> Result<reqwest::Url, String> {
                 let Some(model_id) = value.strip_suffix("/endpoints") else {
                     return false;
                 };
-                !model_id.is_empty()
-                    && !model_id.contains('/')
-                    && !model_id.to_ascii_lowercase().contains("%2e")
+                let normalized = model_id.replace("%2F", "/").replace("%2f", "/");
+                let segments: Vec<_> = normalized.split('/').collect();
+                segments.len() == 2 && segments.iter().all(|segment| {
+                    !segment.is_empty()
+                        && *segment != "." && *segment != ".."
+                        && segment.chars().all(|character| {
+                            character.is_ascii_alphanumeric()
+                                || matches!(character, '-' | '_' | '.' | ':')
+                        })
+                })
             });
     let allowed_path = matches!(
         normalized_path,
@@ -4428,7 +4435,11 @@ mod tests {
         assert!(openrouter_url("/models?x=1").is_err());
         assert!(openrouter_url("/anything").is_err());
         assert!(openrouter_url("/images/models/openai%2Fgpt-image-1/endpoints").is_ok());
-        assert!(openrouter_url("/images/models/a/b/endpoints").is_err());
+        assert!(openrouter_url("/images/models/bytedance-seed/seedream-4.5/endpoints").is_ok());
+        assert!(openrouter_url("/images/models/black-forest-labs/flux.2-flex/endpoints").is_ok());
+        assert!(openrouter_url("/images/models/a/b/c/endpoints").is_err());
+        assert!(openrouter_url("/images/models/a/%252e%252e/endpoints").is_err());
+        assert!(openrouter_url("/images/models/a/b/endpoints?redirect=x").is_err());
     }
 
     #[test]
