@@ -648,3 +648,11 @@ test("disabled plans return stable unsupported fidelity without blocking the bas
   assert.deepEqual(result.providerOptions, {});
   assert.equal(result.promptBrief, "");
 });
+
+
+test("an untouched neutral camera rig produces no unsupported-control warning", () => {
+  const neutral = plan({ cameraRig: { id: "rig", sensorPreset: "neutral", lensPreset: "neutral" }, subjects: [], motions: [], keyframes: [], shots: [] });
+  const result = compileDirectorPlan({ plan: neutral, capability: capability() });
+  assert.equal(result.fidelityByControlId.rig, undefined);
+  assert.ok(!result.warnings.some((warning) => warning.includes("Camera rig")));
+});

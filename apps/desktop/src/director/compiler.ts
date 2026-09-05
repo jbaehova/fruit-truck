@@ -298,7 +298,8 @@ function compileCameraRig(plan: DirectorPlan, output: MutableCompilation, capabi
   const fieldFidelities = Object.entries(output.fidelityByControlId)
     .filter(([id]) => id.startsWith("cameraRig."))
     .map(([, fidelity]) => fidelity);
-  setFidelity(output, rig.id, fallback.length ? "prompt" : nativeCount ? "native" : fieldFidelities[0] ?? "unsupported");
+  if (fieldFidelities.length) setFidelity(output, rig.id, fallback.length ? "prompt" : nativeCount ? "native" : fieldFidelities[0]);
+  else delete output.fidelityByControlId[rig.id];
 }
 
 function compileKeyframes(
@@ -584,7 +585,8 @@ function compileShots(plan: DirectorPlan, output: MutableCompilation, capability
 function addFallbackWarnings(plan: DirectorPlan, output: MutableCompilation): void {
   const byFidelity = new Map<DirectorFidelity, string[]>();
   for (const { control } of listDirectorControls(plan)) {
-    const fidelity = output.fidelityByControlId[control.id] ?? "unsupported";
+    const fidelity = output.fidelityByControlId[control.id];
+    if (!fidelity) continue;
     const bucket = byFidelity.get(fidelity) ?? [];
     bucket.push(controlLabel(plan, control.id));
     byFidelity.set(fidelity, bucket);
