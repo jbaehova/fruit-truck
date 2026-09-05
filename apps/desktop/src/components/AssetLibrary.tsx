@@ -31,6 +31,7 @@ const STATUS_KEYS: Record<string, MessageKey> = {
 
 export function AssetLibrary({
   assets,
+  onClose,
   selectedIds,
   onSelectedIdsChange,
   onImport,
@@ -45,6 +46,7 @@ export function AssetLibrary({
   onPreviewAssetChange,
 }: {
   assets: SessionAsset[];
+  onClose?: () => void;
   selectedIds: Set<string>;
   onSelectedIdsChange: (ids: Set<string>) => void;
   onImport: (files: FileList | File[]) => Promise<void>;
@@ -193,12 +195,11 @@ export function AssetLibrary({
     >
       <header className="asset-library-header">
         <div>
-          <span className="panel-eyebrow">{t("currentSession")}</span>
           <strong>{t("assetLibrary")} <small>{assets.length}</small></strong>
-          <p>{t("assetLibraryHint")}</p>
         </div>
         <div className="asset-library-actions">
           <Button size="icon-sm" variant="outline" aria-label={t("importAssets")} aria-keyshortcuts="Meta+O" onClick={() => void onPick()}><Plus /></Button>
+          {onClose ? <Button type="button" size="icon-sm" variant="ghost" aria-label={t("closeAssetPanel")} title={t("closeAssetPanel")} onClick={onClose}><X /></Button> : null}
         </div>
       </header>
 

@@ -542,18 +542,14 @@ test("a reported planner charge keeps failed delivery uncertain before retry", a
   await expect(warning).toContainText("duplicate charge");
 });
 
-test("model comparison stays local and exposes contract differences before request preparation", async ({ page }) => {
+test("model selection displays hydrated pricing before request preparation", async ({ page }) => {
   let paidImageRequests = 0;
   page.on("request", (request) => {
     if (request.method() === "POST" && new URL(request.url()).pathname === "/api/v1/images") paidImageRequests += 1;
   });
   await page.getByRole("button", { name: "Choose a model" }).click();
-  await page.getByRole("button", { name: "Compare Test image model" }).click();
-  await page.getByRole("button", { name: "Compare OpenAI: Comparison image model" }).click();
-  const comparison = page.getByRole("region", { name: "Current-draft model comparison" });
-  await expect(comparison).toContainText("Test image model");
-  await expect(comparison).toContainText("Comparison image model");
-  await expect(comparison).toContainText("endpoint verified");
+  await expect(page.getByRole("region", { name: "Current-draft model comparison" })).toHaveCount(0);
+  await expect(page.locator(".model-selector-popup")).toContainText("$0.08/image");
   await page.locator(".model-select-main").filter({ hasText: "Comparison image model" }).click();
   const confirmation = page.getByRole("alertdialog");
   await expect(confirmation).toContainText("Change generation model?");
@@ -795,35 +791,23 @@ test("invalid provider passthrough is blocked and explained before submission", 
   await expect(alerts.first()).toContainText("not declared by the selected endpoint");
 });
 
-test("named presets expose a settings diff and restore a reviewed model without submitting", async ({ page }) => {
-  let paidImageRequests = 0;
-  page.on("request", (request) => {
-    if (request.method() === "POST" && new URL(request.url()).pathname === "/api/v1/images") paidImageRequests += 1;
-  });
-
-  await page.getByRole("textbox", { name: "Preset name" }).fill("Fast editorial");
-  await page.getByRole("button", { name: "Save preset" }).click();
-  await expect(page.getByText("Saved preset “Fast editorial”.")).toBeVisible();
-  await expect.poll(() => page.evaluate(() => {
-    const state = JSON.parse(localStorage.getItem("fruit-truck.studio.v1") ?? "{}");
-    return state.generationPresets?.[0]?.name;
-  })).toBe("Fast editorial");
-
+test("composer and model selector keep favorites without presets or comparison controls", async ({ page }) => {
+  await expect(page.getByRole("region", { name: "Generation presets" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Save preset" })).toHaveCount(0);
+  await expect(page.locator(".generation-blocker")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Generate Image", exact: true })).toBeDisabled();
   await page.getByRole("button", { name: "Choose a model" }).click();
-  await page.locator(".model-select-main").filter({ hasText: "Comparison image model" }).click();
-  await page.getByRole("alertdialog").getByRole("button", { name: "Change model" }).click();
-  await expect(page.getByRole("heading", { name: "OpenAI: Comparison image model" })).toBeVisible();
-
-  await page.getByRole("combobox", { name: "Saved presets" }).selectOption({ label: "Fast editorial" });
-  const presets = page.getByRole("region", { name: "Generation presets" });
-  await expect(presets.getByText(/Settings diff · [1-9]/)).toBeVisible();
-  await presets.getByRole("button", { name: "Apply preset" }).click();
-  const confirmation = page.getByRole("alertdialog");
-  await expect(confirmation).toContainText("OpenAI: Comparison image model");
-  await expect(confirmation).toContainText("Test image model");
-  await confirmation.getByRole("button", { name: "Apply preset" }).click();
-  await expect(page.getByRole("heading", { name: "Test image model" })).toBeVisible();
-  expect(paidImageRequests).toBe(0);
+  await expect(page.locator(".model-default-actions button")).toHaveText(["Recommended", "Favorites"]);
+  await expect(page.locator(".model-compare-toggle")).toHaveCount(0);
+  await expect(page.locator(".model-selector-popup")).toContainText("$0.04/image");
+  await page.getByRole("button", { name: "Favorite OpenAI: Comparison image model", exact: true }).click();
+  await page.getByRole("button", { name: "Favorites", exact: true }).click();
+  await expect(page.locator(".model-dropdown-row")).toHaveCount(1);
+  await expect(page.locator(".model-dropdown-row")).toContainText("Comparison image model");
+  await page.keyboard.press("Escape");
+  await page.reload();
+  await page.getByRole("button", { name: "Choose a model" }).click();
+  await expect(page.getByRole("button", { name: "Favorite OpenAI: Comparison image model", exact: true })).toHaveAttribute("aria-pressed", "true");
 });
 
 test("workspace checklist loads a safe sample and guides keyboard focus", async ({ page }) => {

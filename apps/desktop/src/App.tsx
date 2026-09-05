@@ -25,7 +25,6 @@ import { AssetPreview } from "@/components/AssetPreview";
 import { ConfirmDialog, type Confirmation } from "@/components/ConfirmDialog";
 import { ExternalLink } from "@/components/ExternalLink";
 import { GenerationThreadRail } from "@/components/GenerationThreadRail";
-import { GenerationPresetBar } from "@/components/GenerationPresetBar";
 import type { GenerationResultNotice } from "@/components/GenerationResultDialog";
 import { InputTray } from "@/components/InputTray";
 import { ModelSelector } from "@/components/ModelSelector";
@@ -161,7 +160,6 @@ import {
   type GenerationAttempt,
   type DraftReference,
   type GenerationThread,
-  type GenerationPreset,
   type DirectorPreset,
   type SessionAsset,
   type StudioSession,
@@ -2771,7 +2769,7 @@ export default function App() {
       : null,
     providerError,
     requestBuildError,
-    ...draftPreparedRequest.issues.map((issue) => issue.message),
+    ...draftPreparedRequest.issues.map((issue) => issue.message.includes("no provider slug") ? t("providerRouteUnavailable") : issue.message),
     inputValidationError,
     generationValidationError,
     ...(compiledDirector?.blockingIssues.map((issue) => issue.message) ?? []),
@@ -4048,116 +4046,6 @@ export default function App() {
     });
   };
 
-  const useModeDefaults = () => {
-    assertMutable();
-    patchActive((current) => ({
-    ...current,
-    threads: {
-      ...current.threads,
-      [current.mode]: current.threads[current.mode].map((item) => item.id === current.activeThreadIds[current.mode] ? {
-        ...item,
-        modelOverrideId: undefined,
-        draft: { ...item.draft, promptHistory: invalidatePromptEnhancement(item.draft.promptHistory) },
-        optionOverrides: {},
-        providerJsonOverride: undefined,
-        revision: item.revision + 1,
-        updatedAt: new Date().toISOString(),
-      } : item),
-    },
-    }));
-  };
-
-  const setCurrentAsModeDefault = () => {
-    assertMutable();
-    patchActive((current) => {
-    const target = current.threads[current.mode].find((item) => item.id === current.activeThreadIds[current.mode]) ?? current.threads[current.mode][0];
-    const resolved = effectiveThreadDraft(current, target);
-    const key = target.mode;
-    const modelId = effectiveThreadModelId(current, target);
-    return {
-      ...current,
-      generationDefaults: {
-        ...current.generationDefaults,
-        modelIds: { ...current.generationDefaults.modelIds, [current.mode]: modelId },
-        options: { ...current.generationDefaults.options, [key]: resolved.options },
-        providerJson: { ...current.generationDefaults.providerJson, [key]: resolved.providerJson },
-      },
-      threads: {
-        ...current.threads,
-        [current.mode]: current.threads[current.mode].map((item) => ({
-          ...item,
-          ...(item.id === target.id ? { modelOverrideId: undefined, optionOverrides: {}, providerJsonOverride: undefined } : {}),
-          draft: { ...item.draft, promptHistory: invalidatePromptEnhancement(item.draft.promptHistory) },
-        })),
-      },
-    };
-    });
-  };
-
-  const saveGenerationPreset = (name: string): string => {
-    assertMutable();
-    const id = crypto.randomUUID();
-    const timestamp = new Date().toISOString();
-    const preset: GenerationPreset = {
-      id,
-      name,
-      mode,
-      modelId: selectedId,
-      options: structuredClone(draft.options),
-      providerJson: draft.providerJson,
-      createdAt: timestamp,
-      updatedAt: timestamp,
-    };
-    const next = commitStudioNow((current) => ({
-      ...current,
-      generationPresets: [...(current.generationPresets ?? []), preset],
-    }));
-    void persistWorkspace(next).catch((error) => toast.error(errorMessage(error)));
-    toast.success(t("presetSaved", { name }));
-    return id;
-  };
-
-  const applyGenerationPreset = (preset: GenerationPreset) => void (async () => {
-    assertMutable();
-    const presetModel = catalogs[preset.mode].find((model) => model.id === preset.modelId);
-    if (!presetModel) {
-      toast.error(t("presetModelUnavailable", { model: preset.modelId }));
-      return;
-    }
-    if (preset.modelId !== selectedId && !await confirmAction(
-      t("applyPresetModelTitle"),
-      t("applyPresetModelHint", { current: selectedModel?.name ?? selectedId, next: presetModel.name, price: modelPriceLabel(preset.mode, presetModel) }),
-      t("applyPreset"),
-    )) return;
-    assertMutable();
-    patchActive((current) => ({
-      ...current,
-      threads: {
-        ...current.threads,
-        [preset.mode]: current.threads[preset.mode].map((item) => item.id === current.activeThreadIds[preset.mode] ? {
-          ...item,
-          modelOverrideId: preset.modelId === current.generationDefaults.modelIds[preset.mode] ? undefined : preset.modelId,
-          draft: { ...item.draft, promptHistory: invalidatePromptEnhancement(item.draft.promptHistory) },
-          optionOverrides: optionOverridesFromDefaults(current.generationDefaults.options[preset.mode], preset.options),
-          providerJsonOverride: preset.providerJson === current.generationDefaults.providerJson[preset.mode] ? undefined : preset.providerJson,
-          revision: item.revision + 1,
-          updatedAt: new Date().toISOString(),
-        } : item),
-      },
-    }));
-    await persistWorkspace(studioRef.current).catch((error) => toast.error(errorMessage(error)));
-    toast.success(t("presetApplied", { name: preset.name }));
-  })();
-
-  const deleteGenerationPreset = (id: string) => {
-    assertMutable();
-    const next = commitStudioNow((current) => ({
-      ...current,
-      generationPresets: (current.generationPresets ?? []).filter((preset) => preset.id !== id),
-    }));
-    void persistWorkspace(next).catch((error) => toast.error(errorMessage(error)));
-  };
-
   const saveCurrentDirectorPreset = (name: string) => {
     assertMutable();
     if (!draft.directorPlan) return;
@@ -4259,6 +4147,8 @@ export default function App() {
   const hasMask = mode === "image" && draft.imageEditMode && draft.maskStrokes.length > 0;
   const canPrepareRequest = Boolean(selectedModel && draftPreparedRequest.status === "ready" && hasRunnableInstructions(mode, draft) && !providerError && !requestBuildError && !inputValidationError && !generationValidationError && !budgetError && connectionState === "connected" && !generating && !enhancing && !activeAttempt);
   const canGenerate = Boolean(canPrepareRequest && currentPreparedRequest && !preparingRequest);
+  const needsInstructions = connectionState === "connected" && Boolean(selectedModel) && !hasRunnableInstructions(mode, draft);
+  const generationIsBlocked = !needsInstructions && requestPreflightErrors.length > 0;
   const generationBlocker = requestPreflightErrors[0]
     ?? (activeAttempt ? (activeAttempt.error ?? t("activeGenerations", { count: 1 })) : null)
     ?? (preparingRequest ? t("preparingRequest") : null)
@@ -4279,7 +4169,24 @@ export default function App() {
           : providerError || requestBuildError
             ? { label: t("reviewProviderOptions"), run: revealProviderOptions, icon: <Settings /> }
             : inputValidationError || generationValidationError
-              ? { label: t("reviewInputs"), run: () => setRightPanelOpen(true), icon: <ImageIcon /> }
+              ? { label: t("reviewInputs"), run: () => {
+                const directorIssue = compiledDirector?.blockingIssues[0];
+                if (directorIssue) openDirector();
+                window.requestAnimationFrame(() => {
+                  const durationIssue = directorIssue?.code.includes("duration");
+                  if (durationIssue) {
+                    const toggle = document.querySelector<HTMLElement>(".director-shot-timeline .director-disclosure-trigger");
+                    if (toggle?.getAttribute("aria-expanded") === "false") toggle.click();
+                  }
+                  window.requestAnimationFrame(() => {
+                    const field = document.querySelector<HTMLElement>(directorIssue
+                      ? durationIssue ? ".director-shot-duration input" : ".director-source-bar select"
+                      : maskReferenceError ? ".mask-instructions textarea" : editTargetError ? ".edit-media-actions > button:last-child" : ".reference-section");
+                    field?.scrollIntoView({ block: "center" });
+                    (field?.matches("input, select, textarea, button") ? field : field?.querySelector<HTMLElement>("button:not(:disabled)"))?.focus({ preventScroll: true });
+                  });
+                });
+              }, icon: <ImageIcon /> }
               : budgetError
                 ? { label: t("adjustBudget"), run: () => setSettingsOpen(true), icon: <Settings /> }
                 : draftPreparedRequest.issues.length
@@ -4538,8 +4445,8 @@ export default function App() {
       const initialBlockers = initialGate.blockers.filter((blocker) => blocker !== "durable_save_pending");
       if (initialBlockers.length > 0) {
         throw new Error(initialGate.activeOperationCount > 0
-          ? `Finish or recover ${initialGate.activeOperationCount} active operation(s) before installing the update.`
-          : "The workspace could not be made durable before updating.");
+          ? t("updateBlockedAttempts", { count: initialGate.activeOperationCount })
+          : t("updateDurableSaveFailed"));
       }
 
       onProgress("preparing_workspace", 15);
@@ -4551,8 +4458,8 @@ export default function App() {
       const settledGate = updateOperationGate();
       if (!settledGate.allowed) {
         throw new Error(settledGate.activeOperationCount > 0
-          ? `Finish or recover ${settledGate.activeOperationCount} active operation(s) before installing the update.`
-          : "The workspace changed or could not be saved while the update was being prepared.");
+          ? t("updateBlockedAttempts", { count: settledGate.activeOperationCount })
+          : t("updateDurableSaveFailed"));
       }
 
       onProgress("verifying_assets", 55);
@@ -5002,7 +4909,7 @@ export default function App() {
     >
       <header className="topbar" data-tauri-drag-region>
         <div className="brand" data-tauri-drag-region><span className="brand-mark"><FruitTruckMark /></span><strong>Fruit Truck</strong></div>
-        <ModelSelector mode={mode} models={models} selectedId={selectedId} loading={catalogLoading} onSelect={selectModel} inherited={!thread.modelOverrideId} onUseDefault={useModeDefaults} onSetDefault={setCurrentAsModeDefault} />
+        <ModelSelector mode={mode} models={models} selectedId={selectedId} loading={catalogLoading} onSelect={selectModel} />
         <ToggleGroup className="mode-switcher" aria-label={t("generationMode")} value={[mode]} onValueChange={(value) => {
           const next = value[0];
           if (next === "image" || next === "video") switchMode(next);
@@ -5030,17 +4937,6 @@ export default function App() {
         className={`workspace ${sessionSidebarOpen ? "session-sidebar-open" : "session-sidebar-closed"} ${rightPanelOpen ? "right-panel-open" : "right-panel-closed"}`}
         style={{ "--sessions-width": `${sessionSidebarWidth}px` } as CSSProperties}
       >
-        {!sessionSidebarOpen ? (
-          <Button
-            type="button"
-            variant="outline"
-            size="icon"
-            className="session-sidebar-reopen"
-            aria-label={t("openSessionSidebar")}
-            aria-keyshortcuts="Control+Meta+S"
-            onClick={() => setSessionSidebarOpen(true)}
-          ><PanelLeftOpen /></Button>
-        ) : null}
         {sessionSidebarOpen ? (
           <SessionSidebar
             sessions={studio.sessions}
@@ -5055,19 +4951,30 @@ export default function App() {
             searchInputRef={sessionSearchRef}
           />
         ) : null}
-        {!rightPanelOpen ? (
-          <Button
-            type="button"
-            variant="outline"
-            size="icon"
-            className="right-panel-reopen"
-            aria-label={t("commandToggleInspector")}
-            aria-keyshortcuts="Meta+Alt+I"
-            onClick={() => setRightPanelOpen(true)}
-          ><PanelRightOpen /></Button>
-        ) : null}
-        <section className="composer">
+        <section className={`composer ${mode === "video" && directorOpen ? "director-active" : ""} ${mode === "image" && draft.imageEditMode ? "edit-active" : ""}`}>
           <GenerationThreadRail
+            leadingAction={!sessionSidebarOpen ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                className="session-sidebar-reopen"
+                aria-label={t("openSessionSidebar")}
+                aria-keyshortcuts="Control+Meta+S"
+                onClick={() => setSessionSidebarOpen(true)}
+              ><PanelLeftOpen /></Button>
+            ) : null}
+            trailingAction={!rightPanelOpen ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                className="right-panel-reopen"
+                aria-label={t("commandToggleInspector")}
+                aria-keyshortcuts="Meta+Alt+I"
+                onClick={() => setRightPanelOpen(true)}
+              ><PanelRightOpen /></Button>
+            ) : null}
             threads={session.threads[mode]}
             activeId={thread.id}
             onActivate={activateThread}
@@ -5094,6 +5001,36 @@ export default function App() {
               </div>
             </div>
           </header>
+          {policyNotices.length || latestGenerationFailure ? <div className="generation-guidance-stack">
+            {policyNotices.length ? <details className="model-guidance"><summary><CircleAlert />{t("modelPolicyNotice")}<span>{policyNotices.length}</span><ChevronRight /></summary>
+            {policyNotices.map((notice) => (
+              <section className="model-policy-notice" data-policy={notice.code} key={notice.code} aria-label={t("modelPolicyNotice")}>
+                <CircleAlert />
+                <div>
+                  <strong>{policyTitle(notice.code)}</strong>
+                  <p>{policyMessage(notice.code)}</p>
+                  <small>{notice.sources.map((source, index) => <span key={source.url}>{index ? " · " : ""}<ExternalLink href={source.url}>{source.label}</ExternalLink> · {t("reviewedDate", { date: source.reviewedAt })}</span>)}</small>
+                </div>
+              </section>
+            ))}
+            </details> : null}
+            {latestGenerationFailure ? (
+              <section className="generation-failure-guidance" role="alert" data-error-code={latestGenerationFailure.errorCode}>
+                <CircleAlert />
+                <div>
+                  <strong>{t("generationNeedsAttention")}</strong>
+                  <p>{localizedAttemptMessage(latestGenerationFailure, t)}</p>
+                  {latestGenerationFailure.errorAction ? <b>{t("recoveryActionLabel")}: {localizedAttemptAction(latestGenerationFailure.errorAction, t)}</b> : null}
+                  {latestGenerationFailure.errorDetails && latestGenerationFailure.errorDetails !== latestGenerationFailure.error ? (
+                    <details>
+                      <summary>{t("technicalDetails")}</summary>
+                      <code>{latestGenerationFailure.errorDetails}</code>
+                    </details>
+                  ) : null}
+                </div>
+              </section>
+            ) : null}
+          </div> : null}
           {mode === "video" && directorOpen ? (
             <Suspense fallback={<div className="director-loading"><LoaderCircle className="spin" /> {t("preparing")}</div>}>
               <DirectorPanel
@@ -5130,34 +5067,6 @@ export default function App() {
               />
             </Suspense>
           ) : null}
-          {policyNotices.length || latestGenerationFailure ? <div className="generation-guidance-stack">
-            {policyNotices.map((notice) => (
-              <section className="model-policy-notice" data-policy={notice.code} key={notice.code} aria-label={t("modelPolicyNotice")}>
-                <CircleAlert />
-                <div>
-                  <strong>{policyTitle(notice.code)}</strong>
-                  <p>{policyMessage(notice.code)}</p>
-                  <small>{notice.sources.map((source, index) => <span key={source.url}>{index ? " · " : ""}<ExternalLink href={source.url}>{source.label}</ExternalLink> · {t("reviewedDate", { date: source.reviewedAt })}</span>)}</small>
-                </div>
-              </section>
-            ))}
-            {latestGenerationFailure ? (
-              <section className="generation-failure-guidance" role="alert" data-error-code={latestGenerationFailure.errorCode}>
-                <CircleAlert />
-                <div>
-                  <strong>{t("generationNeedsAttention")}</strong>
-                  <p>{localizedAttemptMessage(latestGenerationFailure, t)}</p>
-                  {latestGenerationFailure.errorAction ? <b>{t("recoveryActionLabel")}: {localizedAttemptAction(latestGenerationFailure.errorAction, t)}</b> : null}
-                  {latestGenerationFailure.errorDetails && latestGenerationFailure.errorDetails !== latestGenerationFailure.error ? (
-                    <details>
-                      <summary>{t("technicalDetails")}</summary>
-                      <code>{latestGenerationFailure.errorDetails}</code>
-                    </details>
-                  ) : null}
-                </div>
-              </section>
-            ) : null}
-          </div> : null}
           <div className="composer-form">
             {mode === "image" ? (
               <Field.Root className="edit-mode-row">
@@ -5181,6 +5090,7 @@ export default function App() {
               <>
                 <Suspense fallback={null}>
                 <ImageEditPanel
+                  key={`${thread.id}:${editTargetAsset?.id ?? "empty"}`}
                   asset={editTargetAsset}
                   targetLabel={editReference ? `@${editReference.slot}` : ""}
                   maskStrokes={draft.maskStrokes}
@@ -5190,7 +5100,7 @@ export default function App() {
                     assertMutable();
                     patchDraft({
                       maskStrokes,
-                      maskInstructions: maskStrokes.length ? draft.maskInstructions : "",
+                      maskInstructions: draft.maskInstructions,
                     });
                   }}
                   onMaskInstructionsChange={(maskInstructions) => {
@@ -5326,13 +5236,9 @@ export default function App() {
             />
 
             <OptionsFields key={`${mode}:${selectedModel?.id ?? ""}`} mode={mode} model={selectedModel} options={draft.options} providerJson={draft.providerJson} providerError={providerError} onOptionsChange={(options) => { assertMutable(); patchDraft({ options }); }} onProviderJsonChange={(providerJson) => { assertMutable(); patchDraft({ providerJson }); }} />
-            <GenerationPresetBar mode={mode} modelId={selectedId} options={draft.options} providerJson={draft.providerJson} presets={studio.generationPresets ?? []} onSave={saveGenerationPreset} onApply={applyGenerationPreset} onDelete={deleteGenerationPreset} />
             {requestBuildError && !providerError ? <div className="field-error request-build-error">{requestBuildError}</div> : null}
-            {selectedModel ? <div className="thread-default-controls">
-              <Button type="button" size="xs" variant="ghost" disabled={!thread.modelOverrideId && !Object.keys(thread.optionOverrides).length && thread.providerJsonOverride == null} onClick={useModeDefaults}>{t("useModeDefault")}</Button>
-              <Button type="button" size="xs" variant="ghost" onClick={setCurrentAsModeDefault}>{t("setModeDefault")}</Button>
-            </div> : null}
           </div>
+          </ScrollArea>
           <footer className="generate-bar">
             <div className="generate-meta">
               <div><span>{selectedModel ? t("requestFields", { count: Object.keys(requestPayload).length }) : t("noModelSelected")}</span><small>{mode === "video" ? t("backgroundJobs", { count: sessionVideoJobs.length }) : t("commandGenerate")}</small></div>
@@ -5360,8 +5266,9 @@ export default function App() {
               />
               </Suspense>
             </div>
-            {generationBlocker ? <div className="generation-blocker" id="generation-blocker" role="status"><span><strong>{t("generationBlocker")}</strong><small>{generationBlocker}</small></span>{generationRecoveryAction ? <Button type="button" size="xs" variant="outline" disabled={preparingRequest} onClick={generationRecoveryAction.run}>{preparingRequest ? <LoaderCircle className="spin" /> : generationRecoveryAction.icon} {generationRecoveryAction.label}</Button> : null}</div> : null}
-            <Button size="lg" className="generate-button" aria-keyshortcuts="Meta+Enter" aria-describedby={generationBlocker ? "generation-blocker" : undefined} disabled={!canGenerate} onClick={() => void runGeneration()}>
+
+            {generationBlocker && !needsInstructions ? <div className="generation-blocker" data-blocked={generationIsBlocked} id="generation-blocker" role="status"><span><strong>{t(generationIsBlocked ? "generationBlocker" : needsInstructions ? "prompt" : activeAttempt ? "statusInProgress" : "prepareRequest")}</strong><small>{generationBlocker}</small></span>{generationRecoveryAction ? <Button type="button" size="xs" variant="outline" disabled={preparingRequest} onClick={generationRecoveryAction.run}>{preparingRequest ? <LoaderCircle className="spin" /> : generationRecoveryAction.icon} {generationRecoveryAction.label}</Button> : null}</div> : null}
+            <Button size="lg" className="generate-button" aria-keyshortcuts="Meta+Enter" aria-describedby={generationBlocker && !needsInstructions ? "generation-blocker" : undefined} disabled={!canGenerate} onClick={() => void runGeneration()}>
               {generating || enhancing ? <LoaderCircle className="spin" /> : mode === "image" ? <Sparkles /> : <Play />}
               {generating || enhancing
                 ? t("preparing")
@@ -5371,11 +5278,10 @@ export default function App() {
               {!generating && !enhancing ? <ChevronRight /> : null}
             </Button>
           </footer>
-          </ScrollArea>
         </section>
 
-        {rightPanelOpen ? <RightPanel onClose={() => setRightPanelOpen(false)} assets={(
-          <AssetLibrary assets={session.assets} jobs={sessionVideoJobs} selectedIds={selectedAssetIds} onSelectedIdsChange={setSelectedAssetIds} highlightedIds={highlightedAssetIds} onFocusedAssetChange={setFocusedAssetId} onPreviewAssetChange={setPreviewAssetId} onImport={async (files) => { await importFiles(files); }} onPick={async () => { await pickFiles(); }} onUse={addAssetAsReference} onEdit={(assetId) => editImageAsset(assetId)} onDelete={(ids) => void deleteAssets(ids)} onReimport={(assetId) => void reimportAsset(assetId)} />
+        {rightPanelOpen ? <RightPanel assets={(
+          <AssetLibrary onClose={() => setRightPanelOpen(false)} assets={session.assets} jobs={sessionVideoJobs} selectedIds={selectedAssetIds} onSelectedIdsChange={setSelectedAssetIds} highlightedIds={highlightedAssetIds} onFocusedAssetChange={setFocusedAssetId} onPreviewAssetChange={setPreviewAssetId} onImport={async (files) => { await importFiles(files); }} onPick={async () => { await pickFiles(); }} onUse={addAssetAsReference} onEdit={(assetId) => editImageAsset(assetId)} onDelete={(ids) => void deleteAssets(ids)} onReimport={(assetId) => void reimportAsset(assetId)} />
         )} /> : null}
       </main>
 
@@ -5463,8 +5369,8 @@ export default function App() {
       <div className="update-boot-status" role="status" aria-live="polite">
         <FruitTruckMark />
         <LoaderCircle className="spin" />
-        <strong>{workspaceBootState === "loading" ? "Loading workspace" : workspaceBootState === "migrating" ? "Migrating workspace" : "Verifying update"}</strong>
-        <span>Your workspace remains read-only until update verification is complete.</span>
+        <strong>{t(workspaceBootState === "loading" ? "updateLoadingWorkspace" : workspaceBootState === "migrating" ? "updateMigratingWorkspace" : "updateVerifying")}</strong>
+        <span>{t("updateReadOnly")}</span>
       </div>
     ) : null}
     {updateRecovery ? <UpdateRecoveryDialog
@@ -5489,7 +5395,7 @@ export default function App() {
           toast.success(t("keySaved"));
         }}
         onComplete={() => {
-          localStorage.setItem(ONBOARDING_COMPLETE_KEY, "true");
+          saveWorkspacePreference(ONBOARDING_COMPLETE_KEY, "true");
           setOnboardingOpen(false);
         }}
       />

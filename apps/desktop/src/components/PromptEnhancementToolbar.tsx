@@ -130,6 +130,7 @@ export function PromptEnhancementToolbar({
           {t(enhancing ? "enhancingPrompt" : "enhancePrompt")}
         </Button>
       </ActionTooltip>
+      {resultReady ? <Button className="prompt-ready-action" type="button" variant="outline" size="sm" disabled={!canRedo || enhancing} onClick={onRedo}><Redo2 />{t("applyEnhancedPrompt")}</Button> : null}
     </div>
   );
 }

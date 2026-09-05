@@ -39,7 +39,7 @@ function EnumField({ name, values, value, onChange }: { name: string; values: Ar
   return (
     <Field.Root className="option-field">
       <Field.Label className="option-field-label" nativeLabel={false} render={<div />}>{LABEL_KEYS[name] ? t(LABEL_KEYS[name]) : name.replaceAll("_", " ")}</Field.Label>
-      <Select value={stringValue} onValueChange={(next) => {
+      <Select items={Object.fromEntries(values.map((item) => [String(item), name === "duration" ? t("seconds", { value: item }) : String(item)]))} value={stringValue} onValueChange={(next) => {
         if (next == null) return;
         const original = values.find((item) => String(item) === next);
         onChange(original ?? next);
@@ -121,7 +121,7 @@ export function OptionsFields({ mode, model, options, providerJson, providerErro
     if (video.allowed_passthrough_parameters?.includes("personGeneration")) advancedFields.push(
       <Field.Root className="option-field" key="personGeneration">
         <Field.Label>{t("personGeneration")}</Field.Label>
-        <Select value={String(providerParameter("google-vertex", "personGeneration") ?? "allow_adult")} onValueChange={(value) => value && patchProviderParameter("google-vertex", "personGeneration", value)}>
+        <Select items={{ allow_adult: t("allowAdults"), disallow: t("disallowPeople") }} value={String(providerParameter("google-vertex", "personGeneration") ?? "allow_adult")} onValueChange={(value) => value && patchProviderParameter("google-vertex", "personGeneration", value)}>
           <SelectTrigger><SelectValue /></SelectTrigger>
           <SelectContent><SelectItem value="allow_adult">{t("allowAdults")}</SelectItem><SelectItem value="disallow">{t("disallowPeople")}</SelectItem></SelectContent>
         </Select>
@@ -131,7 +131,7 @@ export function OptionsFields({ mode, model, options, providerJson, providerErro
     if (video.allowed_passthrough_parameters?.includes("contentModeration")) advancedFields.push(
       <Field.Root className="option-field" key="publicFigureThreshold">
         <Field.Label>{t("publicFigureModeration")}</Field.Label>
-        <Select value={String((providerParameter("runway", "contentModeration") as { publicFigureThreshold?: string } | undefined)?.publicFigureThreshold ?? "auto")} onValueChange={(value) => value && patchProviderParameter("runway", "contentModeration", { publicFigureThreshold: value })}>
+        <Select items={{ auto: t("automatic"), low: t("lessStrict") }} value={String((providerParameter("runway", "contentModeration") as { publicFigureThreshold?: string } | undefined)?.publicFigureThreshold ?? "auto")} onValueChange={(value) => value && patchProviderParameter("runway", "contentModeration", { publicFigureThreshold: value })}>
           <SelectTrigger><SelectValue /></SelectTrigger>
           <SelectContent><SelectItem value="auto">{t("automatic")}</SelectItem><SelectItem value="low">{t("lessStrict")}</SelectItem></SelectContent>
         </Select>

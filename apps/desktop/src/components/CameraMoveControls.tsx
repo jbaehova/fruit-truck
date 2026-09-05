@@ -1,3 +1,4 @@
+import { FIDELITY_KEYS } from "@/director/labels";
 import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Plus, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -57,10 +58,7 @@ const DIRECTION_KEYS: Record<DirectorDirection, MessageKey> = {
 const EASING_KEYS: Record<DirectorEasing, MessageKey> = {
   linear: "directorLinear", ease_in: "directorEaseIn", ease_out: "directorEaseOut", ease_in_out: "directorEaseInOut",
 };
-const FIDELITY_KEYS: Record<DirectorFidelity, MessageKey> = {
-  native: "directorFidelityNative", keyframe: "directorFidelityKeyframe", visual: "directorFidelityVisual",
-  prompt: "directorFidelityPrompt", unsupported: "directorFidelityUnsupported",
-};
+
 
 function DirectionIcon({ direction }: { direction?: DirectorDirection }) {
   if (direction === "left") return <ArrowLeft aria-hidden="true" />;

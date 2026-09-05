@@ -1,7 +1,7 @@
 import { Field } from "@base-ui/react/field";
 import { Toggle } from "@base-ui/react/toggle";
 import { ToggleGroup } from "@base-ui/react/toggle-group";
-import { Brush, Eraser, Eye, ImagePlus, RotateCcw, Undo2, Upload } from "lucide-react";
+import { Brush, Eraser, Eye, ImagePlus, RotateCcw, Redo2, Undo2, Upload } from "lucide-react";
 import {
   useEffect,
   useCallback,
@@ -42,6 +42,10 @@ function renderStrokes(
   canvas.style.top = `${imageRect.top - stageRect.top + stage.scrollTop}px`;
   canvas.style.width = `${imageRect.width}px`;
   canvas.style.height = `${imageRect.height}px`;
+  stage.style.setProperty("--mask-left", canvas.style.left);
+  stage.style.setProperty("--mask-top", canvas.style.top);
+  stage.style.setProperty("--mask-width", canvas.style.width);
+  stage.style.setProperty("--mask-height", canvas.style.height);
   const pixelScale = window.devicePixelRatio || 1;
   const width = Math.max(1, Math.round(imageRect.width * pixelScale));
   const height = Math.max(1, Math.round(imageRect.height * pixelScale));
@@ -81,6 +85,8 @@ function MaskCanvas({
   preview,
   viewMode,
   onChange,
+  onUndo,
+  onRedo,
 }: {
   asset: SessionAsset;
   strokes: MaskStroke[];
@@ -90,6 +96,8 @@ function MaskCanvas({
   preview: boolean;
   viewMode: "fit" | "actual";
   onChange: (strokes: MaskStroke[]) => void;
+  onUndo: () => void;
+  onRedo: () => void;
 }) {
   const { t } = useI18n();
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -99,6 +107,7 @@ function MaskCanvas({
   const [source, setSource] = useState(asset.externalUrl ?? "");
   const [keyboardCursor, setKeyboardCursor] = useState<MaskPoint>({ x: .5, y: .5 });
   const [keyboardFocused, setKeyboardFocused] = useState(false);
+  const [pointerCursor, setPointerCursor] = useState<MaskPoint | null>(null);
 
   const redraw = useCallback((nextStrokes = workingStrokes.current) => {
     if (canvasRef.current && imageRef.current) {
@@ -162,9 +171,11 @@ function MaskCanvas({
   };
 
   const handleKeyDown = (event: ReactKeyboardEvent<HTMLCanvasElement>) => {
-    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "z" && strokes.length) {
+    if (!editing || preview) return;
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "z") {
       event.preventDefault();
-      onChange(strokes.slice(0, -1));
+      event.stopPropagation();
+      if (event.shiftKey) onRedo(); else onUndo();
       return;
     }
     if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) {
@@ -179,24 +190,25 @@ function MaskCanvas({
     if (event.key === " " || event.key === "Enter") {
       event.preventDefault();
       const point = { x: Number(keyboardCursor.x.toFixed(4)), y: Number(keyboardCursor.y.toFixed(4)) };
-      onChange([...strokes, { size: brushSize, operation: tool, points: [point, point] }]);
+      onChange([...strokes, { size: brushSize, operation: tool, points: [point] }]);
     }
   };
 
   useEffect(() => {
-    if (!editing || preview || !strokes.length) return;
+    if (!editing || preview) return;
     const undoMask = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
-      if (target?.matches("input, textarea, [contenteditable='true']")) return;
+      if (!target || !canvasRef.current?.closest(".edit-media-panel")?.contains(target)) return;
+      if (target.matches("input, textarea, [contenteditable='true']")) return;
       if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "z") return;
       event.preventDefault();
       event.stopPropagation();
-      onChange(strokes.slice(0, -1));
+      if (event.shiftKey) onRedo(); else onUndo();
       canvasRef.current?.focus();
     };
     window.addEventListener("keydown", undoMask, true);
     return () => window.removeEventListener("keydown", undoMask, true);
-  }, [editing, onChange, preview, strokes]);
+  }, [editing, onUndo, onRedo, preview]);
 
   return (
     <div className={`mask-stage ${viewMode}`}>
@@ -210,11 +222,11 @@ function MaskCanvas({
         aria-description={t("maskKeyboardHint")}
         aria-disabled={!editing || preview}
         tabIndex={editing && !preview ? 0 : -1}
-        onKeyDown={handleKeyDown}
+        onKeyDown={(event) => { setKeyboardFocused(true); setPointerCursor(null); handleKeyDown(event); }}
         onFocus={() => setKeyboardFocused(true)}
         onBlur={() => setKeyboardFocused(false)}
         onPointerDown={(event) => {
-          if (!editing || preview) return;
+          if (!editing || preview || event.button !== 0 || activeStroke.current) return;
           event.preventDefault();
           event.currentTarget.focus();
           event.currentTarget.setPointerCapture(event.pointerId);
@@ -223,6 +235,8 @@ function MaskCanvas({
           redraw();
         }}
         onPointerMove={(event) => {
+          setPointerCursor(pointFor(event));
+          setKeyboardFocused(false);
           if (!editing || preview || !activeStroke.current || !event.currentTarget.hasPointerCapture(event.pointerId)) return;
           const point = pointFor(event);
           const previous = activeStroke.current.points.at(-1);
@@ -234,9 +248,16 @@ function MaskCanvas({
           if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
           finishStroke();
         }}
+        onPointerLeave={() => setPointerCursor(null)}
+        onLostPointerCapture={finishStroke}
         onPointerCancel={finishStroke}
       />
-      {keyboardFocused && editing && !preview ? <span className="mask-keyboard-cursor" aria-hidden="true" style={{ left: `${keyboardCursor.x * 100}%`, top: `${keyboardCursor.y * 100}%`, width: brushSize, height: brushSize }} /> : null}
+      {(pointerCursor || keyboardFocused) && editing && !preview ? <span className="mask-brush-cursor" data-tool={tool} aria-hidden="true" style={{
+        left: `calc(var(--mask-left) + var(--mask-width) * ${(pointerCursor ?? keyboardCursor).x})`,
+        top: `calc(var(--mask-top) + var(--mask-height) * ${(pointerCursor ?? keyboardCursor).y})`,
+        width: `calc(min(var(--mask-width), var(--mask-height)) * ${brushSize})`,
+        height: `calc(min(var(--mask-width), var(--mask-height)) * ${brushSize})`,
+      }} /> : null}
     </div>
   );
 }
@@ -273,6 +294,22 @@ export function ImageEditPanel({
   const [brushSize, setBrushSize] = useState<number>(BRUSH_SIZES[1]);
   const strokes = maskStrokes ?? [];
   const supportsMask = Boolean(asset);
+  const [redoStrokes, setRedoStrokes] = useState<MaskStroke[][]>([]);
+  const changeStrokes = (next: MaskStroke[]) => {
+    setRedoStrokes([]);
+    onMaskStrokesChange(next);
+  };
+  const undoMask = () => {
+    if (!strokes.length) return;
+    setRedoStrokes((future) => [strokes, ...future]);
+    onMaskStrokesChange(strokes.slice(0, -1));
+  };
+  const redoMask = () => {
+    const next = redoStrokes[0];
+    if (!next) return;
+    setRedoStrokes((future) => future.slice(1));
+    onMaskStrokesChange(next);
+  };
 
   useEffect(() => subscribeToAssetPointerDrop("edit", (assetId) => {
     setDragging(false);
@@ -365,32 +402,7 @@ export function ImageEditPanel({
         </div>
       </header>
 
-      {asset ? (
-        <MaskCanvas
-          asset={asset}
-          strokes={strokes}
-          brushSize={brushSize}
-          editing={editingMask}
-          tool={maskTool}
-          preview={previewMask}
-          viewMode={viewMode}
-          onChange={onMaskStrokesChange}
-        />
-      ) : (
-        <Button type="button" variant="ghost" className="edit-media-empty" onClick={() => void onPick()}>
-          <ImagePlus />
-          <strong>{t("dropEditImage")}</strong>
-          <small>{t("editCanvasDropHint")}</small>
-        </Button>
-      )}
-
       {supportsMask ? (
-        <div className={`mask-controls ${strokes.length ? "active" : ""}`}>
-          <div className="mask-status" aria-live="polite">
-            <span className={strokes.length ? "ready" : ""} />
-            <strong>{strokes.length ? t("maskReady", { count: strokes.length }) : t("noMask")}</strong>
-            <small>{strokes.length ? t("maskTransparencyHint") : t("drawMaskHint")}</small>
-          </div>
           <div className="mask-toolbar" aria-label={t("maskTools")}>
             <ToggleGroup
               className="mask-tool-switch"
@@ -416,7 +428,8 @@ export function ImageEditPanel({
                 variant={brushSize === size ? "default" : "outline"}
                 size="icon-sm"
                 aria-label={t("brushSizeValue", { value: index + 1 })}
-                onClick={() => setBrushSize(size)}
+                aria-pressed={brushSize === size}
+                onClick={() => { setBrushSize(size); setEditingMask(true); setPreviewMask(false); }}
               >
                 <i style={{ width: 4 + index * 4, height: 4 + index * 4 }} />
               </Button>
@@ -435,17 +448,50 @@ export function ImageEditPanel({
             >
               <Eye /> {t("previewMask")}
             </Button>
-            <Button type="button" variant="ghost" size="sm" disabled={!strokes.length} onClick={() => onMaskStrokesChange(strokes.slice(0, -1))}>
+            <Button type="button" variant="ghost" size="sm" disabled={!strokes.length} onClick={undoMask}>
               <Undo2 /> {t("undo")}
             </Button>
+            <Button type="button" variant="ghost" size="sm" disabled={!redoStrokes.length} onClick={redoMask}>
+              <Redo2 /> {t("redo")}
+            </Button>
             <Button type="button" variant="ghost" size="sm" disabled={!strokes.length} onClick={() => {
-              onMaskStrokesChange([]);
+              changeStrokes([]);
               onMaskInstructionsChange("");
               setMaskTool("paint");
               setPreviewMask(false);
             }}>
               <Eraser /> {t("clearMask")}
             </Button>
+          </div>
+      ) : null}
+
+      {asset ? (
+        <MaskCanvas
+          asset={asset}
+          strokes={strokes}
+          brushSize={brushSize}
+          editing={editingMask}
+          tool={maskTool}
+          preview={previewMask}
+          viewMode={viewMode}
+          onChange={changeStrokes}
+          onUndo={undoMask}
+          onRedo={redoMask}
+        />
+      ) : (
+        <Button type="button" variant="ghost" className="edit-media-empty" onClick={() => void onPick()}>
+          <ImagePlus />
+          <strong>{t("dropEditImage")}</strong>
+          <small>{t("editCanvasDropHint")}</small>
+        </Button>
+      )}
+
+      {supportsMask ? (
+        <div className={`mask-controls ${strokes.length ? "active" : ""}`}>
+          <div className="mask-status" aria-live="polite">
+            <span className={strokes.length ? "ready" : ""} />
+            <strong>{strokes.length ? t("maskReady", { count: strokes.length }) : t("noMask")}</strong>
+            <small>{strokes.length ? t("maskTransparencyHint") : t("drawMaskHint")}</small>
           </div>
           <Field.Root className="mask-instructions" invalid={Boolean(maskError)}>
             <Field.Label><RotateCcw /> {t("maskInstructions")}</Field.Label>

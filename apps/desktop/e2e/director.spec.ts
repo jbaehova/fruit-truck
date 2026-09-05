@@ -356,6 +356,7 @@ test("Director builds a local shot, discloses compilation, and survives a model 
   await page.mouse.up();
   await expect(director.getByRole("button", { name: /^Camera path 1:/ })).toBeVisible();
 
+  await director.getByRole("button", { name: "Camera rig", exact: true }).click();
   await director.getByRole("combobox", { name: /^Lens character/ }).selectOption("anamorphic");
   await director.getByRole("spinbutton", { name: /^Focal length/ }).fill("50");
   const lastKeyframe = director.locator(".director-keyframe").filter({ hasText: "Last frame" });
@@ -386,6 +387,7 @@ test("Director builds a local shot, discloses compilation, and survives a model 
   await expect.poll(async () => (await savedDirectorPlan(page) as { shots: Array<{ keyframeIds: string[] }> }).shots[0]!.keyframeIds)
     .not.toEqual(keyframesBeforeMove.shots[0]!.keyframeIds);
 
+  await director.getByRole("button", { name: "Shot settings", exact: true }).click();
   const firstShotEditor = director.locator(".director-shot-editor");
   await firstShotEditor.getByRole("spinbutton", { name: "Duration" }).fill("2");
   await firstShotEditor.getByRole("combobox", { name: "Speed" }).selectOption("slow_motion");
@@ -535,6 +537,7 @@ test("Director builds a local shot, discloses compilation, and survives a model 
   await page.setViewportSize({ width: 1920, height: 1080 });
   await page.getByRole("button", { name: "Open Director", exact: true }).click();
   const postAttemptDirector = page.getByRole("region", { name: "Direct the shot" });
+  await postAttemptDirector.getByRole("button", { name: "Camera rig", exact: true }).click();
   await postAttemptDirector.getByRole("combobox", { name: /^Lens character/ }).selectOption("vintage");
   await expect.poll(() => savedDirectorPlan(page)).not.toEqual(attemptedDirectorPlan);
   await postAttemptDirector.getByRole("button", { name: "Close Director" }).click();

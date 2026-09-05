@@ -1,7 +1,10 @@
+import { FIDELITY_KEYS } from "@/director/labels";
+import { Collapsible } from "@base-ui/react/collapsible";
 import {
   ArrowLeftRight,
   BoxSelect,
   Camera,
+  ChevronRight,
   LassoSelect,
   MousePointer2,
   Redo2,
@@ -77,10 +80,7 @@ const TOOL_OPTIONS: Array<{ value: DirectorCanvasTool; label: MessageKey; icon: 
   { value: "camera_path", label: "directorCameraPath", icon: Video },
 ];
 
-const FIDELITY_KEYS: Record<DirectorFidelity, MessageKey> = {
-  native: "directorFidelityNative", keyframe: "directorFidelityKeyframe", visual: "directorFidelityVisual",
-  prompt: "directorFidelityPrompt", unsupported: "directorFidelityUnsupported",
-};
+
 
 function now() {
   return new Date().toISOString();
@@ -165,8 +165,8 @@ export function DirectorPanel({
   const activeShot = shotSequence.find((shot) => shot.id === activeShotId) ?? shotSequence[0];
   const totalDurationSeconds = plan ? Math.max(0.1, getDirectorPlanDuration(plan)) : 0.1;
   const animaticSample = useMemo(
-    () => plan ? sampleDirectorAnimatic(plan, previewProgress * totalDurationSeconds, { loop: true }) : undefined,
-    [plan, previewProgress, totalDurationSeconds],
+    () => plan ? sampleDirectorAnimatic(plan, previewProgress * totalDurationSeconds, { loop: playing }) : undefined,
+    [plan, previewProgress, totalDurationSeconds, playing],
   );
   const previewShot = animaticSample ? shotSequence[animaticSample.shotIndex] : activeShot;
   const canvasShot = playing ? previewShot : activeShot;
@@ -537,6 +537,7 @@ export function DirectorPanel({
         ? [{ ...keyframe, id: createDirectorId("keyframe") }]
         : [];
     });
+    if (plan.keyframes.length + interiorKeyframeClones.length > keyframeMaximum) return;
     const clone: DirectorShot = {
       ...source,
       id: createDirectorId("shot"),
@@ -575,7 +576,14 @@ export function DirectorPanel({
   const sourceMissing = !plan.sourceAssetId || !sourceAsset || sourceAsset.id !== plan.sourceAssetId;
 
   return (
-    <section className="director-panel" aria-labelledby="director-panel-title">
+    <section className="director-panel" aria-labelledby="director-panel-title" onKeyDownCapture={(event) => {
+      if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "z" || event.altKey) return;
+      if ((event.target as HTMLElement).closest("input, textarea, [contenteditable='true']")) return;
+      event.preventDefault();
+      event.stopPropagation();
+      setPlaying(false);
+      if (event.shiftKey) redo(); else undo();
+    }}>
       <header className="director-panel-header">
         <div>
           <p className="director-eyebrow">{t("directorTools")}</p>
@@ -584,7 +592,7 @@ export function DirectorPanel({
         </div>
         <div className="director-panel-actions">
           <label className="director-enabled-toggle">
-            <input type="checkbox" checked={plan.enabled} onChange={(event) => commit({ ...plan, enabled: event.target.checked })} />
+            <input type="checkbox" checked={plan.enabled} onChange={(event) => { setPlaying(false); commit({ ...plan, enabled: event.target.checked }); }} />
             <span>{t("directorEnabled")}</span>
           </label>
           <Button type="button" variant="ghost" size="icon-sm" aria-label={t("closeDirector")} onClick={onClose}><X /></Button>
@@ -603,7 +611,7 @@ export function DirectorPanel({
         <small>{t("directorOverlayNonDestructive")}</small>
       </div>
 
-      {sourceMissing ? <p className="director-warning" role="alert">{t("directorMissingAsset")}</p> : null}
+      {sourceMissing ? <p className="director-warning" role="alert">{t(plan.sourceAssetId ? "directorMissingAsset" : "directorSourceRelinkHint")}</p> : null}
       {!plan.enabled ? <p className="director-info" role="status">{t("directorDisabledHint")}</p> : null}
       {warnings.length ? (
         <section className="director-warning-list" aria-label={t("directorWarnings")}>
@@ -630,12 +638,13 @@ export function DirectorPanel({
                 type="button"
                 size="sm"
                 variant={tool === option.value ? "default" : "outline"}
+                aria-label={t(option.label)}
                 aria-pressed={tool === option.value}
                 disabled={isDisabled}
-                title={isObjectPath && !selectedSubject ? t("directorSelectSubjectFirst") : undefined}
-                onClick={() => setTool(option.value)}
+                title={isObjectPath && !selectedSubject ? t("directorSelectSubjectFirst") : t(option.label)}
+                onClick={() => { setPlaying(false); setTool(option.value); }}
               >
-                <Icon /> {t(option.label)}
+                <Icon /><span>{t(option.label)}</span>
               </Button>
             );
           })}
@@ -644,6 +653,7 @@ export function DirectorPanel({
           <Button type="button" size="icon-sm" variant="ghost" disabled={!historyRef.current?.future.length} aria-label={t("directorRedo")} onClick={redo}><Redo2 /></Button>
           <Button type="button" size="icon-sm" variant="ghost" disabled={!selectedMotion?.path || !plan.enabled} aria-label={t("directorReversePath")} onClick={() => selectedMotion && reverseMotion(selectedMotion.id)}><ArrowLeftRight /></Button>
           <Button type="button" size="icon-sm" variant="ghost" disabled={!selection || !plan.enabled} aria-label={t("shortcutDeleteSelection")} onClick={deleteSelection}><Trash2 /></Button>
+          <p className="director-tool-hint" role="status">{t(tool === "subject" || tool === "subject_polygon" ? "directorMarkSubjectHint" : tool === "object_path" ? "directorDrawPathForSubject" : tool === "camera_path" ? "directorCameraPathHint" : "directorSelectHint")}</p>
         </nav>
 
         <DirectorShotTimeline
@@ -685,8 +695,8 @@ export function DirectorPanel({
           previewProgress={canvasProgress}
           visibleMotionIds={new Set(canvasShot?.motionIds ?? [])}
           availableAssetIds={availableAssetIds}
-          disabled={!plan.enabled || sourceMissing}
-          onSelect={setSelection}
+          disabled={!plan.enabled || sourceMissing || playing}
+          onSelect={(next) => { setSelection(next); setTool("select"); }}
           onCreateSubject={addSubject}
           onCreateMotion={(targetType, path) => addMotion(targetType, { path })}
           onNudgeSelection={nudgeSelection}
@@ -725,6 +735,9 @@ export function DirectorPanel({
             onDelete={deleteMotion}
             onSelect={(id) => setSelection({ type: "motion", id })}
           />
+          <Collapsible.Root className="director-disclosure">
+            <Collapsible.Trigger className="director-disclosure-trigger">{t("directorCameraRig")}<ChevronRight /></Collapsible.Trigger>
+            <Collapsible.Panel className="director-disclosure-panel">
           <CameraRigControls
             rig={plan.cameraRig}
             subjects={plan.subjects}
@@ -732,6 +745,8 @@ export function DirectorPanel({
             disabled={!plan.enabled}
             onChange={(cameraRig) => commit({ ...plan, cameraRig })}
           />
+            </Collapsible.Panel>
+          </Collapsible.Root>
         </aside>
 
         <DirectorTimeline

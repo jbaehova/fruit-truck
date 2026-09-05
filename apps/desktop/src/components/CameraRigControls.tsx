@@ -1,3 +1,4 @@
+import { FIDELITY_KEYS } from "@/director/labels";
 import type { CameraRig, DirectorFidelity, DirectorSubject } from "@/director/types";
 import { useI18n, type MessageKey } from "@/i18n";
 
@@ -19,13 +20,7 @@ const SENSOR_KEYS: Record<CameraRig["sensorPreset"], MessageKey> = {
 const LENS_KEYS: Record<CameraRig["lensPreset"], MessageKey> = {
   neutral: "directorNeutral", spherical: "directorSpherical", anamorphic: "directorAnamorphic", vintage: "directorVintage", macro: "directorMacro",
 };
-const FIDELITY_KEYS: Record<DirectorFidelity, MessageKey> = {
-  native: "directorFidelityNative",
-  keyframe: "directorFidelityKeyframe",
-  visual: "directorFidelityVisual",
-  prompt: "directorFidelityPrompt",
-  unsupported: "directorFidelityUnsupported",
-};
+
 
 function fidelityFor(
   fidelityByControlId: Record<string, DirectorFidelity> | undefined,

@@ -183,7 +183,7 @@ export function InputTray({
                   {validRoles.length ? (
                     <Field.Root>
                       <Field.Label className="sr-only" nativeLabel={false} render={<div />}>{t("roleFor", { name: asset.name })}</Field.Label>
-                      <Select value={reference.role} onValueChange={(role) => {
+                      <Select items={Object.fromEntries(validRoles.map((role) => [role, t(ROLE_LABEL_KEYS[role])]))} value={reference.role} onValueChange={(role) => {
                         if (!role) return;
                         const nextRole = role as ReferenceRole;
                         onChange(references.map((item) => item.assetId === asset.id ? {
@@ -201,7 +201,7 @@ export function InputTray({
                   ) : <span className="reference-unsupported">{t("unsupported")}</span>}
                   <Field.Root>
                     <Field.Label className="sr-only" nativeLabel={false} render={<div />}>{t("purposeFor", { name: asset.name })}</Field.Label>
-                    <Select value={reference.purpose} disabled={validPurposes.length === 1} onValueChange={(purpose) => {
+                    <Select items={Object.fromEntries(validPurposes.map((purpose) => [purpose, t(PURPOSE_LABEL_KEYS[purpose])]))} value={reference.purpose} disabled={validPurposes.length === 1} onValueChange={(purpose) => {
                       if (!purpose) return;
                       onChange(references.map((item) => item.assetId === asset.id
                         ? { ...item, purpose: purpose as ReferencePurpose }

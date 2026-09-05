@@ -1,3 +1,4 @@
+import { useI18n } from "@/i18n";
 import { useState, type ReactNode } from "react";
 import { Dialog } from "@base-ui/react/dialog";
 import { Download, FolderOpen, LoaderCircle, LogOut, RefreshCw, RotateCcw, ShieldAlert } from "lucide-react";
@@ -36,21 +37,6 @@ export type UpdateRecoveryDialogProps = {
   onExitWithoutChanges: () => void | Promise<void>;
 };
 
-const DEFAULT_LABELS: UpdateRecoveryDialogLabels = {
-  eyebrow: "UPDATE RECOVERY",
-  title: "Your workspace needs verification.",
-  description: "Fruit Truck has kept the pre-update workspace unchanged. Choose a recovery action before returning to the workspace.",
-  status: "Status",
-  recoveryRequired: "Recovery required",
-  versions: "App version",
-  transaction: "Transaction",
-  failureCode: "Failure code",
-  retryVerification: "Retry verification",
-  restoreWorkspace: "Restore pre-update workspace",
-  exportSnapshot: "Export pre-update snapshot",
-  openAssetFolder: "Open asset folder",
-  exitWithoutChanges: "Exit without changes",
-};
 
 function asErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
@@ -70,7 +56,14 @@ export function UpdateRecoveryDialog({
   onOpenAssetFolder,
   onExitWithoutChanges,
 }: UpdateRecoveryDialogProps) {
-  const labels = { ...DEFAULT_LABELS, ...labelOverrides };
+  const { t } = useI18n();
+  const labels = {
+    eyebrow: t("updateRecoveryEyebrow"), title: t("updateRecoveryTitle"), description: t("updateRecoveryDescription"),
+    status: t("status"), recoveryRequired: t("updateRecoveryRequired"), versions: t("updateVersions"),
+    transaction: t("updateTransaction"), failureCode: t("updateFailureCode"), retryVerification: t("updateRetryVerification"),
+    restoreWorkspace: t("updateRestoreWorkspace"), exportSnapshot: t("updateExportSnapshot"),
+    openAssetFolder: t("updateOpenAssets"), exitWithoutChanges: t("updateExit"), ...labelOverrides,
+  };
   const [pendingAction, setPendingAction] = useState<RecoveryAction | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 

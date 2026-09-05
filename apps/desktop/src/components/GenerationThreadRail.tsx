@@ -2,7 +2,7 @@ import { Dialog } from "@base-ui/react/dialog";
 import { Field } from "@base-ui/react/field";
 import { Form } from "@base-ui/react/form";
 import { Archive, Check, Copy, LoaderCircle, Pencil, Plus, RotateCcw, TriangleAlert } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useI18n } from "@/i18n";
@@ -17,6 +17,8 @@ function localizedThreadName(threadName: string, t: ReturnType<typeof useI18n>["
 }
 
 export function GenerationThreadRail({
+  leadingAction,
+  trailingAction,
   threads,
   activeId,
   disabled,
@@ -27,6 +29,8 @@ export function GenerationThreadRail({
   onArchive,
   onRestore,
 }: {
+  leadingAction?: ReactNode;
+  trailingAction?: ReactNode;
   threads: GenerationThread[];
   activeId: string;
   disabled?: boolean;
@@ -56,6 +60,7 @@ export function GenerationThreadRail({
   return (
     <>
     <section className="thread-rail" aria-label={t("generationThreads")}>
+      {leadingAction}
       <div className="thread-rail-scroll">
         {visible.map((thread) => {
           const displayName = localizedThreadName(thread.name, t);
@@ -108,6 +113,7 @@ export function GenerationThreadRail({
           </details>
         </div>
       ) : null}
+      {trailingAction}
     </section>
     <Dialog.Root open={Boolean(renameId)} onOpenChange={(open) => { if (!open) setRenameId(null); }}>
       <Dialog.Portal>

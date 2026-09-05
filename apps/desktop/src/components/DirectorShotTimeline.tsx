@@ -1,4 +1,6 @@
-import { ChevronDown, ChevronUp, Copy, Pause, Play, Plus, Trash2 } from "lucide-react";
+import { FIDELITY_KEYS } from "@/director/labels";
+import { Collapsible } from "@base-ui/react/collapsible";
+import { ChevronDown, ChevronUp, ChevronRight, Copy, Pause, Play, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { DIRECTOR_LIMITS, type DirectorCapability, type DirectorFidelity, type DirectorKeyframe, type DirectorKeyframeRole, type DirectorMotion, type DirectorShot, type DirectorShotSpeed } from "@/director/types";
 import { useI18n, type MessageKey } from "@/i18n";
@@ -9,13 +11,7 @@ const SPEED_KEYS: Record<DirectorShotSpeed, MessageKey> = {
   speed_up: "directorSpeedUp",
 };
 
-const FIDELITY_KEYS: Record<DirectorFidelity, MessageKey> = {
-  native: "directorFidelityNative",
-  keyframe: "directorFidelityKeyframe",
-  visual: "directorFidelityVisual",
-  prompt: "directorFidelityPrompt",
-  unsupported: "directorFidelityUnsupported",
-};
+
 
 const KEYFRAME_ROLE_KEYS: Record<DirectorKeyframeRole, MessageKey> = {
   first: "directorKeyframeFirst",
@@ -101,6 +97,7 @@ export function DirectorShotTimeline({
             size="icon-sm"
             variant="outline"
             disabled={disabled || !shots.length}
+            title={t("directorPreviewDisclaimer")}
             aria-label={playing ? t("directorPausePreview") : t("directorPlayPreview")}
             onClick={onPreviewToggle}
           >
@@ -175,6 +172,9 @@ export function DirectorShotTimeline({
       ) : null}
 
       {activeShot ? (
+        <Collapsible.Root className="director-disclosure">
+          <Collapsible.Trigger className="director-disclosure-trigger">{t("directorShotSettings")}<ChevronRight /></Collapsible.Trigger>
+          <Collapsible.Panel className="director-disclosure-panel">
         <div className="director-shot-editor">
           <div className="director-shot-editor-heading">
             <span>
@@ -202,7 +202,7 @@ export function DirectorShotTimeline({
                 type="button"
                 size="icon-xs"
                 variant="ghost"
-                disabled={disabled || orderedShots.length >= maxShots}
+                disabled={disabled || orderedShots.length >= maxShots || keyframes.length + activeShot.keyframeIds.filter((id) => ["middle", "timestamped"].includes(keyframesById.get(id)?.role ?? "")).length > Math.min(DIRECTOR_LIMITS.maxKeyframes, capability?.maxKeyframes ?? DIRECTOR_LIMITS.maxKeyframes)}
                 aria-label={t("directorDuplicateShot")}
                 onClick={() => onDuplicateShot(activeShot.id)}
               ><Copy /></Button>
@@ -227,7 +227,7 @@ export function DirectorShotTimeline({
                 step={0.1}
                 value={activeShot.durationSeconds}
                 disabled={disabled}
-                onChange={(event) => onShotChange(activeShot.id, { durationSeconds: Math.max(0.1, Number(event.target.value) || 0.1) })}
+                onChange={(event) => onShotChange(activeShot.id, { durationSeconds: Math.min(60, Math.max(0.1, Number(event.target.value) || 0.1)) })}
               />
               <span aria-hidden="true">s</span>
             </span>
@@ -281,6 +281,8 @@ export function DirectorShotTimeline({
             ) : <p className="director-empty-note">{t("directorNoMotionsForStack")}</p>}
           </fieldset>
         </div>
+          </Collapsible.Panel>
+        </Collapsible.Root>
       ) : null}
     </section>
   );

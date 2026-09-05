@@ -58,15 +58,6 @@ export type UpdatePromptProps = {
   labels?: UpdatePromptLabels;
 };
 
-const DEFAULT_LABELS: Required<UpdatePromptLabels> = {
-  preparingWorkspace: "Preparing workspace…",
-  verifyingAssets: "Verifying assets…",
-  downloading: "Downloading…",
-  installing: "Installing…",
-  restarting: "Restarting…",
-  cancel: "Cancel",
-  cancelling: "Cancelling…",
-};
 
 function asErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
@@ -90,7 +81,11 @@ export function UpdatePrompt({
   labels: labelOverrides,
 }: UpdatePromptProps) {
   const { t } = useI18n();
-  const labels = { ...DEFAULT_LABELS, ...labelOverrides };
+  const labels = {
+    preparingWorkspace: t("updatePreparingWorkspace"), verifyingAssets: t("updateVerifyingAssets"),
+    downloading: t("downloading"), installing: t("installing"), restarting: t("updateRestarting"),
+    cancel: t("cancel"), cancelling: t("updateCancelling"), ...labelOverrides,
+  };
   const [update, setUpdate] = useState<Update | null>(null);
   const [phase, setPhase] = useState<UpdatePromptPhase>("update_available");
   const [downloaded, setDownloaded] = useState(0);

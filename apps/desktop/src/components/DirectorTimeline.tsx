@@ -1,3 +1,4 @@
+import { FIDELITY_KEYS } from "@/director/labels";
 import { ArrowLeftRight, ChevronDown, ChevronUp, Plus, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -10,10 +11,7 @@ const EASINGS: DirectorEasing[] = ["linear", "ease_in", "ease_out", "ease_in_out
 const EASING_KEYS: Record<DirectorEasing, MessageKey> = {
   linear: "directorLinear", ease_in: "directorEaseIn", ease_out: "directorEaseOut", ease_in_out: "directorEaseInOut",
 };
-const FIDELITY_KEYS: Record<DirectorFidelity, MessageKey> = {
-  native: "directorFidelityNative", keyframe: "directorFidelityKeyframe", visual: "directorFidelityVisual",
-  prompt: "directorFidelityPrompt", unsupported: "directorFidelityUnsupported",
-};
+
 const ROLE_KEYS: Record<DirectorKeyframeRole, MessageKey> = {
   first: "directorKeyframeFirst", middle: "directorKeyframeMiddle", last: "directorKeyframeLast", timestamped: "directorKeyframeTimestamped",
 };
