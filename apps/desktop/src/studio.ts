@@ -293,6 +293,7 @@ export type StudioState = {
   sessions: StudioSession[];
   generationPresets?: GenerationPreset[];
   directorPresets: DirectorPreset[];
+  preferences?: Record<string, string | null>;
   /** Ephemeral startup/persistence diagnostics; never serialized. */
   recovery?: StudioRecoveryState;
 };

@@ -438,6 +438,22 @@ fn destination_for_export(downloads: &Path, name: Option<&str>) -> Result<PathBu
 pub fn save(root: &Path, payload: Value) -> Result<StorageStatus, String> {
     let (path, backup_one, backup_two) = state_paths(root)?;
     let (bytes, checksum) = envelope_bytes(payload)?;
+    // Repeated autosaves must not evict distinct recoverable snapshots.
+    if entry_exists(&path) {
+        let (current, _) = parse_file(&path)?;
+        if current.checksum == checksum {
+            return Ok(StorageStatus {
+                path: path.to_string_lossy().into_owned(),
+                backup_paths: vec![
+                    backup_one.to_string_lossy().into_owned(),
+                    backup_two.to_string_lossy().into_owned(),
+                ],
+                byte_size: std::fs::metadata(&path).map_err(|error| error.to_string())?.len(),
+                checksum,
+                recovered: false,
+            });
+        }
+    }
     if entry_exists(&path) {
         if entry_exists(&backup_one) {
             atomic_copy(&backup_one, &backup_two)?;
@@ -613,6 +629,21 @@ mod tests {
         assert_eq!(loaded.payload, payload);
         assert_eq!(loaded.checksum, saved.checksum);
         assert!(!loaded.recovered);
+    }
+
+    #[test]
+    fn unchanged_autosaves_preserve_distinct_backups() {
+        let root = temp_root();
+        save(root.path(), serde_json::json!({"sessions": [1, 2]})).expect("first");
+        let latest = serde_json::json!({"sessions": [1, 2, 3]});
+        save(root.path(), latest.clone()).expect("second");
+        let paths = state_paths(root.path()).expect("paths");
+        let before = std::fs::read(&paths.1).expect("backup");
+        for _ in 0..5 {
+            save(root.path(), latest.clone()).expect("unchanged");
+        }
+        assert_eq!(std::fs::read(&paths.1).expect("retained backup"), before);
+        assert!(!paths.2.exists());
     }
 
     #[test]

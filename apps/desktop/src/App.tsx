@@ -38,6 +38,8 @@ import { UpdatePrompt, type UpdateInstallPhase, type UpdatePreparationContext } 
 import { UpdateRecoveryDialog } from "@/components/UpdateRecoveryDialog";
 import { WorkspaceRecoveryDialog } from "@/components/WorkspaceRecoveryDialog";
 import { WorkflowGuide } from "@/components/WorkflowGuide";
+import { loadLegacyWorkspace } from "@/workspaceBoot";
+import { captureWorkspacePreferences, PREFERENCES_CHANGED, saveWorkspacePreference } from "@/workspacePreferences";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Switch } from "@/components/ui/switch";
@@ -1472,6 +1474,11 @@ export default function App() {
             reason: `The native workspace store recovered from ${loaded.source}. Review it before replacing the primary snapshot.`,
           },
         } : reconciled);
+      } else {
+        const records = await invoke<NativeManagedAsset[]>("scan_managed_assets");
+        if (cancelled) return;
+        const legacy = loadLegacyWorkspace(localStorage, records.length > 0);
+        setStudio(reconcilePersistedAttempts(legacy.state).state);
       }
       setNativeWorkspaceReady(true);
       setWorkspaceBootState("ready");
@@ -1611,6 +1618,18 @@ export default function App() {
   }, [managedReconciliationRetry, nativeWorkspaceReady, persistWorkspace, scheduleManagedReconciliationRetry, studio.recovery?.requiresUserAction, t, updateMutationLock.active, workspaceBootState]);
 
   useEffect(() => {
+    if (!nativeWorkspaceReady || workspaceBootState !== "ready" || updateMutationLock.active || studio.recovery?.requiresUserAction) return;
+    const sync = () => setStudio((current) => {
+      const preferences = captureWorkspacePreferences(localStorage);
+      return JSON.stringify(current.preferences) === JSON.stringify(preferences)
+        ? current : { ...current, preferences };
+    });
+    sync();
+    window.addEventListener(PREFERENCES_CHANGED, sync);
+    return () => window.removeEventListener(PREFERENCES_CHANGED, sync);
+  }, [nativeWorkspaceReady, workspaceBootState, updateMutationLock.active, studio.recovery?.requiresUserAction]);
+
+  useEffect(() => {
     if (!nativeWorkspaceReady || workspaceBootState !== "ready" || updateMutationLock.active) return;
     if (studio.recovery?.requiresUserAction) return;
     if (studio.sessions.some((item) => item.assets.some((asset) => asset.externalUrl?.startsWith("data:")))) {
@@ -1654,17 +1673,17 @@ export default function App() {
   }, [patchSession, studio, updateMutationLock.active, workspaceBootState]);
 
   useEffect(() => {
-    localStorage.setItem(SESSION_SIDEBAR_OPEN_KEY, String(sessionSidebarOpen));
-    localStorage.setItem(SESSION_SIDEBAR_WIDTH_KEY, String(Math.round(sessionSidebarWidth)));
+    saveWorkspacePreference(SESSION_SIDEBAR_OPEN_KEY, String(sessionSidebarOpen));
+    saveWorkspacePreference(SESSION_SIDEBAR_WIDTH_KEY, String(Math.round(sessionSidebarWidth)));
   }, [sessionSidebarOpen, sessionSidebarWidth]);
 
   useEffect(() => {
-    localStorage.setItem(RIGHT_PANEL_OPEN_KEY, String(rightPanelOpen));
+    saveWorkspacePreference(RIGHT_PANEL_OPEN_KEY, String(rightPanelOpen));
   }, [rightPanelOpen]);
 
   useEffect(() => {
-    if (sessionBudgetUsd == null) localStorage.removeItem(SESSION_BUDGET_KEY);
-    else localStorage.setItem(SESSION_BUDGET_KEY, String(sessionBudgetUsd));
+    if (sessionBudgetUsd == null) saveWorkspacePreference(SESSION_BUDGET_KEY, null);
+    else saveWorkspacePreference(SESSION_BUDGET_KEY, String(sessionBudgetUsd));
   }, [sessionBudgetUsd]);
 
   const validateSavedCredential = useCallback(async () => {
@@ -3370,7 +3389,7 @@ export default function App() {
       );
       if (!accepted) return undefined;
       assertMutable();
-      localStorage.setItem(PROMPT_ENHANCEMENT_NOTICE_KEY, "true");
+      saveWorkspacePreference(PROMPT_ENHANCEMENT_NOTICE_KEY, "true");
     }
     return enhanceThreadPrompt(session, thread);
   };

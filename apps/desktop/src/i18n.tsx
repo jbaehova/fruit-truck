@@ -1,3 +1,4 @@
+import { saveWorkspacePreference } from "@/workspacePreferences";
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 
 export type Language = "en" | "ko";
@@ -1682,7 +1683,7 @@ export function I18nProvider({ children }: { children: ReactNode }) {
   });
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, language);
+    saveWorkspacePreference(STORAGE_KEY, language);
     document.documentElement.lang = language;
   }, [language]);
 
