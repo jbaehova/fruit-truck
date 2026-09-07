@@ -47,15 +47,15 @@ function draft(director: CompiledDirector): GenerationDraft {
   };
 }
 
-test("Director compilation merges native controls and a labeled brief without overriding protected request fields", () => {
+test("retired Director compilation remains archival and no longer mutates generation payloads", () => {
   const payload = buildRequest(draft(compiled("Dolly in from 0% to 70%.")), model);
 
   assert.equal(payload.model, model.id);
-  assert.equal(payload.camera_motion, "dolly_in");
+  assert.equal(payload.camera_motion, undefined);
   assert.equal(payload.frame_images, undefined);
-  assert.match(String(payload.prompt), /A fruit truck crosses the market\./);
-  assert.match(String(payload.prompt), /\[Director Brief\]/);
-  assert.match(String(payload.prompt), /Dolly in from 0% to 70%\./);
+  assert.equal(payload.prompt, "A fruit truck crosses the market.");
+  assert.doesNotMatch(String(payload.prompt), /\[Director Brief\]/);
+  assert.doesNotMatch(String(payload.prompt), /Dolly in from 0% to 70%\./);
   assert.doesNotMatch(String(payload.prompt), /must-not-override/);
 });
 

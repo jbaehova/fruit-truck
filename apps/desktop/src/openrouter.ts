@@ -1,7 +1,8 @@
 import {
   applyVideoCapabilityProvenance,
+  assessResolvedVideoInputRules,
   assessVideoReferenceTransport,
-  videoInputPolicy,
+  resolveVideoInputRules,
   videoReferenceTransportForUrl,
   type InputMediaKind,
   type VideoReferenceTransport,
@@ -389,7 +390,17 @@ export function normalizeVideoModel(raw: unknown): VideoModel | null {
   const endpointValues = Array.isArray(endpointRaw)
     ? endpointRaw.map(normalizeVideoEndpoint).filter((value): value is VideoModelEndpoint => value != null)
     : undefined;
-  const transports = normalizeTransports(raw.reference_transports);
+  const transports = normalizeTransports(raw.reference_transports ?? raw.input_reference_transports);
+  const explicitTransportSource = raw.reference_transport_source === "openrouter_endpoint"
+    || raw.reference_transport_source === "contract_fixture"
+    || raw.reference_transport_source === "unknown"
+    ? raw.reference_transport_source
+    : undefined;
+  const transportSource = explicitTransportSource === "contract_fixture"
+    ? explicitTransportSource
+    : transports !== undefined
+      ? "openrouter_endpoint" as const
+      : explicitTransportSource;
   return {
     id: raw.id.trim(),
     name: raw.name.trim(),
@@ -409,9 +420,7 @@ export function normalizeVideoModel(raw: unknown): VideoModel | null {
     ...(normalizePassthrough(raw.allowed_passthrough_parameters) ? { allowed_passthrough_parameters: normalizePassthrough(raw.allowed_passthrough_parameters) } : {}),
     ...(endpointValues ? { endpoints: endpointValues } : {}),
     ...(transports !== undefined ? { reference_transports: transports } : {}),
-    ...(raw.reference_transport_source === "openrouter_endpoint" || raw.reference_transport_source === "contract_fixture" || raw.reference_transport_source === "unknown"
-      ? { reference_transport_source: raw.reference_transport_source }
-      : {}),
+    ...(transportSource ? { reference_transport_source: transportSource } : {}),
     ...(normalizePrivacy(raw) ? { privacy: normalizePrivacy(raw) } : {}),
     ...(isRecord(raw.director_capabilities) ? { director_capabilities: { ...raw.director_capabilities } } : {}),
   };
@@ -1356,41 +1365,18 @@ export function imageReferenceMinimum(model: ImageModel | null): number {
 
 export function videoReferenceTypes(model: VideoModel | null, endpoint?: VideoModelEndpoint): InputMediaKind[] {
   if (!model) return [];
-  // Once an endpoint is selected, its metadata is definitive. Falling back to
-  // the model union here would advertise references that this provider route
-  // never declared.
-  const declared = endpoint ? endpoint.input_reference_types : model.input_reference_types;
-  return (declared ?? []).filter((value): value is InputMediaKind => ["image", "video", "audio"].includes(value));
+  return resolveVideoInputRules(model, endpoint).referenceKinds;
 }
 
 export function videoReferenceLimit(model: VideoModel | null, kind: InputMediaKind = "image", endpoint?: VideoModelEndpoint): number {
-  if (!model || !videoReferenceTypes(model, endpoint).includes(kind)) return 0;
-  const policyLimit = videoInputPolicy(model.id).references[kind];
-  const endpointRange = endpoint?.supported_parameters?.input_references;
-  const endpointLimit = endpoint?.max_input_references != null
-    ? Math.max(0, endpoint.max_input_references)
-    : endpointRange?.max != null ? Math.max(0, endpointRange.max) : undefined;
-  // Endpoint metadata supersedes researched direct-provider policy. The
-  // policy remains a conservative fallback only for an unhydrated model.
-  if (endpoint) return endpointLimit ?? 1;
-  const globalLimit = endpointLimit ?? (model.max_input_references == null ? undefined : Math.max(0, model.max_input_references));
-  if (policyLimit != null && globalLimit != null) return Math.min(policyLimit, globalLimit);
-  return policyLimit ?? globalLimit ?? 1;
+  if (!model) return 0;
+  return resolveVideoInputRules(model, endpoint).referenceLimits[kind];
 }
 
 export function videoTotalInputLimit(model: VideoModel | null): number {
   if (!model) return 0;
-  const policy = videoInputPolicy(model.id);
-  const perKindTotal = (["image", "video", "audio"] as const)
-    .reduce((sum, kind) => sum + (policy.references[kind] ?? 0), 0);
-  const declaredKindTotal = (["image", "video", "audio"] as const)
-    .reduce((sum, kind) => sum + videoReferenceLimit(model, kind), 0);
-  const policyTotal = policy.totalReferenceLimit ?? (perKindTotal || declaredKindTotal || undefined);
-  const referenceTotal = model.max_input_references != null && policyTotal != null
-    ? Math.min(model.max_input_references, policyTotal)
-    : model.max_input_references ?? policyTotal ?? 0;
-  const frameTotal = model.supported_frame_images?.length ?? 0;
-  return policy.combination === "allow" ? referenceTotal + frameTotal : Math.max(referenceTotal, frameTotal);
+  const rules = resolveVideoInputRules(model);
+  return Math.max(rules.totalReferenceLimit, rules.frameImages.length);
 }
 
 export function modelInputSignature(
@@ -1546,7 +1532,19 @@ function endpointPassthrough(
   return undefined;
 }
 
-function validateProviderPassthrough(provider: Record<string, unknown> | undefined, model: GenerationModel, route?: GenerationRoute) {
+const UNSAFE_VIDEO_MEDIA_PASSTHROUGH = new Set([
+  "image", "images", "image_url", "video", "videos", "video_url", "audio_url",
+  "input_reference", "input_references", "reference_images", "referenceImages",
+  "frame_images", "first_frame", "last_frame", "last_image", "lastFrame", "keyframes",
+]);
+const SHADOWED_VIDEO_OPTION_PASSTHROUGH = new Set(["aspectRatio", "ratio", "size"]);
+
+function validateProviderPassthrough(
+  provider: Record<string, unknown> | undefined,
+  model: GenerationModel,
+  route?: GenerationRoute,
+  context: { mode?: GenerationMode; strict?: boolean } = {},
+) {
   const options = provider?.options;
   if (options == null) return;
   if (!options || Array.isArray(options) || typeof options !== "object") {
@@ -1568,9 +1566,17 @@ function validateProviderPassthrough(provider: Record<string, unknown> | undefin
       throw new Error(`Passthrough parameters for ${providerSlug} must be an object.`);
     }
     const allowed = endpointPassthrough(model, route, providerSlug);
-    for (const name of Object.keys(parameters as Record<string, unknown>)) {
+    for (const [name, value] of Object.entries(parameters as Record<string, unknown>)) {
       if (!allowed?.includes(name)) {
         throw new Error(`Provider passthrough parameter ${providerSlug}.${name} is not declared by the selected endpoint.`);
+      }
+      if (context.strict && context.mode === "video") {
+        if (UNSAFE_VIDEO_MEDIA_PASSTHROUGH.has(name) || (name === "audio" && typeof value !== "boolean")) {
+          throw new Error(`Provider passthrough parameter ${providerSlug}.${name} cannot carry media outside the validated video input fields.`);
+        }
+        if (SHADOWED_VIDEO_OPTION_PASSTHROUGH.has(name)) {
+          throw new Error(`Provider passthrough parameter ${providerSlug}.${name} cannot override a validated video option.`);
+        }
       }
     }
   }
@@ -2018,7 +2024,8 @@ function buildRequestInternal(
   } else {
     const videoModel = model as VideoModel;
     const videoEndpoint = route?.endpoint && "provider_slug" in route.endpoint ? route.endpoint as VideoModelEndpoint : undefined;
-    const supportedFrames = videoEndpoint ? videoEndpoint.supported_frame_images : videoModel.supported_frame_images;
+    const inputRules = resolveVideoInputRules(videoModel, videoEndpoint);
+    const supportedFrames = inputRules.frameImages;
     const capabilities = route?.capabilities ?? videoCapabilityDescriptors(videoModel);
     if (strict) {
       const optionIssues = validateCapabilityOptions(draft.options, capabilities, {
@@ -2046,18 +2053,44 @@ function buildRequestInternal(
       && assetMediaKind(asset) === "image"
       && supportedFrames?.includes(asset.role),
     );
+    const inputRuleIssue = assessResolvedVideoInputRules({
+      model: videoModel,
+      endpoint: videoEndpoint,
+      references: [...references, ...frames],
+      options: draft.options,
+    })[0];
+    if (inputRuleIssue?.code === "mixed_input_styles") {
+      throw new Error("OpenRouter does not jointly apply input_references and frame_images in one video request.");
+    }
+    if (inputRuleIssue?.code === "last_frame_requires_first_frame") {
+      throw new Error("This video model requires a first frame when a last frame is attached.");
+    }
+    if (inputRuleIssue?.code === "reference_duration_unsupported") {
+      throw new Error(`This video model does not support duration ${String(inputRuleIssue.value)} with reference images.`);
+    }
+    if (inputRuleIssue?.code === "reference_aspect_ratio_unsupported") {
+      throw new Error(`This video model does not support aspect ratio ${String(inputRuleIssue.value)} with reference images.`);
+    }
+    if (inputRuleIssue?.code === "reference_resolution_unsupported") {
+      throw new Error(`This video model does not support resolution ${String(inputRuleIssue.value)} with reference images.`);
+    }
+    if (references.length && payload.duration == null && inputRules.referenceOptions?.durations?.length === 1) {
+      const duration = inputRules.referenceOptions.durations[0];
+      const durationIssue = validateCapabilityOptions({ duration }, capabilities, {
+        supportedSizes: route ? route.supportedSizes : videoModel.supported_sizes,
+        allowUnknown: false,
+      })[0];
+      if (durationIssue) throw new Error(durationIssue.message);
+      payload.duration = duration;
+    }
     const counts: Record<InputMediaKind, number> = { image: 0, video: 0, audio: 0 };
     for (const asset of references) counts[assetMediaKind(asset)] += 1;
     for (const kind of ["image", "video", "audio"] as const) {
       const limit = videoReferenceLimit(videoModel, kind, videoEndpoint);
       if (counts[kind] > limit) throw new Error(`This video model accepts at most ${limit} ${kind} references; received ${counts[kind]}.`);
     }
-    const endpointLimit = videoEndpoint?.max_input_references
-      ?? videoEndpoint?.supported_parameters?.input_references?.max;
-    const aggregateLimit = route
-      ? endpointLimit
-      : videoModel.max_input_references ?? videoInputPolicy(videoModel.id).totalReferenceLimit;
-    if (aggregateLimit != null && references.length > aggregateLimit) {
+    const aggregateLimit = inputRules.totalReferenceLimit;
+    if (references.length > aggregateLimit) {
       throw new Error(`This video model accepts at most ${aggregateLimit} total reference inputs; received ${references.length}.`);
     }
     const unsupportedFrames = draft.assets.filter((asset) =>
@@ -2086,17 +2119,8 @@ function buildRequestInternal(
       }));
     }
   }
-  if (draft.director) {
-    const protectedFields = new Set(["model", "prompt", "provider", "input_references", "frame_images"]);
-    for (const [name, value] of Object.entries(draft.director.providerOptions)) {
-      if (!protectedFields.has(name) && value !== undefined) payload[name] = value;
-    }
-    if (draft.director.promptBrief.trim()) {
-      payload.prompt = `${String(payload.prompt).trim()}\n\n[Director Brief]\n${draft.director.promptBrief.trim()}`;
-    }
-  }
   const provider = parseProviderConfiguration(draft.providerJson);
-  validateProviderPassthrough(provider, model, route);
+  validateProviderPassthrough(provider, model, route, { mode: draft.mode, strict });
   if (strict && route && !route.providerSlug && route.contractSource !== "video_catalog") {
     throw new Error("The selected endpoint has no provider slug and cannot be pinned to the reviewed request.");
   }

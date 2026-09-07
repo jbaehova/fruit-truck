@@ -1,6 +1,5 @@
 import {
   resolveEligibleRoute,
-  videoReferenceLimit,
   type DraftOptions,
   type GenerationMode,
   type GenerationModel,
@@ -10,7 +9,7 @@ import {
   type VideoModel,
   type VideoModelEndpoint,
 } from "./openrouter.ts";
-import { videoInputPolicy, videoReferenceCapability, videoReferenceTransportForUrl, type InputMediaKind } from "./modelPolicies.ts";
+import { resolveVideoInputRules, videoReferenceCapability, videoReferenceTransportForUrl, type InputMediaKind, type VideoInputRules } from "./modelPolicies.ts";
 import type { DraftReference, SessionAsset } from "./studio.ts";
 
 const KINDS = ["image", "video", "audio"] as const;
@@ -21,6 +20,7 @@ export type InputCapabilities = {
   model: GenerationModel | null;
   route?: GenerationRoute;
   endpoint?: VideoModelEndpoint;
+  rules?: VideoInputRules;
   roles: Record<InputMediaKind, ReferenceRole[]>;
   referenceLimits: Record<InputMediaKind, number>;
   referenceLimit: number;
@@ -59,15 +59,13 @@ export function resolveInputCapabilities(
   }
   const video = model as VideoModel;
   const endpoint = route.endpoint as VideoModelEndpoint | undefined;
-  const frames = [...new Set((endpoint ? endpoint.supported_frame_images : video.supported_frame_images) ?? [])];
-  const referenceLimits = Object.fromEntries(KINDS.map((kind) => [kind, videoReferenceLimit(video, kind, endpoint)])) as InputCapabilities["referenceLimits"];
-  const declaredReferenceLimit = endpoint
-    ? endpoint.max_input_references ?? route.capabilities.input_references?.max ?? Math.max(...Object.values(referenceLimits))
-    : video.max_input_references ?? videoInputPolicy(video.id).totalReferenceLimit ?? Math.max(...Object.values(referenceLimits));
-  const referenceLimit = Math.min(declaredReferenceLimit, Object.values(referenceLimits).reduce((sum, count) => sum + count, 0));
-  const mixFramesAndReferences = videoInputPolicy(video.id).combination === "allow";
+  const rules = resolveVideoInputRules(video, endpoint);
+  const frames = rules.frameImages;
+  const referenceLimits = rules.referenceLimits;
+  const referenceLimit = Math.min(rules.totalReferenceLimit, Object.values(referenceLimits).reduce((sum, count) => sum + count, 0));
+  const mixFramesAndReferences = rules.combination !== "exclusive";
   return {
-    ...result, endpoint, referenceLimits, referenceLimit, mixFramesAndReferences,
+    ...result, endpoint, rules, referenceLimits, referenceLimit, mixFramesAndReferences,
     roles: Object.fromEntries(KINDS.map((kind) => [kind, [
       ...(referenceLimits[kind] > 0 ? ["reference" as const] : []),
       ...(kind === "image" ? frames : []),
@@ -87,21 +85,19 @@ export function availableInputRoles(
   if (asset.storageAvailability === "missing") return [];
   const remaining = references.filter((reference) => reference.slot !== replacingSlot);
   if (remaining.length >= support.limit) return [];
-  if (support.mode === "video" && support.model) {
-    const transport = !asset.localPath && !asset.blobKey && asset.externalUrl
-      ? videoReferenceTransportForUrl(asset.externalUrl) : "data_url";
-    if (!videoReferenceCapability(support.model as VideoModel, asset.kind, transport, support.endpoint).supported) return [];
-  }
+  const transport = !asset.localPath && !asset.blobKey && asset.externalUrl
+    ? videoReferenceTransportForUrl(asset.externalUrl) : "data_url";
   const general = remaining.filter((reference) => reference.role === "reference");
-  // Let users change existing roles one at a time. Preflight reports mixed
-  // styles until the transition is complete; adding new mixed inputs is closed.
-  const changingRole = replacingSlot !== undefined;
   return support.roles[asset.kind].filter((role) => {
+    if (support.mode === "video" && support.model
+      && !videoReferenceCapability(support.model as VideoModel, asset.kind, transport, support.endpoint, role).supported) return false;
+    if (role === "last_frame" && support.rules?.lastFrameRequiresFirstFrame
+      && !remaining.some((reference) => reference.role === "first_frame")) return false;
     if (role !== "reference") {
       return !remaining.some((reference) => reference.role === role)
-        && (changingRole || support.mixFramesAndReferences || !general.length);
+        && (support.mixFramesAndReferences || !general.length);
     }
-    return (changingRole || support.mixFramesAndReferences || remaining.length === general.length)
+    return (support.mixFramesAndReferences || remaining.length === general.length)
       && general.length < support.referenceLimit
       && general.filter((reference) => assets.find((candidate) => candidate.id === reference.assetId)?.kind === asset.kind).length < support.referenceLimits[asset.kind];
   });
@@ -132,14 +128,24 @@ export function videoImageReferences(
 }
 
 /** Present output controls using endpoint descriptors instead of model unions. */
-export function modelForInputControls(support: InputCapabilities): GenerationModel | null {
+export function modelForInputControls(support: InputCapabilities, references: readonly Pick<DraftReference, "role">[] = []): GenerationModel | null {
   const { model, route } = support;
   if (!model || !route) return model;
   if (support.mode === "image") return { ...model, supported_parameters: route.capabilities, supported_sizes: route.supportedSizes } as ImageModel;
-  const values = (name: string) => route.capabilities[name]?.values?.map(String);
+  const capabilities = { ...route.capabilities };
+  const restrictions = references.some((reference) => reference.role === "reference") ? support.rules?.referenceOptions : undefined;
+  for (const [name, allowed] of Object.entries({ duration: restrictions?.durations, resolution: restrictions?.resolutions, aspect_ratio: restrictions?.aspectRatios })) {
+    if (!allowed?.length) continue;
+    const descriptor = capabilities[name];
+    const values = allowed.filter((value) => (!descriptor?.values || descriptor.values.map(String).includes(String(value)))
+      && (descriptor?.min == null || Number(value) >= descriptor.min)
+      && (descriptor?.max == null || Number(value) <= descriptor.max));
+    capabilities[name] = { type: "enum", values };
+  }
+  const values = (name: string) => capabilities[name]?.values?.map(String);
   return {
     ...model,
-    supported_parameters: route.capabilities,
+    supported_parameters: capabilities,
     supported_durations: values("duration")?.map(Number),
     supported_resolutions: values("resolution"),
     supported_aspect_ratios: values("aspect_ratio"),
@@ -148,4 +154,21 @@ export function modelForInputControls(support: InputCapabilities): GenerationMod
     seed: Boolean(route.capabilities.seed),
     allowed_passthrough_parameters: route.allowedPassthroughParameters,
   } as VideoModel;
+}
+
+
+/** A newly attached reference uses supported workflow options immediately. */
+export function optionsForInputReferences(
+  support: InputCapabilities,
+  references: readonly Pick<DraftReference, "role">[],
+  options: DraftOptions,
+): DraftOptions {
+  if (support.mode !== "video" || !references.some((reference) => reference.role === "reference") || !support.rules?.referenceOptions) return options;
+  const model = modelForInputControls(support, references) as VideoModel;
+  const next = { ...options };
+  for (const name of ["duration", "resolution", "aspect_ratio"]) {
+    const values = model.supported_parameters?.[name]?.values;
+    if (values?.length && !values.map(String).includes(String(options[name]))) next[name] = values[0];
+  }
+  return next;
 }

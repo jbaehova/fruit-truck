@@ -26,7 +26,7 @@ import { ConfirmDialog, type Confirmation } from "@/components/ConfirmDialog";
 import { ExternalLink } from "@/components/ExternalLink";
 import { GenerationThreadRail } from "@/components/GenerationThreadRail";
 import type { GenerationResultNotice } from "@/components/GenerationResultDialog";
-import { availableInputRoles, modelForInputControls, resolveInputCapabilities, videoImageReferences } from "@/inputCapabilities";
+import { availableInputRoles, modelForInputControls, optionsForInputReferences, resolveInputCapabilities, videoImageReferences } from "@/inputCapabilities";
 import { simplifyVideoDraft } from "@/videoDraft";
 import { InputTray } from "@/components/InputTray";
 import { ModelSelector } from "@/components/ModelSelector";
@@ -562,6 +562,8 @@ export default function App() {
   const [preparingRequest, setPreparingRequest] = useState(false);
   const [mentionMenuOpen, setMentionMenuOpen] = useState(false);
   const [mentionIndex, setMentionIndex] = useState(0);
+  const [mentionCaret, setMentionCaret] = useState(0);
+  const pendingMentionSelection = useRef<{ prompt: string; caret: number } | null>(null);
   const [rightPanelOpen, setRightPanelOpen] = useState(() =>
     typeof localStorage === "undefined" || localStorage.getItem(RIGHT_PANEL_OPEN_KEY) !== "false",
   );
@@ -677,7 +679,7 @@ export default function App() {
   const selectedModel = models.find((model) => model.id === selectedId) ?? null;
   const inputSupport = useMemo(() => resolveInputCapabilities(mode, selectedModel, draft.options, draft.providerJson),
     [mode, selectedModel, draft.options, draft.providerJson]);
-  const controlsModel = useMemo(() => modelForInputControls(inputSupport), [inputSupport]);
+  const controlsModel = useMemo(() => modelForInputControls(inputSupport, draft.references), [inputSupport, draft.references]);
   const roleOptions = inputSupport.roles;
   const roles = useMemo(() => [...new Set(Object.values(roleOptions).flat())], [roleOptions]);
   const referenceLimit = inputSupport.limit;
@@ -1740,12 +1742,12 @@ export default function App() {
       return commitImportedAssets(imported);
     });
 
-  const pickFiles = async (): Promise<SessionAsset[]> => {
+  const pickFiles = async (kinds: SessionAsset["kind"][] = ["image", "video", "audio"]): Promise<SessionAsset[]> => {
     if (!isTauriRuntime()) {
       return new Promise((resolve) => {
         const input = document.createElement("input");
         input.type = "file";
-        input.accept = "image/*,video/*,audio/*";
+        input.accept = kinds.map((kind) => `${kind}/*`).join(",");
         input.multiple = true;
         input.onchange = () => void importFiles(input.files ?? []).then(resolve, () => resolve([]));
         input.oncancel = () => resolve([]);
@@ -1754,7 +1756,7 @@ export default function App() {
     }
     try {
       return await withPendingWorkspaceMutation(async () => {
-        const imported = await pickManagedAssets();
+        const imported = await pickManagedAssets(kinds);
         assertMutable();
         return commitImportedAssets(imported);
       });
@@ -1872,15 +1874,15 @@ export default function App() {
       toast.error(t("unsupportedAssetInput"));
       return;
     }
+    const references = [...targetDraft.references, {
+      assetId,
+      role: validRole,
+      purpose: defaultReferencePurpose(targetAsset.kind, validRole),
+      slot: nextReferenceSlot(targetDraft.references),
+    }];
+    const options = optionsForInputReferences(targetSupport, references, targetDraft.options);
     if (!notice) {
-      patchDraft({
-        references: [...targetDraft.references, {
-          assetId,
-          role: validRole,
-          purpose: defaultReferencePurpose(targetAsset.kind, validRole),
-          slot: nextReferenceSlot(targetDraft.references),
-        }],
-      });
+      patchDraft({ references, options });
       return;
     }
     patchSession(notice.sessionId, (current) => ({
@@ -1891,16 +1893,12 @@ export default function App() {
         ...current.threads,
         [targetThread.mode]: current.threads[targetThread.mode].map((item) => item.id === targetThread.id ? {
           ...item,
+          optionOverrides: optionOverridesFromDefaults(current.generationDefaults.options[targetThread.mode], options),
           revision: item.revision + 1,
           updatedAt: new Date().toISOString(),
           draft: {
             ...item.draft,
-            references: [...item.draft.references, {
-              assetId,
-              role: validRole,
-              purpose: defaultReferencePurpose(targetAsset.kind, validRole),
-              slot: nextReferenceSlot(item.draft.references),
-            }],
+            references,
             promptHistory: invalidatePromptEnhancement(item.draft.promptHistory),
           },
         } : item),
@@ -2037,7 +2035,7 @@ export default function App() {
     const targetModel = catalogs.video.find((item) => item.id === effectiveThreadModelId(targetSession, targetThread)) ?? null;
     const support = resolveInputCapabilities("video", targetModel, targetDraft.options, targetDraft.providerJson);
     const references = videoImageReferences(support, targetDraft.references, targetSession.assets, asset);
-    return references ? { targetSession, references } : undefined;
+    return references ? { targetSession, references, options: optionsForInputReferences(support, references, targetDraft.options) } : undefined;
   };
 
   const canUseResultInput = (assetId: string, notice: GenerationResultNotice) => {
@@ -2055,7 +2053,7 @@ export default function App() {
     assertMutable();
     const destination = videoImageDestination(assetId, notice);
     if (!destination) { toast.error(t("unsupportedAssetInput")); return; }
-    const { targetSession, references } = destination;
+    const { targetSession, references, options } = destination;
     const patchTarget = (update: (current: StudioSession) => StudioSession) => patchSession(targetSession.id, update);
     patchTarget((current) => {
       const asset = current.assets.find((candidate) => candidate.id === assetId);
@@ -2071,6 +2069,7 @@ export default function App() {
             const videoDraft = simplifyVideoDraft(candidate.draft);
             return {
               ...candidate,
+              optionOverrides: optionOverridesFromDefaults(current.generationDefaults.options.video, options),
               draft: {
                 ...videoDraft,
                 references,
@@ -2123,7 +2122,11 @@ export default function App() {
             draft: { ...item.draft, promptHistory: invalidatePromptEnhancement(item.draft.promptHistory) },
             optionOverrides: optionOverridesFromDefaults(
               current.generationDefaults.options[targetMode],
-              { ...nextDefaults, ...effectiveThreadDraft(current, item).options },
+              optionsForInputReferences(
+                resolveInputCapabilities(targetMode, model, {}, effectiveThreadDraft(current, item).providerJson),
+                effectiveThreadDraft(current, item).references,
+                { ...nextDefaults, ...effectiveThreadDraft(current, item).options },
+              ),
             ),
             revision: item.revision + 1,
             updatedAt: createdAt,
@@ -2279,6 +2282,10 @@ export default function App() {
       case "unsupported_reference": return t("unsupportedReference", { slot: constraint.slot ?? "?" });
       case "too_many_inputs": return t("tooManyInputs", { count: constraint.limit ?? 0 });
       case "mixed_input_styles": return t("mixedInputStyles");
+      case "last_frame_requires_first_frame": return t("lastFrameRequiresFirst");
+      case "reference_duration_unsupported": return t("referenceDurationUnsupported");
+      case "reference_aspect_ratio_unsupported": return t("referenceAspectRatioUnsupported");
+      case "reference_resolution_unsupported": return t("referenceResolutionUnsupported");
       case "frame_inputs_ignored": return t("frameInputsIgnored");
       case "duplicate_first_frame": return t("duplicateFirstFrame");
       case "duplicate_last_frame": return t("duplicateLastFrame");
@@ -3632,10 +3639,31 @@ export default function App() {
     }
   };
 
-  const mentionMatch = draft.prompt.match(/(?:^|\s)@(\d*)$/);
+  const mentionMatch = draft.prompt.slice(0, mentionCaret).match(/(?:^|\s)@(\d*)$/);
   const mentionSuggestions = mentionMenuOpen && mentionMatch
     ? draft.references.filter((reference) => String(reference.slot).startsWith(mentionMatch[1]))
     : [];
+  const insertInputMention = (slot: number, completeSuggestion = false) => {
+    assertMutable();
+    const input = promptRef.current;
+    const start = completeSuggestion && mentionMatch
+      ? mentionCaret - mentionMatch[1].length - 1
+      : input?.selectionStart ?? draft.prompt.length;
+    const end = completeSuggestion ? mentionCaret : input?.selectionEnd ?? start;
+    const prefix = start > 0 && !/\s$/.test(draft.prompt.slice(0, start)) ? " " : "";
+    const inserted = `${prefix}@${slot} `;
+    const nextPrompt = draft.prompt.slice(0, start) + inserted + draft.prompt.slice(end);
+    pendingMentionSelection.current = { prompt: nextPrompt, caret: start + inserted.length };
+    patchDraft({ prompt: nextPrompt });
+    setMentionMenuOpen(false);
+  };
+  useLayoutEffect(() => {
+    const selection = pendingMentionSelection.current;
+    pendingMentionSelection.current = null;
+    if (!selection || selection.prompt !== draft.prompt) return;
+    promptRef.current?.focus({ preventScroll: true });
+    promptRef.current?.setSelectionRange(selection.caret, selection.caret);
+  }, [draft.prompt]);
   const validPromptMentions = useMemo(
     () => findInputMentions(draft.prompt, draft.references.map((reference) => reference.slot)),
     [draft.prompt, draft.references],
@@ -4443,6 +4471,7 @@ export default function App() {
               references={draft.references}
               assets={session.assets}
               support={inputSupport}
+              onMention={(slot) => insertInputMention(slot)}
               lockedPurposes={mode === "image" && draft.imageEditMode
                 ? Object.fromEntries(draft.references
                   .filter((reference) => `@${reference.slot}` === draft.imageEditTarget)
@@ -4459,6 +4488,7 @@ export default function App() {
               const targetStillAttached = normalizedReferences.some((reference) => `@${reference.slot}` === draft.imageEditTarget);
               patchDraft({
                 references: normalizedReferences,
+                options: optionsForInputReferences(inputSupport, normalizedReferences, draft.options),
                 imageEditTarget: mode === "image" && draft.imageEditMode && !targetStillAttached ? "" : draft.imageEditTarget,
                 maskStrokes: mode === "image" && draft.imageEditMode && !targetStillAttached ? [] : draft.maskStrokes,
                 maskInstructions: mode === "image" && draft.imageEditMode && !targetStillAttached ? "" : draft.maskInstructions,
@@ -4490,7 +4520,8 @@ export default function App() {
                     patchDraft({
                       prompt: event.target.value,
                     });
-                    setMentionMenuOpen(/(?:^|\s)@\d*$/.test(event.target.value));
+                    setMentionCaret(event.target.selectionStart);
+                    setMentionMenuOpen(/(?:^|\s)@\d*$/.test(event.target.value.slice(0, event.target.selectionStart)));
                     setMentionIndex(0);
                   }}
                   onKeyDown={(event) => {
@@ -4501,13 +4532,16 @@ export default function App() {
                     } else if (event.key === "Enter" || event.key === "Tab") {
                       event.preventDefault();
                       const selected = mentionSuggestions[mentionIndex] ?? mentionSuggestions[0];
-                      assertMutable();
-                      patchDraft({ prompt: draft.prompt.replace(/@\d*$/, `@${selected.slot} `) });
-                      setMentionMenuOpen(false);
+                      insertInputMention(selected.slot, true);
                     } else if (event.key === "Escape") {
                       event.preventDefault();
                       setMentionMenuOpen(false);
                     }
+                  }}
+                  onSelect={(event) => {
+                    const input = event.currentTarget;
+                    setMentionCaret(input.selectionStart);
+                    setMentionMenuOpen(input.selectionStart === input.selectionEnd && /(?:^|\s)@\d*$/.test(input.value.slice(0, input.selectionStart)));
                   }}
                   onScroll={syncPromptHighlightScroll}
                 />
@@ -4515,7 +4549,7 @@ export default function App() {
                   <div className="mention-menu" id="input-mention-listbox" role="listbox" aria-label={t("numberedInputs")}>
                     {mentionSuggestions.map((reference, index) => {
                       const asset = assetMap.get(reference.assetId);
-                      return <Button type="button" variant="ghost" role="option" id={`input-mention-${reference.slot}`} aria-selected={index === mentionIndex} key={reference.assetId} onMouseEnter={() => setMentionIndex(index)} onClick={() => { assertMutable(); patchDraft({ prompt: draft.prompt.replace(/@\d*$/, `@${reference.slot} `) }); setMentionMenuOpen(false); }}><b>@{reference.slot}</b>{asset?.name}</Button>;
+                      return <Button type="button" variant="ghost" role="option" id={`input-mention-${reference.slot}`} aria-selected={index === mentionIndex} key={reference.slot} onMouseEnter={() => setMentionIndex(index)} onMouseDown={(event) => event.preventDefault()} onClick={() => insertInputMention(reference.slot, true)}>{asset ? <AssetPreview asset={asset} /> : null}<b>@{reference.slot}</b><span>{asset?.name}</span>{reference.role !== "reference" ? <small>{t(reference.role === "first_frame" ? "firstFrame" : "lastFrame")}</small> : null}</Button>;
                     })}
                   </div>
                 ) : null}

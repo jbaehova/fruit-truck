@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { availableInputRoles, modelForInputControls, resolveInputCapabilities, videoImageReferences } from "./inputCapabilities.ts";
+import { availableInputRoles, modelForInputControls, optionsForInputReferences, resolveInputCapabilities, videoImageReferences } from "./inputCapabilities.ts";
 import { prepareRequest, referenceCoverageReport, type ImageModel, type VideoModel, type VideoModelEndpoint } from "./openrouter.ts";
 import { assessInputConstraints, assessVideoReferenceTransport } from "./modelPolicies.ts";
 import type { DraftReference } from "./studio.ts";
@@ -92,9 +92,9 @@ test("provider changes narrow both input roles and output controls", () => {
   assert.equal(resolveInputCapabilities("video", model, {}, '{"only":["missing"]}').limit, 0);
 });
 
-test("unverified uploads stay closed while verified HTTPS inputs remain usable", () => {
+test("reference transport limits do not incorrectly disable declared frame uploads", () => {
   const support = resolveInputCapabilities("video", video([endpoint({ reference_transports: { image: ["https_url"] } })]));
-  assert.deepEqual(availableInputRoles(support, [], [], image), []);
+  assert.deepEqual(availableInputRoles(support, [], [], image), ["first_frame", "last_frame"]);
   assert.ok(availableInputRoles(support, [], [], { ...image, externalUrl: "https://example.com/frame.png" }).length > 0);
   assert.deepEqual(availableInputRoles(support, [], [], { ...image, storageAvailability: "missing" }), []);
 });
@@ -120,15 +120,15 @@ test("frames have independent quotas while general reference transport caps stil
   ], route).some((issue) => issue.code === "too_many_references"));
 });
 
-test("endpoint limits supersede fallback policy limits in both UI and input validation", () => {
+test("endpoint aggregate limits do not widen documented per-kind limits", () => {
   const route = endpoint({ max_input_references: 12 });
   const model = { ...video([route]), id: "bytedance/seedance-2.0" };
   const support = resolveInputCapabilities("video", model);
-  assert.equal(support.referenceLimits.image, 12);
-  assert.deepEqual(assessInputConstraints({
+  assert.equal(support.referenceLimits.image, 9);
+  assert.ok(assessInputConstraints({
     mode: "video", modelId: model.id, endpoint: route, limit: 12,
     allowedRoles: ["reference"], references: Array.from({ length: 10 }, (_, slot) => ({ slot, kind: "image", role: "reference" })),
-  }), []);
+  }).some((issue) => issue.code === "too_many_inputs" && issue.limit === 9));
 });
 
 test("generated images replace the opening frame or use a supported reference role", () => {
@@ -139,4 +139,49 @@ test("generated images replace the opening frame or use a supported reference ro
   assert.equal(videoImageReferences(referenceSupport, [binding("image", 1, "reference")], [image, second], second), null);
   const textSupport = resolveInputCapabilities("video", video([endpoint({ supported_frame_images: [], max_input_references: 0 })]));
   assert.equal(videoImageReferences(textSupport, [], [image], image), null);
+});
+
+
+test("live Seedance frames and documented references enable local image attachments", () => {
+  const model: VideoModel = { id: "bytedance/seedance-2.5", name: "Seedance 2.5", supported_frame_images: ["first_frame", "last_frame"] };
+  const support = resolveInputCapabilities("video", model);
+  assert.equal(support.referenceLimit, 50);
+  assert.equal(support.limit, 50);
+  assert.deepEqual(availableInputRoles(support, [], [], image), ["reference", "first_frame"]);
+  assert.deepEqual(availableInputRoles(support, [binding("image", 1, "first_frame")], [image], second), ["last_frame"]);
+});
+
+
+test("Veo references share one asset type and automatically use reference-workflow options", () => {
+  const model: VideoModel = {
+    id: "google/veo-3.1", name: "Veo 3.1",
+    supported_frame_images: ["first_frame", "last_frame"],
+    supported_durations: [4, 6, 8], supported_resolutions: ["720p", "1080p", "4k"],
+    supported_aspect_ratios: ["16:9", "9:16"],
+  };
+  const support = resolveInputCapabilities("video", model);
+  assert.equal(support.referenceLimits.image, 3);
+  assert.equal(support.rules?.referenceImageType, "asset");
+  assert.equal(support.rules?.homogeneousReferenceImages, true);
+  assert.equal(support.rules?.referencePurposeTransport, "prompt_only");
+  assert.deepEqual(availableInputRoles(support, [], [], image), ["reference", "first_frame"]);
+  assert.deepEqual(availableInputRoles(support, [binding("image", 1, "first_frame")], [image], second), ["last_frame"]);
+  const references = [binding("image", 1, "reference")];
+  assert.deepEqual((modelForInputControls(support, references) as VideoModel).supported_durations, [8]);
+  assert.deepEqual((modelForInputControls(support, references) as VideoModel).supported_resolutions, ["720p", "1080p"]);
+  assert.deepEqual(optionsForInputReferences(support, references, { duration: 4, resolution: "4k", aspect_ratio: "16:9" }), { duration: 8, resolution: "720p", aspect_ratio: "16:9" });
+  assert.deepEqual((modelForInputControls(support) as VideoModel).supported_durations, [4, 6, 8]);
+  const fast = resolveInputCapabilities("video", { ...model, id: "google/veo-3.1-fast" });
+  assert.deepEqual((modelForInputControls(fast, references) as VideoModel).supported_durations, [4, 6, 8]);
+  const lite = resolveInputCapabilities("video", { ...model, id: "google/veo-3.1-lite" });
+  assert.equal(lite.referenceLimits.image, 0);
+  assert.deepEqual(availableInputRoles(lite, [], [], image), ["first_frame"]);
+});
+
+test("role edits cannot introduce mixtures that OpenRouter would silently discard", () => {
+  const support = resolveInputCapabilities("video", video());
+  const references = [binding("image", 1, "reference"), binding("second", 2, "reference")];
+  assert.deepEqual(availableInputRoles(support, references, [image, second], image, 1), ["reference"]);
+  const frames = [binding("image", 1, "first_frame"), binding("second", 2, "last_frame")];
+  assert.deepEqual(availableInputRoles(support, frames, [image, second], image, 1), ["first_frame"]);
 });

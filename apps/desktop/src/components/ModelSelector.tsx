@@ -8,7 +8,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useI18n } from "@/i18n";
-import { modelInputSignature, modelPriceLabel, type GenerationMode, type GenerationModel, type ImageModel, type VideoModel } from "@/openrouter";
+import { modelPriceLabel, type GenerationMode, type GenerationModel, type ImageModel, type VideoModel } from "@/openrouter";
+import { modelForInputControls, resolveInputCapabilities } from "@/inputCapabilities";
 import { modelSearchMatches } from "@/optionValues";
 import { preferredCatalogModel } from "@/studio";
 
@@ -34,7 +35,8 @@ function modelName(model: GenerationModel) {
   return model.name.replace(`${providerName(model)}: `, "");
 }
 
-function modelResolutions(mode: GenerationMode, model: GenerationModel) {
+function modelResolutions(mode: GenerationMode, selectedModel: GenerationModel) {
+  const model = modelForInputControls(resolveInputCapabilities(mode, selectedModel)) ?? selectedModel;
   const descriptor = mode === "image" ? (model as ImageModel).supported_parameters.resolution : undefined;
   const descriptorValues = descriptor && typeof descriptor === "object" && "values" in descriptor && Array.isArray(descriptor.values)
     ? descriptor.values.filter((value): value is string => typeof value === "string")
@@ -45,15 +47,13 @@ function modelResolutions(mode: GenerationMode, model: GenerationModel) {
 }
 
 function modelSupportsReferences(mode: GenerationMode, model: GenerationModel) {
-  return mode === "image"
-    ? ((model as ImageModel).supported_parameters.input_references?.max ?? 0) > 0
-    : ((model as VideoModel).max_input_references ?? 0) > 0;
+  return resolveInputCapabilities(mode, model).limit > 0;
 }
 
 function modelSupportsAudio(mode: GenerationMode, model: GenerationModel) {
   if (mode === "image") return false;
-  const video = model as VideoModel;
-  return video.generate_audio === true || video.input_reference_types?.includes("audio") === true;
+  const support = resolveInputCapabilities(mode, model);
+  return (modelForInputControls(support) as VideoModel).generate_audio === true || support.roles.audio.length > 0;
 }
 
 function modelHasVerifiedEndpoint(mode: GenerationMode, model: GenerationModel) {
@@ -62,18 +62,19 @@ function modelHasVerifiedEndpoint(mode: GenerationMode, model: GenerationModel) 
     : (model as VideoModel).endpoints?.some((endpoint) => Boolean(endpoint.endpoint_id || endpoint.id)) === true;
 }
 
-function localizedInputSignature(mode: GenerationMode, model: GenerationModel, language: string, t: ReturnType<typeof useI18n>["t"]) {
-  const signature = modelInputSignature(mode, model);
-  if (language === "en") return signature;
-  return signature
-    .replace("first frame", t("inputFirstFrame"))
-    .replace("last frame", t("inputLastFrame"))
-    .replace("Text", t("inputText"))
-    .replaceAll("image", t("inputImage"));
+function localizedInputSignature(mode: GenerationMode, model: GenerationModel, t: ReturnType<typeof useI18n>["t"]) {
+  const support = resolveInputCapabilities(mode, model);
+  const parts = [t("inputText")];
+  for (const kind of ["image", "video", "audio"] as const) {
+    if (support.referenceLimits[kind] > 0) parts.push(`${t(kind)} ×${support.referenceLimits[kind]}`);
+  }
+  if (support.roles.image.includes("first_frame")) parts.push(t("inputFirstFrame"));
+  if (support.roles.image.includes("last_frame")) parts.push(t("inputLastFrame"));
+  return parts.join(" / ");
 }
 
 export function ModelSelector({ mode, models, selectedId, loading, disabled, onSelect }: Props) {
-  const { language, t } = useI18n();
+  const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [favorites, setFavorites] = useState<Set<string>>(() => {
@@ -217,7 +218,7 @@ export function ModelSelector({ mode, models, selectedId, loading, disabled, onS
                       <span className="model-icon">{mode === "image" ? <ImageIcon /> : <Video />}</span>
                       <span className="model-copy">
                         <strong>{modelName(model)}</strong>
-                        <small>{[providerName(model), localizedInputSignature(mode, model, language, t), price(model), model.id === recommendedId ? t("recommended") : "", modelHasVerifiedEndpoint(mode, model) ? t("endpointVerified") : ""].filter(Boolean).join(" / ")}</small>
+                        <small>{[providerName(model), localizedInputSignature(mode, model, t), price(model), model.id === recommendedId ? t("recommended") : "", modelHasVerifiedEndpoint(mode, model) ? t("endpointVerified") : ""].filter(Boolean).join(" / ")}</small>
                       </span>
                       {active ? <Check className="model-check" /> : null}
                     </Button>

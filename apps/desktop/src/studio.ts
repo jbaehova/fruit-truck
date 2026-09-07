@@ -3141,9 +3141,9 @@ function sessionAssetFromManaged(
   };
 }
 
-export async function pickManagedAssets(): Promise<SessionAsset[]> {
+export async function pickManagedAssets(kinds?: AssetKind[]): Promise<SessionAsset[]> {
   if (!isTauriRuntime()) return [];
-  const assets = await invoke<NativeManagedAsset[]>("pick_and_import_assets");
+  const assets = await invoke<NativeManagedAsset[]>("pick_and_import_assets", { mediaKinds: kinds });
   return Promise.all(assets.map((asset) => inspectSessionAssetMetadata(sessionAssetFromManaged(asset))));
 }
 

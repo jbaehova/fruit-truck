@@ -131,7 +131,28 @@ function inputModel(id: string, name: string, max: number, frames: string[]) {
     }],
   };
 }
+// Public /videos/models shape: frame support is declared without transport metadata.
+const SEEDANCE_25_MODEL = {
+  id: "bytedance/seedance-2.5",
+  name: "ByteDance: Seedance 2.5",
+  supported_frame_images: ["first_frame", "last_frame"],
+  supported_durations: [5],
+  supported_resolutions: ["480p", "720p"],
+  supported_aspect_ratios: ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9"],
+  generate_audio: true,
+};
+
+const VEO_MODELS = ["", "-fast", "-lite"].map((suffix) => ({
+  id: `google/veo-3.1${suffix}`,
+  name: `Google: Veo 3.1${suffix ? ` ${suffix.slice(1)}` : ""}`,
+  supported_frame_images: ["first_frame", "last_frame"],
+  supported_durations: [4, 6, 8],
+  supported_resolutions: ["720p", "1080p", "4k"],
+  supported_aspect_ratios: ["16:9", "9:16"],
+}));
 const INPUT_MODELS = [
+  SEEDANCE_25_MODEL,
+  ...VEO_MODELS,
   inputModel("test/first-only", "First frame only video", 0, ["first_frame"]),
   inputModel("test/frame-pair", "Frame pair video", 0, ["first_frame", "last_frame"]),
   inputModel("test/references", "Three reference images video", 3, []),
@@ -219,7 +240,8 @@ async function mockDirectorApi(page: Page) {
 
 async function importFramePair(page: Page) {
   const fileChooserPromise = page.waitForEvent("filechooser");
-  await page.getByRole("button", { name: /Drop assets here or choose files/ }).click();
+  const upload = page.locator(".reference-section .dropzone").first();
+  await upload.click();
   const fileChooser = await fileChooserPromise;
   await fileChooser.setFiles([
     {
@@ -382,15 +404,16 @@ test("legacy Director settings cannot block ordinary generation or restore remov
 
 async function selectInputModel(page: Page, name: string) {
   await page.locator(".model-selector-trigger").click();
-  await page.locator(".model-select-main").filter({ hasText: name }).click();
+  await page.locator(".model-select-main").filter({ has: page.getByText(name.replace(/^[^:]+: /, ""), { exact: true }) }).click();
   await page.getByRole("alertdialog").getByRole("button", { name: "Change model", exact: true }).click();
   await expect(page.getByRole("heading", { name, exact: true })).toBeVisible();
+  await expect(page.getByRole("alertdialog")).toHaveCount(0);
 }
 
 test("model selection updates frame slots, input limits, and library attachment controls", async ({ page }) => {
   await page.getByRole("button", { name: "Video", exact: true }).click();
   await selectInputModel(page, "Frame pair video");
-  await expect(page.locator(".input-support-summary")).toContainText("Reference images: up to 0");
+  await expect(page.locator(".input-support-summary")).toHaveCount(0);
   await importFramePair(page);
   await expect(page.getByRole("combobox", { name: "Role for director-first-frame.png" })).toContainText("First frame");
   await expect(page.getByRole("combobox", { name: "Role for director-last-frame.png" })).toContainText("Last frame");
@@ -400,7 +423,7 @@ test("model selection updates frame slots, input limits, and library attachment 
   await page.keyboard.press("Escape");
 
   await selectInputModel(page, "First frame only video");
-  await expect(page.locator(".input-support-summary")).toContainText("Last frame: 0 image(s)");
+  await expect(page.locator('.frame-upload[data-asset-drop-target="inputs-last_frame"]')).toHaveCount(0);
   await expect(page.getByRole("combobox", { name: "Role for director-last-frame.png" })).toContainText("Unsupported");
   await expect(page.locator(".reference-row")).toHaveCount(2);
   await page.locator(".reference-row").filter({ hasText: "director-last-frame.png" }).getByRole("button", { name: "Remove", exact: true }).click();
@@ -426,9 +449,119 @@ test("model selection updates frame slots, input limits, and library attachment 
   await page.screenshot({ path: test.info().outputPath("model-input-limits.png") });
 
   await selectInputModel(page, "Text only video");
-  await expect(page.locator(".input-support-summary")).toContainText("Reference images: up to 0");
+  await expect(page.locator(".input-support-summary")).toHaveCount(0);
   await expect(page.locator(".reference-row")).toHaveCount(3);
   await page.locator(".reference-section").getByRole("button", { name: "Clear", exact: true }).click();
-  await expect(page.locator(".reference-section .dropzone")).toBeDisabled();
+  await expect(page.locator(".reference-section .dropzone")).toHaveCount(0);
+  await expect(page.locator(".input-empty-hint")).toContainText("without image inputs");
   await expect(page.locator(".asset-tile").first().getByRole("button", { name: "Use as input", exact: true })).toBeDisabled();
+});
+
+
+test("Seedance catalog without transport metadata accepts frame uploads and prompt mentions", async ({ page }) => {
+  await page.getByRole("button", { name: "Video", exact: true }).click();
+  await selectInputModel(page, SEEDANCE_25_MODEL.name);
+  const firstUpload = page.locator('.frame-upload[data-asset-drop-target="inputs-first_frame"]');
+  const lastUpload = page.locator('.frame-upload[data-asset-drop-target="inputs-last_frame"]');
+  await expect(firstUpload).toBeEnabled();
+  await expect(lastUpload).toBeDisabled();
+  await expect(page.locator(".reference-section")).not.toContainText("text-only");
+  await expect(page.locator(".reference-section")).not.toContainText("up to 0");
+  await page.screenshot({ path: test.info().outputPath("seedance-empty.png") });
+  const image = await page.evaluate(() => {
+    const canvas = document.createElement("canvas");
+    canvas.width = 640;
+    canvas.height = 360;
+    const context = canvas.getContext("2d")!;
+    context.fillStyle = "#dadfd0";
+    context.fillRect(0, 0, 640, 360);
+    context.fillStyle = "#5a7255";
+    context.fillRect(0, 240, 640, 120);
+    context.fillStyle = "#d78e37";
+    context.fillRect(180, 160, 240, 100);
+    return canvas.toDataURL("image/png").split(",")[1];
+  });
+  const chooser = page.waitForEvent("filechooser");
+  await firstUpload.click();
+  await (await chooser).setFiles({ name: "opening.png", mimeType: "image/png", buffer: Buffer.from(image, "base64") });
+  await expect(page.getByRole("combobox", { name: "Role for opening.png" })).toContainText("First frame");
+  await expect(page.getByRole("combobox", { name: "Reference purpose for opening.png" })).toHaveCount(0);
+  await expect(lastUpload).toBeEnabled();
+  const prompt = page.getByRole("combobox", { name: /^Prompt/ });
+  await prompt.fill("Animate the orchard.");
+  await prompt.press("End");
+  await page.getByRole("button", { name: "Mention @1 in the prompt", exact: true }).click();
+  await expect(prompt).toHaveValue("Animate the orchard. @1 ");
+  // Autocomplete at the caret keeps the rest of an existing prompt intact.
+  await prompt.fill("Animate  into the sunset.");
+  await prompt.evaluate((input: HTMLTextAreaElement) => input.setSelectionRange(8, 8));
+  await prompt.press("@");
+  const mention = page.getByRole("option", { name: /@1 opening.png First frame/ });
+  await expect(mention).toBeVisible();
+  await prompt.press("Enter");
+  await expect(prompt).toHaveValue("Animate @1  into the sunset.");
+  await page.locator(".composer-header").scrollIntoViewIfNeeded();
+  await page.screenshot({ path: test.info().outputPath("seedance-first-frame.png") });
+  await page.getByRole("button", { name: "Request", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Request Preview" });
+  await dialog.getByRole("button", { name: "Prepare final request" }).click();
+  await expect(dialog.locator(".request-readiness")).toContainText("Final");
+  const reviewed = JSON.parse(await dialog.locator(".request-payload").textContent() ?? "{}");
+  expect(reviewed.frame_images).toHaveLength(1);
+  expect(reviewed.frame_images[0].frame_type).toBe("first_frame");
+  expect(reviewed.input_references).toBeUndefined();
+  await dialog.getByRole("button", { name: "Close request preview" }).click();
+  const submitted = page.waitForRequest((request) => request.method() === "POST" && new URL(request.url()).pathname === "/api/v1/videos");
+  await page.getByRole("button", { name: "Generate Video", exact: true }).click();
+  const body = (await submitted).postDataJSON();
+  expect(body.frame_images[0].image_url.url).toMatch(/^data:image\/png;base64,/);
+  expect(normalizeMediaPayloads(body)).toEqual(normalizeMediaPayloads(reviewed));
+});
+
+
+test("Veo variants keep one reference type and enforce workflow-specific options", async ({ page }) => {
+  await page.getByRole("button", { name: "Video", exact: true }).click();
+  await selectInputModel(page, "Google: Veo 3.1");
+  await expect(page.locator('.frame-upload[data-asset-drop-target="inputs-first_frame"]')).toBeEnabled();
+  await expect(page.locator('.frame-upload[data-asset-drop-target="inputs-last_frame"]')).toBeDisabled();
+  await expect(page.locator(".reference-type-hint")).toContainText("All images use the subject reference type");
+  const chooser = page.waitForEvent("filechooser");
+  await page.getByRole("button", { name: "Add reference assets", exact: true }).click();
+  const files = await chooser;
+  expect(await files.element().getAttribute("accept")).toBe("image/*");
+  await files.setFiles(["subject", "detail"].map((name) => ({ name: `${name}.png`, mimeType: "image/png", buffer: Buffer.from(TINY_PNG_BASE64, "base64") })));
+  await expect(page.locator(".reference-row")).toHaveCount(2);
+  await expect(page.getByRole("combobox", { name: "Duration", exact: true })).toContainText("8 sec");
+  await page.getByRole("combobox", { name: "Role for subject.png" }).click();
+  await expect(page.getByRole("option", { name: "First frame", exact: true })).toBeDisabled();
+  await expect(page.getByRole("option", { name: "Last frame", exact: true })).toBeDisabled();
+  await page.keyboard.press("Escape");
+  await page.getByRole("combobox", { name: "Reference purpose for subject.png" }).click();
+  await page.getByRole("option", { name: "Style", exact: true }).click();
+  await expect(page.locator(".reference-type-hint")).toContainText("All images use the subject reference type");
+  await page.getByRole("combobox", { name: /^Prompt/ }).fill("Show the same subject from @1 and @2 walking through an orchard.");
+  await page.locator(".composer-header").scrollIntoViewIfNeeded();
+  await page.screenshot({ path: test.info().outputPath("veo-reference-inputs.png") });
+  await page.getByRole("button", { name: "Request", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Request Preview" });
+  await dialog.getByRole("button", { name: "Prepare final request" }).click();
+  await expect(dialog.locator(".request-readiness")).toContainText("Final");
+  const payload = JSON.parse(await dialog.locator(".request-payload").textContent() ?? "{}");
+  expect(payload.duration).toBe(8);
+  expect(payload.input_references).toHaveLength(2);
+  expect(payload.input_references.every((reference: Record<string, unknown>) => reference.type === "image_url" && !("reference_type" in reference) && !("referenceType" in reference))).toBe(true);
+  expect(payload.frame_images).toBeUndefined();
+  await dialog.getByRole("button", { name: "Close request preview" }).click();
+  await selectInputModel(page, "Google: Veo 3.1 fast");
+  await page.getByRole("combobox", { name: "Duration", exact: true }).click();
+  await expect(page.getByRole("option", { name: "4 sec", exact: true })).toBeEnabled();
+  await page.keyboard.press("Escape");
+  await selectInputModel(page, "Google: Veo 3.1 lite");
+  await expect(page.locator(".reference-row")).toHaveCount(2);
+  await expect(page.getByRole("combobox", { name: "Role for subject.png" })).toContainText("Unsupported");
+  await expect(page.getByRole("button", { name: "Add reference assets", exact: true })).toHaveCount(0);
+  await page.locator(".reference-section").getByRole("button", { name: "Clear", exact: true }).click();
+  await expect(page.locator('.frame-upload[data-asset-drop-target="inputs-first_frame"]')).toBeEnabled();
+  await expect(page.locator('.frame-upload[data-asset-drop-target="inputs-last_frame"]')).toBeDisabled();
+  await expect(page.locator(".asset-tile")).toHaveCount(2);
 });

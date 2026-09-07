@@ -9,6 +9,8 @@ import {
   prepareRequest,
   preparedRequestPayload,
   resolveEligibleRoute,
+  videoReferenceLimit,
+  videoReferenceTypes,
   validateApiKeyCandidate,
   validateCredential,
   type ImageModel,
@@ -17,6 +19,7 @@ import {
 import {
   assessVideoReferenceTransport,
   buildVideoSupportMatrix,
+  videoReferenceCapability,
   videoReferenceTransportForUrl,
 } from "./modelPolicies.ts";
 import {
@@ -197,6 +200,124 @@ test("live-shaped video catalog records are definitive for text-only paid reques
   assert.equal(prepared.route?.contractSource, "video_catalog");
   assert.deepEqual(prepared.payload.provider, { require_parameters: true });
   assert.equal(prepared.cost.generationMaxUsd, 0.05);
+});
+
+test("live-shaped Seedance 2.5 catalog enables documented references and inline first frames", () => {
+  const normalized = normalizeCatalogItems("video", {
+    data: [{
+      id: "bytedance/seedance-2.5",
+      canonical_slug: "bytedance/seedance-2.5-20260807",
+      name: "ByteDance: Seedance 2.5",
+      description: "Seedance 2.5 supports first-frame control and multimodal reference-based generation.",
+      supported_resolutions: ["480p", "720p"],
+      supported_aspect_ratios: ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9"],
+      supported_durations: [4, 5, 6, 30],
+      supported_frame_images: ["first_frame", "last_frame"],
+      generate_audio: true,
+      seed: true,
+      allowed_passthrough_parameters: ["watermark", "req_key", "output_format"],
+    }],
+  });
+  const model = normalized.models[0] as VideoModel;
+  assert.deepEqual(videoReferenceTypes(model), ["image", "video", "audio"]);
+  assert.equal(videoReferenceLimit(model, "image"), 30);
+  assert.equal(videoReferenceLimit(model, "video"), 10);
+  assert.equal(videoReferenceLimit(model, "audio"), 10);
+
+  const frameCapability = videoReferenceCapability(model, "image", "data_url", undefined, "first_frame");
+  assert.equal(frameCapability.supported, true);
+  assert.equal(frameCapability.verified, false);
+  assert.equal(frameCapability.evidence, "openrouter_contract");
+  assert.equal(videoReferenceCapability(model, "video", "data_url", undefined, "first_frame").supported, false);
+
+  const prepared = prepareRequest({
+    mode: "video",
+    model: model.id,
+    prompt: "Animate @1 with a slow camera push.",
+    assets: [{
+      id: "start",
+      name: "start.png",
+      mediaType: "image/png",
+      dataUrl: "data:image/png;base64,AAAA",
+      role: "first_frame",
+      purpose: "first_frame",
+      slot: 1,
+    }],
+    options: { duration: 4, resolution: "720p", aspect_ratio: "16:9" },
+    providerJson: "",
+  }, model, { final: true });
+  assert.equal(prepared.status, "ready");
+  assert.equal(prepared.route?.contractSource, "video_catalog");
+  assert.deepEqual(prepared.payload.frame_images, [{
+    type: "image_url",
+    image_url: { url: "data:image/png;base64,AAAA" },
+    frame_type: "first_frame",
+  }]);
+});
+
+test("Seedance 2.5 general references use their own documented transport contract", () => {
+  const model: VideoModel = {
+    id: "bytedance/seedance-2.5",
+    name: "ByteDance: Seedance 2.5",
+    supported_frame_images: ["first_frame", "last_frame"],
+  };
+  const matrix = buildVideoSupportMatrix(model);
+  assert.equal(matrix.entries.find((entry) => entry.kind === "image" && entry.transport === "data_url")?.supported, true);
+  assert.equal(matrix.entries.find((entry) => entry.kind === "video" && entry.transport === "https_url")?.limit, 10);
+  assert.equal(matrix.entries.find((entry) => entry.kind === "video" && entry.transport === "data_url")?.supported, false);
+  assert.equal(matrix.entries.find((entry) => entry.kind === "audio" && entry.transport === "http_url")?.supported, false);
+
+  const prepared = prepareRequest({
+    mode: "video",
+    model: model.id,
+    prompt: "Keep the subject from @1 while the camera slowly orbits.",
+    assets: [{
+      id: "subject",
+      name: "subject.png",
+      mediaType: "image/png",
+      dataUrl: "data:image/png;base64,AAAA",
+      role: "reference",
+      purpose: "subject_identity",
+      slot: 1,
+    }],
+    options: {},
+    providerJson: "",
+  }, model, { final: true });
+  assert.equal(prepared.status, "ready");
+  assert.deepEqual(prepared.payload.input_references, [{
+    type: "image_url",
+    image_url: { url: "data:image/png;base64,AAAA" },
+  }]);
+});
+
+test("explicit Seedance reference exclusions override the documented model fallback", () => {
+  const noReferences: VideoModel = {
+    id: "bytedance/seedance-2.5",
+    name: "ByteDance: Seedance 2.5",
+    input_reference_types: [],
+    max_input_references: 0,
+    supported_frame_images: ["first_frame"],
+  };
+  assert.deepEqual(videoReferenceTypes(noReferences), []);
+  assert.equal(videoReferenceCapability(noReferences, "image", "data_url").supported, false);
+  assert.equal(videoReferenceCapability(noReferences, "image", "data_url", undefined, "first_frame").supported, true);
+
+  const explicitTransportExclusion: VideoModel = {
+    id: "bytedance/seedance-2.5",
+    name: "ByteDance: Seedance 2.5",
+    reference_transport_source: "openrouter_endpoint",
+    reference_transports: { image: [] },
+  };
+  assert.equal(videoReferenceCapability(explicitTransportExclusion, "image", "data_url").supported, false);
+
+  const normalizedExclusion = normalizeCatalogItems("video", { data: [{
+    id: "bytedance/seedance-2.5",
+    name: "ByteDance: Seedance 2.5",
+    input_reference_transports: { image: [] },
+  }] }).models[0] as VideoModel;
+  assert.equal(normalizedExclusion.reference_transport_source, "openrouter_endpoint");
+  assert.deepEqual(normalizedExclusion.reference_transports, { image: [] });
+  assert.equal(videoReferenceCapability(normalizedExclusion, "image", "data_url").supported, false);
 });
 
 test("verified endpoint permits HTTPS video references but never HTTP/data/local by default", () => {

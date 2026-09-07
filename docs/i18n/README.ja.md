@@ -1,5 +1,7 @@
 # Fruit Truck
 
+<img src="../../assets/readme/fruit-truck-hero.png" alt="アイボリー地いっぱいに鮮やかな朱色の果実模様を配した画像と動画のスタジオ Fruit Truck のバナー" width="1200" />
+
 Fruit Truck は、OpenRouter を通じて画像と動画を生成する macOS ワークスペースです。
 
 - モデル機能に対応したリクエスト項目と画像編集
@@ -14,13 +16,22 @@ Fruit Truck は、OpenRouter を通じて画像と動画を生成する macOS �
 | テキストから画像、画像編集 | `/api/v1/images` | 選択したエンドポイントが宣言する機能のみ対応 |
 | テキストから動画 | `/api/v1/videos` | セッションに保存されるジョブ追跡に対応 |
 | プロンプト強化 | `/api/v1/chat/completions` | 任意のプランナー要求。一般的なチャットではありません |
-| 動画の画像/動画/音声リファレンスと編集 | `/api/v1/videos` | 検証済みの公開 HTTPS または signed-upload 転送が構成されるまで利用不可 |
+| 動画の先頭/末尾フレーム画像 | `/api/v1/videos` | 選択モデルが該当フレーム役割を宣言する場合に対応。管理対象のローカル画像は OpenRouter の media URL リクエスト仕様を使用 |
+| 動画の一般画像/動画/音声リファレンス | `/api/v1/videos` | 選択エンドポイントまたはモデル固有ルールが許可する種類、件数、転送方式のみ対応 |
 | 一般チャット、Responses、tool/function calling、TTS、STT、audio output、embeddings | 各種 | このスタジオでは未提供 |
 
 カタログにモデルが表示されても、すべての OpenRouter エンドポイントが
-利用できるとは限りません。実際の対応ルートはライブのエンドポイント
-メタデータと Fruit Truck のリクエスト検証で決まります。詳しくは
-[対応マトリクス](../SUPPORT.md)を参照してください。
+利用できるとは限りません。ライブカタログとエンドポイントのルールが
+優先されます。公開動画カタログにはモデルごとの一般リファレンスの種類と
+件数がすべて含まれないため、Fruit Truck は欠けた項目だけを文書で確認した
+モデル固有ルールで補完し、不明な組み合わせは有効にしません。
+
+フレーム画像と一般リファレンスは併用できません。OpenRouter が
+`frame_images` を優先するためです。Veo 3.1 Standard と Fast の一般
+リファレンスは最大 3 枚で、ネイティブのセマンティック型はすべて固定の `asset`
+です。Lite は一般リファレンスに対応しません。スタイルやキャラクターなどの
+用途指定はプロンプトだけに反映され、ネイティブ `reference_type` には
+なりません。詳しくは[対応マトリクス](../SUPPORT.md)を参照してください。
 
 `apps/desktop` で `npm ci`、`npm run check`、`npm run test:unit`、`npm run test:e2e` を実行して検証します。Playwright は 1920×1080 の headless モードで動作します。
 

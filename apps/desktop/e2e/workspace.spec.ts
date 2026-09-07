@@ -174,19 +174,6 @@ async function startExplicitEnhancement(page: Page) {
   return plannerRequest;
 }
 
-async function chooseInputRole(page: Page, assetName: string, role: "First frame" | "Last frame") {
-  const combobox = page.getByRole("combobox", { name: `Role for ${assetName}` });
-  await combobox.click();
-  await page.getByRole("option", { name: role, exact: true }).click();
-  const expectedRole = role === "First frame" ? "first_frame" : "last_frame";
-  await expect.poll(() => page.evaluate((name) => {
-    const state = JSON.parse(localStorage.getItem("fruit-truck.studio.v1") ?? "{}");
-    const session = state.sessions?.find((item: { id: string }) => item.id === state.activeSessionId);
-    const asset = session?.assets.find((item: { name: string }) => item.name === name);
-    const thread = session?.threads.video.find((item: { id: string }) => item.id === session.activeThreadIds.video);
-    return thread?.draft.references.find((reference: { assetId: string }) => reference.assetId === asset?.id)?.role;
-  }, assetName)).toBe(expectedRole);
-}
 
 async function activePromptState(page: Page) {
   return page.evaluate(() => {
@@ -396,14 +383,14 @@ test("video enhancement sends one planner call with first and last frame context
 
   await page.getByRole("button", { name: "Video", exact: true }).click();
   const fileChooserPromise = page.waitForEvent("filechooser");
-  await page.getByRole("button", { name: /Drop assets here or choose files/ }).click();
+  await page.locator('.frame-upload[data-asset-drop-target="inputs-first_frame"]').click();
   const fileChooser = await fileChooserPromise;
   await fileChooser.setFiles([
     { name: "planner-first-frame.png", mimeType: "image/png", buffer: Buffer.from(TINY_PNG_BASE64, "base64") },
     { name: "planner-last-frame.png", mimeType: "image/png", buffer: Buffer.from(TINY_PNG_BASE64, "base64") },
   ]);
-  await chooseInputRole(page, "planner-first-frame.png", "First frame");
-  await chooseInputRole(page, "planner-last-frame.png", "Last frame");
+  await expect(page.getByRole("combobox", { name: "Role for planner-first-frame.png" })).toContainText("First frame");
+  await expect(page.getByRole("combobox", { name: "Role for planner-last-frame.png" })).toContainText("Last frame");
 
   const originalPrompt = "Move smoothly from @1 to @2 over five seconds.";
   const prompt = page.getByRole("combobox", { name: /^Prompt/ });

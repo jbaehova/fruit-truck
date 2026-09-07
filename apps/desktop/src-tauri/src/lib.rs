@@ -1437,18 +1437,32 @@ fn abort_asset_upload(
 }
 
 #[tauri::command]
-async fn pick_and_import_assets(app: tauri::AppHandle) -> Result<Vec<ManagedAssetFile>, String> {
+async fn pick_and_import_assets(
+    app: tauri::AppHandle,
+    media_kinds: Option<Vec<String>>,
+) -> Result<Vec<ManagedAssetFile>, String> {
     assert_update_mutations_allowed(&app)?;
+    let mut extensions = Vec::new();
+    for (kind, supported) in [
+        ("image", &["png", "jpg", "jpeg", "webp", "gif"][..]),
+        ("video", &["mp4", "mov", "webm"][..]),
+        ("audio", &["mp3", "wav", "flac", "m4a", "aac"][..]),
+    ] {
+        let accepts_kind = match &media_kinds {
+            Some(kinds) => kinds.iter().any(|value| value == kind),
+            None => true,
+        };
+        if accepts_kind {
+            extensions.extend_from_slice(supported);
+        }
+    }
+    if extensions.is_empty() {
+        return Ok(Vec::new());
+    }
     let selection = app
         .dialog()
         .file()
-        .add_filter(
-            "Images, videos, and audio",
-            &[
-                "png", "jpg", "jpeg", "webp", "gif", "mp4", "mov", "webm", "mp3", "wav", "flac",
-                "m4a", "aac",
-            ],
-        )
+        .add_filter("Supported media", &extensions)
         .blocking_pick_files();
     let Some(files) = selection else {
         return Ok(Vec::new());

@@ -48,6 +48,7 @@ export function InputTray({
   onChange,
   onImport,
   onPick,
+  onMention,
 }: {
   references: DraftReference[];
   assets: SessionAsset[];
@@ -56,7 +57,8 @@ export function InputTray({
   error?: string | null;
   onChange: (references: DraftReference[]) => void;
   onImport: (files: FileList | File[]) => Promise<SessionAsset[]>;
-  onPick: () => Promise<SessionAsset[]>;
+  onPick: (kinds: SessionAsset["kind"][]) => Promise<SessionAsset[]>;
+  onMention: (slot: number) => void;
 }) {
   const { t } = useI18n();
   const [dragging, setDragging] = useState(false);
@@ -68,12 +70,24 @@ export function InputTray({
   const canAdd = (["image", "video", "audio"] as const).some((kind) =>
     availableInputRoles(support, references, assets, { id: "incoming", kind }).length > 0);
 
-  const addAssets = useCallback((incoming: SessionAsset[]) => {
+  const frameRoles = options.image.filter((role) => role !== "reference");
+  const frameOnly = support.mode === "video" && support.referenceLimit === 0 && frameRoles.length > 0;
+  const hasDeclaredInputs = limit > 0;
+  const showFrameUploads = support.mode === "video" && frameRoles.length > 0 && !references.some((reference) => reference.role === "reference");
+  const hasFrames = references.some((reference) => reference.role !== "reference" && frameRoles.includes(reference.role));
+  const displayLimit = hasFrames && !support.mixFramesAndReferences ? frameRoles.length : limit;
+
+  const addAssets = useCallback((incoming: SessionAsset[], preferredRole?: ReferenceRole) => {
     const next = [...references];
     let rejected = 0;
     for (const asset of incoming) {
-      if (next.some((reference) => reference.assetId === asset.id)) { rejected += 1; continue; }
-      const role = availableInputRoles(support, next, [...assets, ...incoming], asset)[0];
+      const available = availableInputRoles(support, next, [...assets, ...incoming], asset)
+        .filter((role) => !preferredRole || (preferredRole === "reference" ? role === "reference" : role !== "reference"));
+      const role = preferredRole && available.includes(preferredRole)
+        ? preferredRole
+        : preferredRole === "last_frame" ? undefined : available[0];
+      if (next.some((reference) => reference.assetId === asset.id)
+        && !(preferredRole && role !== "reference" && !next.some((reference) => reference.assetId === asset.id && reference.role === role))) { rejected += 1; continue; }
       if (!role) { rejected += 1; continue; }
       next.push({
         assetId: asset.id,
@@ -87,14 +101,59 @@ export function InputTray({
   }, [assets, onChange, references, support, t]);
 
   const addFiles = async (files: FileList | File[]) => addAssets(await onImport(files));
-  const pickFiles = async () => addAssets(await onPick());
+  const pickFiles = async (role?: ReferenceRole) => {
+    const kinds = (["image", "video", "audio"] as const).filter((kind) =>
+      availableInputRoles(support, references, assets, { id: "incoming", kind })
+        .some((candidate) => !role || (role === "reference" ? candidate === "reference" : candidate === role)));
+    if (kinds.length) addAssets(await onPick(kinds), role);
+  };
 
-  useEffect(() => subscribeToAssetPointerDrop("inputs", (assetId) => {
-    if (!canAdd) return;
-    setDragging(false);
-    const asset = assetMap.get(assetId);
-    if (asset) addAssets([asset]);
-  }), [addAssets, assetMap, canAdd]);
+  const frameUploads = showFrameUploads ? (
+    <div className="frame-inputs">
+      {frameRoles.filter((role) => !references.some((reference) => reference.role === role)).map((role) => (
+        <Button type="button" key={role} variant="ghost" className="dropzone frame-upload"
+          data-asset-drop-target={`inputs-${role}`}
+          disabled={!availableInputRoles(support, references, assets, { id: "incoming", kind: "image" }).includes(role)}
+          onClick={() => void pickFiles(role)}
+          onPointerUp={(event) => {
+            const assetId = readActiveAssetDragId();
+            if (!assetId) return;
+            event.stopPropagation();
+            const asset = assetMap.get(assetId);
+            if (asset) addAssets([asset], role);
+            clearAssetDragData();
+            setDragging(false);
+          }}
+          onDrop={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            setDragging(false);
+            const assetId = readAssetDragId(event.dataTransfer);
+            const asset = assetId ? assetMap.get(assetId) : undefined;
+            if (asset) addAssets([asset], role);
+            else if (event.dataTransfer.files.length) void onImport(event.dataTransfer.files).then((incoming) => addAssets(incoming, role));
+          }}
+        >
+          <ImagePlus />
+          <span>{t(ROLE_LABEL_KEYS[role])}</span>
+          <small>{t(role === "last_frame" && support.rules?.lastFrameRequiresFirstFrame && !references.some((reference) => reference.role === "first_frame") ? "addFirstFrameBeforeLast" : "addFrameImage")}</small>
+        </Button>
+      ))}
+    </div>
+  ) : null;
+
+  useEffect(() => {
+    const unsubscribe = [undefined, "first_frame", "last_frame"].map((role) =>
+      subscribeToAssetPointerDrop(role ? `inputs-${role}` : "inputs", (assetId) => {
+        if (!canAdd) return;
+        setDragging(false);
+        const asset = assetMap.get(assetId);
+        if (!asset) return;
+        if (role && !availableInputRoles(support, references, assets, asset).includes(role as ReferenceRole)) return;
+        addAssets([asset], role as ReferenceRole | undefined);
+      }));
+    return () => unsubscribe.forEach((stop) => stop());
+  }, [addAssets, assetMap, assets, canAdd, references, support]);
 
   return (
     <Field.Root
@@ -149,27 +208,30 @@ export function InputTray({
       }}
     >
       <div className="section-label-row">
-        <div><span className="section-label">{t("numberedInputs")}</span><small>{enabled ? t("inputCountHint", { count: references.length, limit }) : t("inputsUnsupported")}</small></div>
+        <div><span className="section-label">{t(frameOnly || hasFrames ? "inputImages" : "numberedInputs")}</span>{hasDeclaredInputs ? <small>{t("inputCountHint", { count: references.length, limit: displayLimit })}</small> : null}</div>
         {references.length ? <Button type="button" variant="ghost" size="xs" onClick={() => onChange([])}>{t("clear")}</Button> : null}
       </div>
-      <div className="input-support-summary" aria-label={t("modelInputSupport")}>
-        <span>{t("inputImageLimit", { count: support.referenceLimits.image })}</span>
-        {support.referenceLimits.video > 0 ? <span>{t("inputVideoLimit", { count: support.referenceLimits.video })}</span> : null}
+      {!frameOnly && !hasFrames && hasDeclaredInputs ? <div className="input-support-summary" aria-label={t("modelInputSupport")}>
+        {support.referenceLimits.image > 0 ? <span>{t("inputImageLimit", { count: support.referenceLimits.image })}</span> : null}
+        {support.referenceLimits.video > 0 ? <span>{t(availableInputRoles(support, [], [], { id: "incoming", kind: "video" }).includes("reference") ? "inputVideoLimit" : "inputVideoLinkLimit", { count: support.referenceLimits.video })}</span> : null}
         {support.referenceLimits.audio > 0 ? <span>{t("inputAudioLimit", { count: support.referenceLimits.audio })}</span> : null}
-        {support.mode === "video" ? <>
-          <span>{t("inputFrameLimit", { frame: t("firstFrame"), count: options.image.includes("first_frame") ? 1 : 0 })}</span>
-          <span>{t("inputFrameLimit", { frame: t("lastFrame"), count: options.image.includes("last_frame") ? 1 : 0 })}</span>
-          {support.referenceLimit > 0 && options.image.some((role) => role !== "reference") && !support.mixFramesAndReferences
-            ? <small>{t("inputStylesExclusive")}</small> : null}
-          {!enabled && limit > 0 ? <small>{t("inputUploadUnverified")}</small> : null}
-        </> : null}
+        {frameRoles.length && !showFrameUploads ? <span>{frameRoles.map((role) => t(ROLE_LABEL_KEYS[role])).join(" / ")}</span> : null}
+        {support.rules?.homogeneousReferenceImages && support.rules.referenceImageType === "asset" ? <small className="reference-type-hint">{t("assetReferenceTypeHint")}</small> : null}
         {support.minimum > 0 ? <small>{t("inputMinimum", { count: support.minimum })}</small> : null}
-      </div>
+      </div> : null}
+      {support.mode === "video" && support.referenceLimit > 0 && frameRoles.length > 0 && !support.mixFramesAndReferences ? <p className="input-combination-hint">{t("inputStylesExclusive")}</p> : null}
       {dragging ? <div className="reference-drop-indicator"><Upload /> {t("releaseToAttach")}</div> : null}
-      {!references.length ? (
+      {!references.length ? showFrameUploads ? (
+        <>
+          {frameUploads}
+          {support.referenceLimit > 0 ? <Button type="button" variant="outline" size="sm" className="add-reference" disabled={!["image", "video", "audio"].some((kind) => availableInputRoles(support, references, assets, { id: "incoming", kind: kind as SessionAsset["kind"] }).includes("reference"))} onClick={() => void pickFiles("reference")}><ImagePlus /> {t("addReferenceAssets")}</Button> : null}
+        </>
+      ) : !hasDeclaredInputs ? (
+        <p className="input-empty-hint">{t(!support.model || !support.route ? "chooseModelForInputs" : support.mode === "video" && support.rules?.referenceSource === "none" ? "videoInputDetailsUnavailable" : "textOnlyInput")}</p>
+      ) : (
         <Button type="button" variant="ghost" disabled={!canAdd} className={`dropzone ${dragging ? "dragging" : ""}`} onClick={() => void pickFiles()}>
           {enabled ? <Upload /> : <ImagePlus />}
-          <span>{enabled ? t("dropAssets") : t("textOnlyInput")}</span>
+          <span>{enabled ? t("dropAssets") : t("inputUploadUnavailable")}</span>
           {enabled ? <small>{t("stableNumbersHint")}</small> : null}
         </Button>
       ) : (
@@ -193,7 +255,7 @@ export function InputTray({
             return (
               <div className="reference-row" key={reference.slot}>
                 <AssetPreview asset={asset} />
-                <span className="reference-order">@{reference.slot}</span>
+                <Button type="button" variant="ghost" size="xs" className="reference-order" aria-label={t("mentionInput", { slot: reference.slot })} onClick={() => onMention(reference.slot)}>@{reference.slot}</Button>
                 <span className="reference-name"><strong>{asset.name}</strong><small>{asset.mimeType}</small></span>
                 <div className="reference-controls">
                   <Field.Root>
@@ -214,7 +276,7 @@ export function InputTray({
                         <SelectContent>{Object.entries(roleItems).map(([role, label]) => <SelectItem key={role} value={role} disabled={!availableRoles.includes(role as ReferenceRole)}>{label}</SelectItem>)}</SelectContent>
                       </Select>
                     </Field.Root>
-                  <Field.Root>
+                  {reference.role === "reference" ? <Field.Root>
                     <Field.Label className="sr-only" nativeLabel={false} render={<div />}>{t("purposeFor", { name: asset.name })}</Field.Label>
                     <Select items={Object.fromEntries(validPurposes.map((purpose) => [purpose, t(PURPOSE_LABEL_KEYS[purpose])]))} value={reference.purpose} disabled={validPurposes.length === 1} onValueChange={(purpose) => {
                       if (!purpose) return;
@@ -225,13 +287,13 @@ export function InputTray({
                       <SelectTrigger size="sm" className="role-select"><SelectValue /></SelectTrigger>
                       <SelectContent>{validPurposes.map((purpose) => <SelectItem key={purpose} value={purpose}>{t(PURPOSE_LABEL_KEYS[purpose])}</SelectItem>)}</SelectContent>
                     </Select>
-                  </Field.Root>
+                  </Field.Root> : null}
                 </div>
                 <Button type="button" variant="ghost" size="icon-xs" aria-label={t("remove")} onClick={() => onChange(references.filter((item) => item.slot !== reference.slot))}><Trash2 /></Button>
               </div>
             );
           })}
-          {references.length < limit ? <Button type="button" disabled={!canAdd} variant="outline" size="sm" className="add-reference" onClick={() => void pickFiles()}><ImagePlus /> {t("addInput")}</Button> : null}
+          {showFrameUploads ? frameUploads : references.length < limit ? <Button type="button" disabled={!canAdd} variant="outline" size="sm" className="add-reference" onClick={() => void pickFiles()}><ImagePlus /> {t("addInput")}</Button> : null}
         </div>
       )}
       {error ? <Field.Error className="field-error reference-error" role="alert" match>{error}</Field.Error> : null}

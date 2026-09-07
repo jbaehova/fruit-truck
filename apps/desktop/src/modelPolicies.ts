@@ -23,7 +23,9 @@ export type VideoSupportMatrixEntry = {
   limit: number;
   aggregateLimit?: number;
   supported: boolean;
+  /** True only when selected endpoint metadata or a checked fixture proves the transport. */
   verified: boolean;
+  evidence: "endpoint_metadata" | "contract_fixture" | "openrouter_contract" | "none";
   reason: string;
 };
 
@@ -67,6 +69,28 @@ export type VideoInputPolicy = {
   sources: PolicySource[];
 };
 
+export type VideoInputRules = {
+  referenceKinds: InputMediaKind[];
+  referenceLimits: Record<InputMediaKind, number>;
+  totalReferenceLimit: number;
+  frameImages: Array<"first_frame" | "last_frame">;
+  combination: "exclusive";
+  referenceSource: "endpoint_metadata" | "model_metadata" | "curated_contract" | "curated_none" | "none";
+  frameSource: "endpoint_metadata" | "video_catalog" | "none";
+  combinationSource: "openrouter_api";
+  referenceImageType?: "asset";
+  homogeneousReferenceImages: boolean;
+  referencePurposeTransport: "prompt_only";
+  referenceTypeTransport?: "implicit_provider_adapter";
+  lastFrameRequiresFirstFrame: boolean;
+  referenceOptions?: {
+    durations?: number[];
+    aspectRatios?: string[];
+    resolutions?: string[];
+    sizes?: string[];
+  };
+};
+
 const OPENROUTER_VIDEO_SOURCE: PolicySource = {
   label: "OpenRouter video generation",
   url: "https://openrouter.ai/docs/guides/overview/multimodal/video-generation",
@@ -75,12 +99,22 @@ const OPENROUTER_VIDEO_SOURCE: PolicySource = {
 const OPENROUTER_CREATE_SOURCE: PolicySource = {
   label: "OpenRouter video request API",
   url: "https://openrouter.ai/docs/api/api-reference/video-generation/create-videos",
-  reviewedAt: "2026-08-13",
+  reviewedAt: "2026-09-07",
+};
+const OPENROUTER_SEEDANCE_25_SOURCE: PolicySource = {
+  label: "OpenRouter Seedance 2.5 model contract",
+  url: "https://openrouter.ai/bytedance/seedance-2.5",
+  reviewedAt: "2026-09-07",
 };
 const BYTEPLUS_SEEDANCE_SOURCE: PolicySource = {
   label: "BytePlus Seedance 2.0 API",
   url: "https://docs.byteplus.com/en/docs/modelark/1520757",
   reviewedAt: "2026-08-13",
+};
+const BYTEPLUS_SEEDANCE_25_SOURCE: PolicySource = {
+  label: "BytePlus Seedance 2.x enhanced video generation",
+  url: "https://docs.byteplus.com/en/docs/Byteplus_LAS/video_gen_enhanced",
+  reviewedAt: "2026-09-07",
 };
 const RUNWAY_INPUT_SOURCE: PolicySource = {
   label: "Runway input parameters",
@@ -97,14 +131,22 @@ const GOOGLE_VEO_SOURCE: PolicySource = {
   url: "https://docs.cloud.google.com/vertex-ai/generative-ai/docs/video/use-reference-images-to-guide-video-generation",
   reviewedAt: "2026-08-13",
 };
+const MINIMAX_VIDEO_SOURCE: PolicySource = {
+  label: "MiniMax video generation guide",
+  url: "https://platform.minimax.io/docs/guides/video-generation",
+  reviewedAt: "2026-09-07",
+};
 
 const RUNWAY_IMAGE_MIME = ["image/jpeg", "image/jpg", "image/png", "image/webp"];
 const RUNWAY_VIDEO_CODECS = ["h264", "hevc", "av1", "vp8", "vp9", "prores", "mpeg2video", "mjpeg", "theora", "flv1", "msmpeg4v3"];
 const RUNWAY_AUDIO_CODECS = ["mp3", "aac", "flac", "alac", "pcm_s16le", "pcm_s24le", "pcm_s32le", "pcm_f32le", "pcm_f64le"];
+const SEEDANCE_IMAGE_MIME = [
+  "image/jpeg", "image/jpg", "image/png", "image/webp", "image/bmp", "image/tiff", "image/gif", "image/heic", "image/heif",
+];
 
 const DEFAULT_POLICY: VideoInputPolicy = {
   references: {},
-  combination: "frame_wins",
+  combination: "exclusive",
   sources: [OPENROUTER_VIDEO_SOURCE],
 };
 
@@ -117,8 +159,10 @@ const VIDEO_POLICIES: Array<{ test: (modelId: string) => boolean; policy: VideoI
       totalReferenceLimit: 15,
       audioRequiresVisual: true,
       referenceVideoDuration: { min: 2, max: 15, totalMax: 15 },
-      image: { minWidth: 300, minHeight: 300, maxWidth: 6000, maxHeight: 6000, minRatio: .4, maxRatio: 2.5, maxBytes: 30 * 1024 * 1024, allowedMimeTypes: RUNWAY_IMAGE_MIME },
-      video: { minWidth: 300, minHeight: 300, maxWidth: 6000, maxHeight: 6000, minRatio: .4, maxRatio: 2.5, maxBytes: 200 * 1024 * 1024 },
+      referenceAudioDuration: { min: 2, max: 15, totalMax: 15 },
+      image: { minWidth: 300, minHeight: 300, maxWidth: 6000, maxHeight: 6000, minRatio: .4, maxRatio: 2.5, maxBytes: 30 * 1024 * 1024, allowedMimeTypes: SEEDANCE_IMAGE_MIME },
+      video: { minWidth: 300, minHeight: 300, maxWidth: 6000, maxHeight: 6000, minRatio: .4, maxRatio: 2.5, maxBytes: 200 * 1024 * 1024, allowedMimeTypes: ["video/mp4", "video/quicktime"] },
+      audio: { maxBytes: 15 * 1024 * 1024, allowedMimeTypes: ["audio/wav", "audio/x-wav", "audio/mpeg", "audio/mp3"] },
       sources: [BYTEPLUS_SEEDANCE_SOURCE, OPENROUTER_CREATE_SOURCE],
     },
   },
@@ -128,25 +172,34 @@ const VIDEO_POLICIES: Array<{ test: (modelId: string) => boolean; policy: VideoI
       references: { image: 30, video: 10, audio: 10 },
       combination: "exclusive",
       totalReferenceLimit: 50,
-      audioRequiresVisual: true,
-      referenceVideoDuration: { totalMax: 30 },
-      referenceAudioDuration: { totalMax: 30 },
-      image: { minRatio: .4, maxRatio: 4, allowedMimeTypes: RUNWAY_IMAGE_MIME },
-      video: { minHeight: 480, allowedCodecs: RUNWAY_VIDEO_CODECS },
-      audio: { allowedCodecs: RUNWAY_AUDIO_CODECS },
-      sources: [RUNWAY_CHANGELOG_SOURCE, RUNWAY_INPUT_SOURCE, OPENROUTER_CREATE_SOURCE],
+      referenceVideoDuration: { min: 2, max: 30, totalMax: 30 },
+      referenceAudioDuration: { min: 2, max: 30, totalMax: 30 },
+      referenceResolutionCap: "720p",
+      image: { minWidth: 300, minHeight: 300, maxWidth: 6000, maxHeight: 6000, minRatio: .4, maxRatio: 2.5, maxBytes: 30 * 1024 * 1024, allowedMimeTypes: SEEDANCE_IMAGE_MIME },
+      video: { minWidth: 300, minHeight: 300, maxWidth: 6000, maxHeight: 6000, minRatio: .4, maxRatio: 2.5, maxBytes: 200 * 1024 * 1024, allowedMimeTypes: ["video/mp4", "video/quicktime"] },
+      audio: { maxBytes: 15 * 1024 * 1024, allowedMimeTypes: ["audio/wav", "audio/x-wav", "audio/mpeg", "audio/mp3"] },
+      sources: [OPENROUTER_SEEDANCE_25_SOURCE, BYTEPLUS_SEEDANCE_25_SOURCE, OPENROUTER_CREATE_SOURCE],
     },
   },
   {
     test: (id) => id === "minimax/hailuo-3",
     policy: {
-      references: { image: 9, video: 1, audio: 1 },
+      references: { image: 9, video: 3, audio: 3 },
       combination: "exclusive",
-      audioRequiresImage: true,
-      image: { minRatio: .2, maxRatio: 4, allowedMimeTypes: RUNWAY_IMAGE_MIME },
-      video: { allowedCodecs: RUNWAY_VIDEO_CODECS },
-      audio: { allowedCodecs: RUNWAY_AUDIO_CODECS },
-      sources: [RUNWAY_INPUT_SOURCE, RUNWAY_CHANGELOG_SOURCE],
+      totalReferenceLimit: 12,
+      referenceVideoDuration: { min: 2, max: 15, totalMax: 15 },
+      referenceAudioDuration: { min: 2, max: 15, totalMax: 15 },
+      image: {
+        minWidth: 256,
+        minHeight: 256,
+        maxWidth: 5760,
+        maxHeight: 5760,
+        maxBytes: 30 * 1024 * 1024,
+        allowedMimeTypes: ["image/jpg", "image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"],
+      },
+      video: { maxBytes: 50 * 1024 * 1024, allowedCodecs: ["h264", "h265", "hevc"] },
+      audio: { maxBytes: 15 * 1024 * 1024, allowedMimeTypes: ["audio/wav", "audio/x-wav", "audio/mpeg", "audio/mp3"] },
+      sources: [MINIMAX_VIDEO_SOURCE, OPENROUTER_CREATE_SOURCE],
     },
   },
   {
@@ -166,7 +219,7 @@ const VIDEO_POLICIES: Array<{ test: (modelId: string) => boolean; policy: VideoI
     test: (id) => id === "runway/aleph-2",
     policy: {
       references: { image: 5, video: 1 },
-      combination: "allow",
+      combination: "exclusive",
       referenceVideoDuration: { min: 2, max: 30 },
       video: { maxHeight: 1080, maxFps: 30, allowedCodecs: RUNWAY_VIDEO_CODECS },
       sources: [RUNWAY_INPUT_SOURCE, RUNWAY_CHANGELOG_SOURCE],
@@ -178,15 +231,15 @@ const VIDEO_POLICIES: Array<{ test: (modelId: string) => boolean; policy: VideoI
   },
   {
     test: (id) => id === "runway/gen-4.5",
-    policy: { references: {}, combination: "frame_wins", image: { minRatio: .5, maxRatio: 2, allowedMimeTypes: RUNWAY_IMAGE_MIME }, sources: [RUNWAY_INPUT_SOURCE] },
+    policy: { references: {}, combination: "exclusive", image: { minRatio: .5, maxRatio: 2, allowedMimeTypes: RUNWAY_IMAGE_MIME }, sources: [RUNWAY_INPUT_SOURCE] },
   },
   {
     test: (id) => id === "alibaba/wan-2.7",
-    policy: { references: { image: 3 }, combination: "frame_wins", sources: [OPENROUTER_VIDEO_SOURCE] },
+    policy: { references: { image: 3 }, combination: "exclusive", sources: [OPENROUTER_VIDEO_SOURCE] },
   },
   {
     test: (id) => id === "alibaba/wan-2.6",
-    policy: { references: { video: 1, audio: 1 }, combination: "allow", audioRequiresVisual: true, sources: [OPENROUTER_VIDEO_SOURCE] },
+    policy: { references: { video: 1, audio: 1 }, combination: "exclusive", audioRequiresVisual: true, sources: [OPENROUTER_VIDEO_SOURCE] },
   },
   {
     test: (id) => /^alibaba\/happyhorse-1\./.test(id),
@@ -201,12 +254,12 @@ const VIDEO_POLICIES: Array<{ test: (modelId: string) => boolean; policy: VideoI
     policy: { references: { image: 1 }, combination: "exclusive", sources: [OPENROUTER_VIDEO_SOURCE] },
   },
   {
-    test: (id) => /^google\/veo-3\.1/.test(id),
-    policy: { references: { image: 3 }, combination: "frame_wins", image: { minRatio: .5, maxRatio: 2, allowedMimeTypes: ["image/jpeg", "image/png"] }, sources: [OPENROUTER_VIDEO_SOURCE, GOOGLE_VEO_SOURCE] },
+    test: (id) => id === "google/veo-3.1" || id === "google/veo-3.1-fast",
+    policy: { references: { image: 3 }, combination: "exclusive", image: { allowedMimeTypes: ["image/jpeg", "image/png"] }, sources: [OPENROUTER_VIDEO_SOURCE, GOOGLE_VEO_SOURCE] },
   },
   {
     test: (id) => id === "openai/sora-2-pro",
-    policy: { references: { image: 1 }, combination: "frame_wins", sources: [OPENROUTER_VIDEO_SOURCE] },
+    policy: { references: { image: 1 }, combination: "exclusive", sources: [OPENROUTER_VIDEO_SOURCE] },
   },
 ];
 
@@ -215,6 +268,106 @@ export function videoInputPolicy(modelId: string): VideoInputPolicy {
 }
 
 const VIDEO_REFERENCE_TRANSPORTS: VideoReferenceTransport[] = ["https_url", "signed_url", "data_url", "http_url", "local_file"];
+const OPENROUTER_FRAME_IMAGE_TRANSPORTS: VideoReferenceTransport[] = ["https_url", "signed_url", "data_url"];
+
+type CuratedOpenRouterReferenceContract = {
+  kinds: InputMediaKind[];
+  limits: Partial<Record<InputMediaKind, number>>;
+  totalLimit: number;
+};
+
+const NO_OPENROUTER_REFERENCES: CuratedOpenRouterReferenceContract = {
+  kinds: [],
+  limits: {},
+  totalLimit: 0,
+};
+
+/**
+ * OpenRouter's video catalog currently omits normalized general-reference
+ * fields. Keep the fallback deliberately narrow: each positive entry needs
+ * both OpenRouter evidence for the selected model's reference workflow and a
+ * documented provider cardinality. A missing entry means unknown, not zero.
+ */
+function curatedOpenRouterReferenceContract(modelId: string): CuratedOpenRouterReferenceContract | undefined {
+  if (/^bytedance\/seedance-2\.0(?:$|-)/.test(modelId)) {
+    return { kinds: ["image", "video", "audio"], limits: { image: 9, video: 3, audio: 3 }, totalLimit: 15 };
+  }
+  switch (modelId) {
+    case "bytedance/seedance-2.5":
+      return { kinds: ["image", "video", "audio"], limits: { image: 30, video: 10, audio: 10 }, totalLimit: 50 };
+    case "alibaba/wan-3.0-prime":
+    case "alibaba/wan-3.0":
+      return { kinds: ["image"], limits: { image: 10 }, totalLimit: 10 };
+    case "minimax/hailuo-3":
+      return { kinds: ["image"], limits: { image: 9 }, totalLimit: 9 };
+    case "openai/sora-2-pro":
+      return { kinds: ["image"], limits: { image: 1 }, totalLimit: 1 };
+    case "google/veo-3.1":
+    case "google/veo-3.1-fast":
+      return { kinds: ["image"], limits: { image: 3 }, totalLimit: 3 };
+    case "google/veo-3.1-lite":
+      return NO_OPENROUTER_REFERENCES;
+    default:
+      return undefined;
+  }
+}
+
+function documentedOpenRouterReferenceTransports(modelId: string, kind: InputMediaKind): VideoReferenceTransport[] {
+  if (!documentedOpenRouterVideoReferenceKinds(modelId).includes(kind)) return [];
+  // The normalized OpenRouter image reference shape accepts a media URL string,
+  // while the reviewed provider adapters accept inline image bytes. BytePlus
+  // also accepts Base64 audio. Reference videos require a remotely fetchable
+  // URL, so a managed local video stays unavailable without an upload bridge.
+  return kind === "video"
+    ? ["https_url", "signed_url"]
+    : ["https_url", "signed_url", "data_url"];
+}
+
+/**
+ * Reference kinds documented by OpenRouter even though its public video-model
+ * response does not currently expose `input_reference_types`. The registry
+ * combines OpenRouter's selected-model workflow description with documented
+ * provider limits. Audio and video references remain limited to the BytePlus
+ * Seedance models named by OpenRouter's request schema.
+ */
+export function documentedOpenRouterVideoReferenceKinds(modelId: string): InputMediaKind[] {
+  return curatedOpenRouterReferenceContract(modelId)?.kinds ?? [];
+}
+
+function hasCuratedOpenRouterVideoContract(modelId: string): boolean {
+  return curatedOpenRouterReferenceContract(modelId) != null;
+}
+
+function curatedVideoReferenceOptions(modelId: string): VideoInputRules["referenceOptions"] {
+  if (modelId === "google/veo-3.1") {
+    return {
+      durations: [8],
+      aspectRatios: ["16:9", "9:16"],
+      resolutions: ["720p", "1080p"],
+      sizes: ["1280x720", "720x1280", "1920x1080", "1080x1920"],
+    };
+  }
+  if (modelId === "google/veo-3.1-fast") {
+    return {
+      durations: [4, 6, 8],
+      aspectRatios: ["16:9", "9:16"],
+      resolutions: ["720p", "1080p"],
+      sizes: ["1280x720", "720x1280", "1920x1080", "1080x1920"],
+    };
+  }
+  return undefined;
+}
+
+function curatedLastFrameRequiresFirstFrame(modelId: string): boolean {
+  return /^google\/veo-3\.1(?:$|-)/.test(modelId)
+    || modelId === "bytedance/seedance-2.5"
+    || /^bytedance\/seedance-2\.0(?:$|-)/.test(modelId)
+    || modelId === "bytedance/seedance-1-5-pro"
+    || modelId === "alibaba/wan-2.7"
+    || modelId === "kwaivgi/kling-v3.0-pro"
+    || modelId === "kwaivgi/kling-v3.0-std"
+    || modelId === "kwaivgi/kling-video-o1";
+}
 
 function normalizedTransport(value: unknown): VideoReferenceTransport | null {
   const normalized = String(value ?? "").toLowerCase().replace(/[\s-]+/g, "_");
@@ -226,16 +379,36 @@ function normalizedTransport(value: unknown): VideoReferenceTransport | null {
   return null;
 }
 
-function endpointTransports(endpoint: VideoModelEndpoint | undefined, kind: InputMediaKind): VideoReferenceTransport[] {
-  const raw = endpoint?.reference_transports ?? endpoint?.input_reference_transports;
-  if (Array.isArray(raw)) return raw.map(normalizedTransport).filter((value): value is VideoReferenceTransport => value != null);
-  if (raw && typeof raw === "object") {
-    const values = (raw as Partial<Record<InputMediaKind, unknown[]>>)[kind];
-    return Array.isArray(values)
-      ? values.map(normalizedTransport).filter((value): value is VideoReferenceTransport => value != null)
-      : [];
+type ReferenceTransportDeclaration = {
+  declared: boolean;
+  transports: VideoReferenceTransport[];
+};
+
+function referenceTransportDeclaration(
+  raw: VideoModelEndpoint["reference_transports"] | undefined,
+  kind: InputMediaKind,
+): ReferenceTransportDeclaration {
+  if (Array.isArray(raw)) {
+    return {
+      declared: true,
+      transports: raw.map(normalizedTransport).filter((value): value is VideoReferenceTransport => value != null),
+    };
   }
-  return [];
+  if (raw && typeof raw === "object") {
+    if (!Object.prototype.hasOwnProperty.call(raw, kind)) return { declared: false, transports: [] };
+    const values = (raw as Partial<Record<InputMediaKind, unknown[]>>)[kind];
+    return {
+      declared: true,
+      transports: Array.isArray(values)
+        ? values.map(normalizedTransport).filter((value): value is VideoReferenceTransport => value != null)
+        : [],
+    };
+  }
+  return { declared: false, transports: [] };
+}
+
+function endpointTransportDeclaration(endpoint: VideoModelEndpoint | undefined, kind: InputMediaKind): ReferenceTransportDeclaration {
+  return referenceTransportDeclaration(endpoint?.reference_transports ?? endpoint?.input_reference_transports ?? undefined, kind);
 }
 
 function endpointReferenceLimit(endpoint: VideoModelEndpoint | undefined): number | undefined {
@@ -249,17 +422,80 @@ function endpointReferenceLimit(endpoint: VideoModelEndpoint | undefined): numbe
     : undefined;
 }
 
-function modelTransports(model: VideoModel, kind: InputMediaKind): VideoReferenceTransport[] {
-  if (model.reference_transport_source !== "openrouter_endpoint" && model.reference_transport_source !== "contract_fixture") return [];
-  const raw = model.reference_transports;
-  if (Array.isArray(raw)) return raw.map(normalizedTransport).filter((value): value is VideoReferenceTransport => value != null);
-  if (raw && typeof raw === "object") {
-    const values = (raw as Partial<Record<InputMediaKind, unknown[]>>)[kind];
-    return Array.isArray(values)
-      ? values.map(normalizedTransport).filter((value): value is VideoReferenceTransport => value != null)
-      : [];
+/**
+ * Resolve one OpenRouter input rule set for both UI admission and request
+ * validation. Route metadata wins when present. The public video catalog does
+ * not currently declare reference kinds, so a dated curated contract may fill
+ * only those missing model-level fields. OpenRouter always treats frame_images
+ * as image-to-video when both input styles are present, so mixed styles are
+ * never represented as jointly supported.
+ */
+export function resolveVideoInputRules(model: VideoModel, endpoint?: VideoModelEndpoint): VideoInputRules {
+  const curated = curatedOpenRouterReferenceContract(model.id);
+  const curatedKinds = curated?.kinds ?? [];
+  const endpointAggregate = endpointReferenceLimit(endpoint);
+  const modelAggregate = model.max_input_references == null ? undefined : Math.max(0, model.max_input_references);
+  const modelKinds = model.input_reference_types ?? curatedKinds;
+  const endpointHasKinds = endpoint?.input_reference_types != null;
+  const effectiveKinds = endpointHasKinds ? endpoint!.input_reference_types ?? [] : modelKinds;
+  const effectiveAggregate = endpointAggregate ?? modelAggregate;
+  const explicitlyDisabled = endpoint?.supports_references === false
+    || effectiveAggregate === 0
+    || effectiveKinds.length === 0;
+  const referenceKinds = (explicitlyDisabled ? [] : effectiveKinds)
+    .filter((kind): kind is InputMediaKind => kind === "image" || kind === "video" || kind === "audio");
+  const curatedAggregate = curated?.totalLimit;
+  const baseAggregate = effectiveAggregate != null && curatedAggregate != null
+    ? Math.min(effectiveAggregate, curatedAggregate)
+    : effectiveAggregate ?? curatedAggregate;
+  const totalReferenceLimit = referenceKinds.length === 0
+    ? 0
+    : baseAggregate ?? referenceKinds.length;
+  const referenceLimits = Object.fromEntries((["image", "video", "audio"] as const).map((kind) => {
+    if (!referenceKinds.includes(kind) || totalReferenceLimit === 0) return [kind, 0];
+    const kindLimit = curated?.limits[kind] ?? effectiveAggregate ?? 1;
+    return [kind, Math.min(kindLimit, totalReferenceLimit)];
+  })) as Record<InputMediaKind, number>;
+  const endpointHasFrameMetadata = endpoint?.supported_frame_images != null;
+  const frameImages = [...new Set((endpointHasFrameMetadata ? endpoint!.supported_frame_images : model.supported_frame_images) ?? [])];
+  const fixedVeoAssetReferences = model.id === "google/veo-3.1" || model.id === "google/veo-3.1-fast";
+  const hasCuratedContract = hasCuratedOpenRouterVideoContract(model.id);
+  const hasEndpointReferenceMetadata = Boolean(endpoint && (
+    endpoint.input_reference_types != null
+    || endpointReferenceLimit(endpoint) != null
+    || endpoint.supports_references != null
+  ));
+  return {
+    referenceKinds,
+    referenceLimits,
+    totalReferenceLimit,
+    frameImages,
+    combination: "exclusive",
+    referenceSource: hasEndpointReferenceMetadata
+      ? "endpoint_metadata"
+      : model.input_reference_types != null || model.max_input_references != null
+        ? "model_metadata"
+        : hasCuratedContract
+          ? curatedKinds.length ? "curated_contract" : "curated_none"
+          : "none",
+    frameSource: endpointHasFrameMetadata
+      ? "endpoint_metadata"
+      : model.supported_frame_images != null ? "video_catalog" : "none",
+    combinationSource: "openrouter_api",
+    ...(fixedVeoAssetReferences ? { referenceImageType: "asset" as const } : {}),
+    homogeneousReferenceImages: fixedVeoAssetReferences,
+    referencePurposeTransport: "prompt_only",
+    ...(fixedVeoAssetReferences ? { referenceTypeTransport: "implicit_provider_adapter" as const } : {}),
+    lastFrameRequiresFirstFrame: curatedLastFrameRequiresFirstFrame(model.id),
+    ...(curatedVideoReferenceOptions(model.id) ? { referenceOptions: curatedVideoReferenceOptions(model.id) } : {}),
+  };
+}
+
+function modelTransportDeclaration(model: VideoModel, kind: InputMediaKind): ReferenceTransportDeclaration {
+  if (model.reference_transport_source !== "openrouter_endpoint" && model.reference_transport_source !== "contract_fixture") {
+    return { declared: false, transports: [] };
   }
-  return [];
+  return referenceTransportDeclaration(model.reference_transports ?? undefined, kind);
 }
 
 export function videoSupportMatrixKey(
@@ -274,48 +510,54 @@ export function videoSupportMatrixKey(
 }
 
 /**
- * Build the conservative video reference capability matrix. Model-level
+ * Build the conservative general-reference capability matrix. Model-level
  * `input_reference_types` is not enough to activate a transport: an endpoint
  * must explicitly declare the transport (or a checked contract fixture must
- * mark the model source as verified). This prevents direct-provider policy
- * notes from accidentally enabling OpenRouter data/local uploads.
+ * mark the model source as verified). The only fallback is a documented,
+ * exact-model OpenRouter contract from the curated reference registry.
+ * Exact first/last frame controls use the separate role-aware capability
+ * returned by `videoReferenceCapability`.
  */
 export function buildVideoSupportMatrix(
   model: VideoModel,
   endpoint?: VideoModelEndpoint,
 ): VideoSupportMatrix {
-  const policy = videoInputPolicy(model.id);
   const endpoints = endpoint ? [endpoint] : model.endpoints?.length ? model.endpoints : [undefined];
   const entries: VideoSupportMatrixEntry[] = [];
-  const modelAggregate = model.max_input_references == null
-    ? undefined
-    : Math.max(0, model.max_input_references);
-  const policyAggregate = policy.totalReferenceLimit == null ? undefined : Math.max(0, policy.totalReferenceLimit);
-  const modelAggregateCandidates = [modelAggregate, policyAggregate].filter((value): value is number => value != null);
-  const modelRouteAggregate = modelAggregateCandidates.length ? Math.min(...modelAggregateCandidates) : undefined;
   for (const candidate of endpoints) {
+    const rules = resolveVideoInputRules(model, candidate);
     // Each hydrated endpoint has its own aggregate limit. Do not combine it
     // with a model-level union or direct-provider policy limit.
-    const aggregateLimit = candidate ? endpointReferenceLimit(candidate) : modelRouteAggregate;
+    const aggregateLimit = rules.totalReferenceLimit;
     for (const kind of ["image", "video", "audio"] as const) {
       const endpointKinds = candidate?.input_reference_types ?? [];
       const declaredKind = endpointKinds.includes(kind);
-      const declaredTransports = endpointTransports(candidate, kind);
-      const modelDeclaredTransports = !candidate ? modelTransports(model, kind) : [];
-      const transports = candidate ? declaredTransports : modelDeclaredTransports;
-      const explicitlySupported = Boolean(candidate && candidate.supports_references !== false && (declaredKind || declaredTransports.length > 0) && declaredTransports.length > 0)
-        || Boolean(!candidate && modelDeclaredTransports.length > 0);
-      const policyLimit = policy.references[kind];
-      const endpointLimit = endpointReferenceLimit(candidate);
-      // Endpoint limits are definitive. Direct-provider policy limits are
-      // only fallback hints for an unhydrated model-level route.
-      const kindCandidates = candidate
-        ? [endpointLimit, aggregateLimit]
-        : [policyLimit, aggregateLimit];
-      const filteredCandidates = kindCandidates.filter((value): value is number => value != null);
-      const limit = filteredCandidates.length ? Math.min(...filteredCandidates) : (explicitlySupported ? 1 : 0);
+      const endpointDeclaration = endpointTransportDeclaration(candidate, kind);
+      const inheritedModelDeclaration = modelTransportDeclaration(model, kind);
+      const declaration = endpointDeclaration.declared ? endpointDeclaration : inheritedModelDeclaration;
+      const documentedKind = documentedOpenRouterVideoReferenceKinds(model.id).includes(kind)
+        && rules.referenceKinds.includes(kind);
+      const usesDocumentedFallback = documentedKind && !declaration.declared;
+      const transports = declaration.declared
+        ? declaration.transports
+        : usesDocumentedFallback
+          ? documentedOpenRouterReferenceTransports(model.id, kind)
+          : [];
+      const explicitlySupported = rules.referenceKinds.includes(kind) && (
+        Boolean(candidate && candidate.supports_references !== false
+          && (declaredKind || declaration.declared || usesDocumentedFallback) && transports.length > 0)
+        || Boolean(!candidate && (declaration.declared || usesDocumentedFallback) && transports.length > 0)
+      );
+      const limit = rules.referenceLimits[kind];
       for (const transport of VIDEO_REFERENCE_TRANSPORTS) {
-        const supported = explicitlySupported && transports.includes(transport);
+        const supported = explicitlySupported && limit > 0 && transports.includes(transport);
+        const evidence = supported
+          ? usesDocumentedFallback
+              ? "openrouter_contract" as const
+              : endpointDeclaration.declared || model.reference_transport_source === "openrouter_endpoint"
+                ? "endpoint_metadata" as const
+                : "contract_fixture" as const
+          : "none" as const;
         const key = videoSupportMatrixKey(model.id, candidate?.endpoint_id ?? candidate?.id, candidate?.provider_slug, kind, transport, supported ? limit : 0);
         entries.push({
           key,
@@ -328,9 +570,12 @@ export function buildVideoSupportMatrix(
           limit: supported ? limit : 0,
           aggregateLimit,
           supported,
-          verified: supported,
+          verified: supported && evidence !== "openrouter_contract",
+          evidence,
           reason: supported
-            ? "The selected OpenRouter endpoint explicitly declares this reference transport."
+            ? usesDocumentedFallback
+              ? "OpenRouter documents this reference workflow and its normalized media URL schema accepts this transport."
+              : "The selected OpenRouter endpoint explicitly declares this reference transport."
             : candidate
               ? "The selected endpoint does not explicitly declare this reference transport."
               : "No verified OpenRouter endpoint transport metadata is available.",
@@ -353,7 +598,34 @@ export function videoReferenceCapability(
   kind: InputMediaKind,
   transport: VideoReferenceTransport,
   endpoint?: VideoModelEndpoint,
+  role: ReferenceRole = "reference",
 ): VideoSupportMatrixEntry {
+  if (role === "first_frame" || role === "last_frame") {
+    const supportedFrames = endpoint?.supported_frame_images != null
+      ? endpoint.supported_frame_images
+      : model.supported_frame_images;
+    const supported = kind === "image"
+      && Boolean(supportedFrames?.includes(role))
+      && OPENROUTER_FRAME_IMAGE_TRANSPORTS.includes(transport);
+    return {
+      key: videoSupportMatrixKey(model.id, endpoint?.endpoint_id ?? endpoint?.id, endpoint?.provider_slug, kind, transport, supported ? 1 : 0),
+      modelId: model.id,
+      endpointId: endpoint?.endpoint_id ?? endpoint?.id,
+      providerSlug: endpoint?.provider_slug,
+      providerName: endpoint?.provider_name,
+      kind,
+      transport,
+      limit: supported ? 1 : 0,
+      supported,
+      verified: false,
+      evidence: supported ? "openrouter_contract" : "none",
+      reason: supported
+        ? `The OpenRouter video catalog declares ${role} and the normalized frame_images schema accepts this media URL transport.`
+        : supportedFrames?.includes(role)
+          ? "OpenRouter frame images require an inline data URL or an HTTPS media URL."
+          : `The selected OpenRouter video model does not declare ${role}.`,
+    };
+  }
   const matrix = buildVideoSupportMatrix(model, endpoint);
   const entry = matrix.entries.find((candidate) => candidate.kind === kind && candidate.transport === transport);
   return entry ?? {
@@ -368,6 +640,7 @@ export function videoReferenceCapability(
     aggregateLimit: model.max_input_references ?? undefined,
     supported: false,
     verified: false,
+    evidence: "none",
     reason: "No matching verified endpoint capability was found.",
   };
 }
@@ -389,11 +662,14 @@ export function assessVideoReferenceTransport(
   const matrix = buildVideoSupportMatrix(model, endpoint);
   const issues: VideoReferenceTransportIssue[] = [];
   for (const reference of references) {
-    const matches = matrix.entries.filter((candidate) => candidate.kind === reference.kind && candidate.transport === reference.transport);
+    const frameRole = reference.role === "first_frame" || reference.role === "last_frame";
+    const matches = frameRole
+      ? [videoReferenceCapability(model, reference.kind, reference.transport, endpoint, reference.role)]
+      : matrix.entries.filter((candidate) => candidate.kind === reference.kind && candidate.transport === reference.transport);
     // Without a selected endpoint every possible route must support the
     // transport; otherwise the request could be routed to a provider that
     // ignores or rejects the reference.
-    if (!matches.length || matches.some((entry) => !entry.supported || !entry.verified)) {
+    if (!matches.length || matches.some((entry) => !entry.supported || (!entry.verified && entry.evidence !== "openrouter_contract"))) {
       issues.push({
         code: "unverified_reference_transport",
         slot: reference.slot,
@@ -496,9 +772,10 @@ export type InputAssetFacts = {
 
 export type InputConstraintCode =
   | "unsupported_reference" | "too_many_inputs" | "mixed_input_styles" | "frame_inputs_ignored"
-  | "duplicate_first_frame" | "duplicate_last_frame" | "frame_requires_image" | "audio_requires_visual" | "audio_requires_image"
+  | "duplicate_first_frame" | "duplicate_last_frame" | "frame_requires_image" | "last_frame_requires_first_frame" | "audio_requires_visual" | "audio_requires_image"
   | "media_too_large" | "unsupported_media_format" | "unsupported_media_codec" | "dimensions_too_small" | "dimensions_too_large" | "aspect_ratio_unsupported"
   | "duration_too_short" | "duration_too_long" | "combined_duration_too_long" | "fps_too_high"
+  | "reference_duration_unsupported" | "reference_aspect_ratio_unsupported" | "reference_resolution_unsupported"
   | "resolution_with_references" | "frames_will_crop" | "real_person_blocked" | "face_check_unavailable" | "unverified_reference_transport";
 
 export type InputConstraint = {
@@ -509,6 +786,46 @@ export type InputConstraint = {
   value?: number | string;
   source?: PolicySource;
 };
+
+export function assessResolvedVideoInputRules({
+  model,
+  endpoint,
+  references,
+  options = {},
+}: {
+  model: VideoModel;
+  endpoint?: VideoModelEndpoint;
+  references: Array<Pick<InputAssetFacts, "role" | "slot">>;
+  options?: DraftOptions;
+}): InputConstraint[] {
+  const rules = resolveVideoInputRules(model, endpoint);
+  const general = references.filter((reference) => reference.role === "reference");
+  const frames = references.filter((reference) => reference.role === "first_frame" || reference.role === "last_frame");
+  const issues: InputConstraint[] = [];
+  if (general.length && frames.length) issues.push({ code: "mixed_input_styles", severity: "error" });
+  const last = frames.find((reference) => reference.role === "last_frame");
+  if (last && rules.lastFrameRequiresFirstFrame && !frames.some((reference) => reference.role === "first_frame")) {
+    issues.push({ code: "last_frame_requires_first_frame", severity: "error", slot: last.slot });
+  }
+  if (!general.length || !rules.referenceOptions) return issues;
+  const duration = options.duration == null ? undefined : Number(options.duration);
+  if (duration != null && rules.referenceOptions.durations && !rules.referenceOptions.durations.includes(duration)) {
+    issues.push({ code: "reference_duration_unsupported", severity: "error", value: String(options.duration) });
+  }
+  const aspectRatio = options.aspect_ratio == null ? undefined : String(options.aspect_ratio);
+  if (aspectRatio && rules.referenceOptions.aspectRatios && !rules.referenceOptions.aspectRatios.includes(aspectRatio)) {
+    issues.push({ code: "reference_aspect_ratio_unsupported", severity: "error", value: aspectRatio });
+  }
+  const resolution = options.resolution == null ? undefined : String(options.resolution);
+  if (resolution && rules.referenceOptions.resolutions && !rules.referenceOptions.resolutions.includes(resolution)) {
+    issues.push({ code: "reference_resolution_unsupported", severity: "error", value: resolution });
+  }
+  const size = options.size == null ? undefined : String(options.size);
+  if (size && rules.referenceOptions.sizes && !rules.referenceOptions.sizes.includes(size)) {
+    issues.push({ code: "reference_resolution_unsupported", severity: "error", value: size });
+  }
+  return issues;
+}
 
 function sizePolicy(policy: VideoInputPolicy, kind: InputMediaKind) {
   return kind === "image" ? policy.image : kind === "video" ? policy.video : policy.audio;
@@ -544,10 +861,14 @@ export function assessInputConstraints({
   if (mode !== "video") return issues;
 
   const policy = videoInputPolicy(modelId);
+  const resolvedRules = modelId
+    ? resolveVideoInputRules({ id: modelId, name: modelId, max_input_references: modelMaxInputReferences }, endpoint)
+    : undefined;
   const general = references.filter((reference) => reference.role === "reference");
   for (const kind of ["image", "video", "audio"] as const) {
     const count = general.filter((reference) => reference.kind === kind).length;
-    const kindLimit = endpoint ? endpointReferenceLimit(endpoint) : policy.references[kind];
+    const kindLimit = resolvedRules?.referenceLimits[kind]
+      ?? (endpoint ? endpointReferenceLimit(endpoint) : policy.references[kind]);
     if (kindLimit != null && count > kindLimit) issues.push({ code: "too_many_inputs", severity: "error", limit: kindLimit, value: kind });
   }
   if (referenceLimit != null && general.filter((reference) => reference.kind === "image").length > referenceLimit) {
@@ -556,6 +877,7 @@ export function assessInputConstraints({
   const aggregateLimit = totalReferenceLimit
     ?? endpoint?.max_input_references
     ?? modelMaxInputReferences
+    ?? resolvedRules?.totalReferenceLimit
     ?? policy.totalReferenceLimit;
   if (aggregateLimit != null && general.length > aggregateLimit) {
     issues.push({ code: "too_many_inputs", severity: "error", limit: aggregateLimit });
@@ -564,10 +886,12 @@ export function assessInputConstraints({
   const frames = references.filter((reference) => reference.role === "first_frame" || reference.role === "last_frame");
   const nonImageFrame = frames.find((reference) => reference.kind !== "image");
   if (nonImageFrame) issues.push({ code: "frame_requires_image", severity: "error", slot: nonImageFrame.slot });
-  if (general.length && frames.length) {
-    if (policy.combination === "exclusive") issues.push({ code: "mixed_input_styles", severity: "error" });
-    if (policy.combination === "frame_wins") issues.push({ code: "mixed_input_styles", severity: "error" });
-  }
+  issues.push(...assessResolvedVideoInputRules({
+    model: { id: modelId, name: modelId },
+    endpoint,
+    references,
+    options,
+  }));
   if (frames.filter((reference) => reference.role === "first_frame").length > 1) issues.push({ code: "duplicate_first_frame", severity: "error" });
   if (frames.filter((reference) => reference.role === "last_frame").length > 1) issues.push({ code: "duplicate_last_frame", severity: "error" });
 

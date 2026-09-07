@@ -1410,7 +1410,12 @@ button, input, textarea { font-family: inherit; }
 .prompt-enhancement-status [data-status="result-ready"] { color: #255f3a; font-weight: 650; }
 .prompt-enhancement-action { min-width: 126px; }
 
-.reference-section { position: relative; margin: 18px 0 22px; }
+.reference-section { position: relative; margin: 0 0 22px; }
+.frame-inputs { display: flex; gap: 10px; }
+.frame-inputs:empty { display: none; }
+.frame-upload { flex: 1; min-width: 0; min-height: 106px; }
+.input-combination-hint { margin: 6px 0 10px; color: var(--text-muted); font-size: 11px; line-height: 1.5; }
+.input-empty-hint { margin: 10px 0 0; color: var(--text-muted); font-size: 12px; line-height: 1.5; }
 .input-support-summary { display: flex; flex-wrap: wrap; gap: 5px 16px; margin: 8px 0 12px; color: var(--text-muted); font-size: 12px; }
 .input-support-summary small { flex-basis: 100%; font-size: inherit; }
 .options-section { position: relative; margin-top: 27px; padding-top: 24px; border-top: 1px solid var(--line); }
@@ -1453,7 +1458,7 @@ button, input, textarea { font-family: inherit; }
 .reference-row {
   min-height: 78px;
   display: grid;
-  grid-template-columns: 42px 24px minmax(0, 1fr) auto auto;
+  grid-template-columns: 42px 34px minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 9px;
   padding: 5px 7px 5px 5px;
@@ -1461,12 +1466,15 @@ button, input, textarea { font-family: inherit; }
   border-radius: 0;
 }
 .reference-row > img, .reference-row > video, .asset-missing { width: 42px; height: 38px; object-fit: cover; border-radius: 0; background: #eee; }
-.reference-order { color: var(--text-faint); font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.reference-order { padding-inline: 3px; color: var(--text); font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
 .reference-name { min-width: 0; display: grid; gap: 2px; }
 .reference-name strong { overflow: hidden; font-size: 12px; font-weight: 550; text-overflow: ellipsis; white-space: nowrap; }
 .reference-name small { color: var(--text-muted); font-size: 11px; }
-.role-select { width: 126px; }
+.role-select { width: 160px; }
 .reference-controls { display: grid; gap: 5px; }
+.mention-menu .asset-missing, .mention-menu img, .mention-menu video { width: 28px; height: 28px; flex: 0 0 28px; object-fit: cover; }
+.mention-menu [role="option"] > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mention-menu [role="option"] > small { margin-left: auto; color: var(--text-muted); white-space: nowrap; font-size: 11px; }
 .reference-unsupported { color: var(--text); font-size: 11px; }
 .add-reference { width: fit-content; margin-top: 3px; }
 .reference-error {

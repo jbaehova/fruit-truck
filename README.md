@@ -16,7 +16,7 @@ Explore OpenRouter models, shape a request around each model's real capabilities
 
 <br />
 
-<img src="./assets/readme/fruit-truck-hero.png" alt="Vibrant cut-paper Fruit Truck banner with abstract image and film motifs" width="1200" />
+<img src="./assets/readme/fruit-truck-hero.png" alt="Fruit Truck image and video studio, with vivid vermilion split-fruit patterns across warm ivory" width="1200" />
 
 <br />
 
@@ -36,7 +36,7 @@ Fruit Truck adapts the workspace and request to the selected model instead of as
 
 | Without Fruit Truck | With Fruit Truck |
 | --- | --- |
-| Cross-check model and provider documentation | Controls come from live catalog and endpoint capabilities |
+| Cross-check model and provider documentation | Controls combine live catalog and endpoint capabilities with documented rules for each model |
 | Guess which options and reference types are valid | Unsupported combinations are caught before submission |
 | Hope every attached reference influences the right thing | Numbered inputs have explicit purposes and visible request mappings |
 | Rewrite prompts by hand for each model family | Structured enhancement compiles the intent for the selected model and workflow |
@@ -48,11 +48,11 @@ Fruit Truck adapts the workspace and request to the selected model instead of as
 - **Live model and price discovery** — loads image and video catalogs, endpoint capabilities, and published pricing from OpenRouter.
 - **Capability-aware controls** — renders supported options, clamps constrained values, and validates provider-specific passthrough fields against the selected endpoint.
 - **Model-aware prompt enhancement** — turns the original intent into a structured plan, then compiles it with a profile suited to the target image or video model. Enhancement can be enabled once for every current and future thread.
-- **Reference contracts** — assigns stable `@1`, `@2`, … inputs a purpose such as subject identity, product identity, style, composition, pose, motion, audio, or context when the selected endpoint declares that reference type. Required mappings are verified before generation; optional gaps remain visible as warnings.
-- **Image and video workflows** — supports text-to-image/video generation, multi-reference composition, image editing, and semantic-mask edits according to the selected model's verified endpoint support. Prompt enhancement uses a separate chat-completions planner; Fruit Truck is not a general chat client.
+- **Reference contracts:** assigns stable `@1`, `@2`, … inputs a prompt purpose such as subject identity, product identity, style, composition, pose, motion, audio, or context. Media kinds, counts, frame roles, and transports follow the selected endpoint or the documented rules for that exact model, while unsupported combinations are rejected before generation.
+- **Image and video workflows:** supports text-to-image/video generation, multi-reference composition, image editing, and semantic-mask edits according to the selected model's active contract. Prompt enhancement uses a separate chat-completions planner; Fruit Truck is not a general chat client.
 - **Independent generation threads** — keeps image and video prompts, models, options, attempts, and background work isolated while several ideas progress in parallel.
 - **Request inspector** — shows the provider-facing prompt, numbered-input mapping, native transport field, and sanitized JSON without embedding local media bodies.
-- **Result follow-up** — reviews generated candidates and can reuse a result as a new input or image-edit target where the selected endpoint supports it; video references remain closed until their transport is verified.
+- **Result follow-up:** reviews generated candidates and can reuse a result as a new input or image-edit target where the selected endpoint supports it. Video follow-up inputs obey the selected model's reference and frame contracts.
 - **Job and cost continuity** — restores active video polling, records attempt history, and keeps estimated or actual generation and enhancement costs in a per-session ledger.
 - **Asset Library** — imports and previews image, video, and audio files; filters, reuses, deletes, and exports managed results to Downloads.
 - **Desktop-native workflow** — provides macOS menus and shortcuts, a maximized full-window layout, English and Korean UI, and signed in-app updates.
@@ -69,12 +69,24 @@ feature is available in the app.
 | Text-to-image and image editing | `/api/v1/images` | Supported when the selected endpoint declares the required options and references |
 | Text-to-video | `/api/v1/videos` | Supported with persisted job polling |
 | Prompt enhancement | `/api/v1/chat/completions` | Optional planner request; not general chat |
-| Video image/video/audio references and editing | `/api/v1/videos` | Unavailable until a verified public HTTPS or signed-upload transport is configured |
+| Video first/last frame images | `/api/v1/videos` | Supported when the selected model declares each frame role; managed local images use OpenRouter's media URL request contract |
+| General image/video/audio references for video | `/api/v1/videos` | Supported only for the media kinds, counts, and transports allowed by the selected endpoint or the documented rules for that exact model |
 | General chat, Responses, tools/function calling, TTS, STT, audio output, embeddings | Various | Not exposed in this studio |
 
-The live endpoint metadata and Fruit Truck's request validator determine the
-supported route. Direct-provider documentation alone does not enable an
-OpenRouter capability. See the fuller [support matrix](./docs/SUPPORT.md).
+Live catalog and endpoint declarations take precedence. The public video
+catalog does not publish every model's general-reference kinds, counts, or
+semantic rules, so Fruit Truck fills only those missing fields from documented
+rules for the exact model and leaves unknown combinations unavailable.
+
+Frame images and general references cannot be mixed because OpenRouter gives
+`frame_images` precedence over `input_references`. Managed local image
+references can be serialized inline where the active contract permits it;
+local video references require an explicitly supported transport. For current
+Veo 3.1 Standard and Fast routes, all general references use the fixed native
+`asset` semantic type with a maximum of three images; Veo 3.1 Lite accepts no
+general references. A purpose such as style or character affects the prompt
+only and does not become a native `reference_type` field. See the fuller
+[support matrix](./docs/SUPPORT.md).
 
 ## How it works
 
@@ -97,7 +109,7 @@ flowchart LR
 2. Each generation thread keeps its own mode, model, prompt, numbered inputs, and options.
 3. When prompt enhancement is enabled, the selected planner preserves the original intent and creates reference-by-reference instructions for the active workflow and target model.
 4. Fruit Truck compiles the final provider prompt, removes unsupported fields, validates reference coverage and provider options, and exposes the sanitized result in **Request preview**.
-5. Images enter candidate review immediately. Video jobs remain attached to the session and resume polling after the app is reopened. Unsupported reference transports are blocked before a planner or paid generation request.
+5. Images enter candidate review immediately. Video jobs remain attached to the session and resume polling after the app is reopened. Mixed frame/reference inputs and unsupported reference transports are blocked before a planner or paid generation request.
 6. Accepted outputs are materialized in managed local storage and can be exported or routed into the next generation.
 
 ## Download

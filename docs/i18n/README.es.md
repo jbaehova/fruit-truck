@@ -1,5 +1,7 @@
 # Fruit Truck
 
+<img src="../../assets/readme/fruit-truck-hero.png" alt="Fruit Truck, estudio de imagen y vídeo con un vibrante patrón de frutas en bermellón sobre marfil cálido" width="1200" />
+
 Fruit Truck es un espacio de trabajo para macOS que genera imágenes y vídeos mediante OpenRouter.
 
 - Campos de solicitud adaptados a cada modelo y edición de imágenes
@@ -14,13 +16,23 @@ Fruit Truck es un espacio de trabajo para macOS que genera imágenes y vídeos m
 | Texto a imagen y edición de imágenes | `/api/v1/images` | Compatible según las capacidades verificadas del endpoint elegido |
 | Texto a vídeo | `/api/v1/videos` | Compatible con seguimiento persistente del trabajo |
 | Mejora del prompt | `/api/v1/chat/completions` | Solicitud opcional al planificador; no es un chat general |
-| Referencias y edición de imagen/vídeo/audio para vídeo | `/api/v1/videos` | No disponible hasta verificar un transporte HTTPS público o signed-upload |
+| Imágenes del fotograma inicial/final para vídeo | `/api/v1/videos` | Compatible cuando el modelo elegido declara cada función; las imágenes locales gestionadas usan el contrato media URL de OpenRouter |
+| Referencias generales de imagen/vídeo/audio para vídeo | `/api/v1/videos` | Solo para los tipos, límites y transportes permitidos por el endpoint o la regla exacta del modelo |
 | Chat general, Responses, tool/function calling, TTS, STT, audio output, embeddings | Varios | No se ofrece en este estudio |
 
 Que un modelo aparezca en el catálogo no significa que todos los endpoints de
-OpenRouter estén disponibles. La ruta real la determinan los metadatos del
-endpoint y el validador de solicitudes de Fruit Truck. Consulta la
-[matriz de soporte](../SUPPORT.md) para más detalles.
+OpenRouter estén disponibles. Las reglas del catálogo en vivo y del endpoint
+tienen prioridad. El catálogo público de vídeo no publica todos los tipos y
+límites de referencias generales por modelo, así que Fruit Truck completa solo
+los campos ausentes con reglas documentadas para el modelo exacto y no activa
+combinaciones desconocidas.
+
+Los fotogramas y las referencias generales no se pueden mezclar porque
+OpenRouter da prioridad a `frame_images`. Veo 3.1 Standard y Fast aceptan hasta
+tres referencias generales de imagen, todas con el tipo semántico nativo fijo
+`asset`; Lite no acepta referencias generales. Una finalidad como estilo o
+personaje solo afecta al prompt y no se convierte en un `reference_type` nativo.
+Consulta la [matriz de soporte](../SUPPORT.md) para más detalles.
 
 Ejecuta `npm ci`, `npm run check`, `npm run test:unit` y `npm run test:e2e` desde `apps/desktop`. Playwright se ejecuta sin interfaz a 1920×1080.
 

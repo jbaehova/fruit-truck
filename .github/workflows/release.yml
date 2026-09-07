@@ -113,6 +113,12 @@ jobs:
             -p "$RUNNER_TEMP/updater-public.key" \
             -x "$RUNNER_TEMP/updater-signature.minisig"
 
+      - name: Verify frontend input and request contracts
+        working-directory: apps/desktop
+        run: |
+          npm run check
+          npm run test:coverage
+
       - name: Verify lossless update fixtures and managed assets
         working-directory: apps/desktop
         run: node --experimental-strip-types scripts/verify-lossless-update.mjs
