@@ -5,12 +5,14 @@ import { tmpdir } from "node:os";
 import { createServer as createNetServer } from "node:net";
 import { join } from "node:path";
 import test from "node:test";
+import { runInNewContext } from "node:vm";
 import { migrateStudioForUpdate } from "../src/updateMigration.ts";
 import { preparePackagedUpdateFixture } from "./prepare-packaged-update-fixture.mjs";
 import {
   assertIsolatedDataRoot,
   createLocalUpdaterManifest,
   createPriorRendererDriver,
+  installPriorInvokeBridge,
   preparePriorBundle,
   runLocalUpdaterServer,
   selectPriorReleaseTag,
@@ -111,6 +113,14 @@ test("serves the signed manifest and verifies native transaction checkpoints", a
     const status = JSON.parse(await readFile(statusPath, "utf8"));
     assert.equal(status.preInstallTransactionVerified, true);
     assert.equal(status.preRelaunchTransactionVerified, true);
+
+    await fetch(`${origin}/events`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "driver-error", detail: { message: "bridge failed" } }),
+    });
+    const failedStatus = JSON.parse(await readFile(statusPath, "utf8"));
+    assert.equal(failedStatus.error, "Packaged updater driver failed: bridge failed");
   } finally {
     if (server) await new Promise((resolve) => server.close(resolve));
     await rm(root, { recursive: true, force: true });
@@ -141,9 +151,88 @@ test("rejects a native managed-asset manifest that omits an expected entry", asy
   }
 });
 
-test("the prior-bundle driver delegates updater install and restart to real Tauri IPC", () => {
+test("the prior-bundle driver works with immutable Tauri globals and delegates native updater IPC", async () => {
   const driver = createPriorRendererDriver({ origin: "http://127.0.0.1:43127", expectedVersion: "0.6.7" });
-  assert.match(driver, /nativeInvoke\(command, args, options\)/);
+  const nativeCommands = [];
+  const events = [];
+  const listeners = new Map();
+  let timerCallback;
+  let installClicked = false;
+  const internals = {};
+  Object.defineProperty(internals, "invoke", {
+    value: async (command) => {
+      nativeCommands.push(command);
+      return { native: command };
+    },
+  });
+  const window = {
+    addEventListener(type, listener) {
+      listeners.set(type, listener);
+    },
+  };
+  Object.defineProperty(window, "__TAURI_INTERNALS__", { value: internals });
+  const invokeDescriptor = Object.getOwnPropertyDescriptor(internals, "invoke");
+  const internalsDescriptor = Object.getOwnPropertyDescriptor(window, "__TAURI_INTERNALS__");
+  assert.equal(invokeDescriptor?.writable, false);
+  assert.equal(invokeDescriptor?.configurable, false);
+  assert.equal(internalsDescriptor?.writable, false);
+  assert.equal(internalsDescriptor?.configurable, false);
+
+  runInNewContext(driver, {
+    Error,
+    Date,
+    String,
+    clearInterval: () => undefined,
+    document: {
+      querySelectorAll: () => [{ disabled: false }, {
+        disabled: false,
+        textContent: "Update and restart",
+        click: () => { installClicked = true; },
+      }],
+    },
+    fetch: async (url, options = {}) => {
+      if (String(url).endsWith("/events")) events.push(JSON.parse(options.body));
+      return { ok: true, status: 204, text: async () => "" };
+    },
+    localStorage: { setItem: () => undefined },
+    setInterval: (callback) => {
+      timerCallback = callback;
+      return 1;
+    },
+    window,
+  });
+
+  const smokeInvoke = window.__FRUIT_TRUCK_PACKAGED_UPDATE_INVOKE__;
+  assert.equal(typeof smokeInvoke, "function");
+  assert.equal(Object.getOwnPropertyDescriptor(internals, "invoke")?.value, invokeDescriptor?.value);
+  await smokeInvoke("load_workspace_state");
+  await smokeInvoke("scan_managed_assets");
+  await smokeInvoke("plugin:updater|check");
+  await smokeInvoke("plugin:updater|download_and_install");
+  await smokeInvoke("plugin:process|restart");
+  timerCallback();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(nativeCommands, [
+    "plugin:updater|check",
+    "plugin:updater|download_and_install",
+    "plugin:process|restart",
+  ]);
+  assert.equal(installClicked, true);
+  assert.ok(events.some((event) => event.type === "driver-ready"));
+  assert.ok(events.some((event) => event.type === "source-workspace-isolated"));
+  assert.ok(events.some((event) => event.type === "managed-scan-isolated"));
+  assert.ok(events.some((event) => event.type === "updater-install-started"));
+  assert.ok(events.some((event) => event.type === "restart-intercepted"));
+  assert.ok(events.some((event) => event.type === "update-prompt-accepted"));
+  assert.equal(listeners.has("error"), true);
+  assert.equal(listeners.has("unhandledrejection"), true);
+  listeners.get("error")(new Error("driver exploded"));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(
+    events.find((event) => event.type === "driver-error")?.detail?.message,
+    "driver exploded",
+  );
   assert.match(driver, /plugin:updater\|download_and_install/);
   assert.match(driver, /endpoint \+ "\/prepared"/);
   assert.match(driver, /plugin:process\|restart/);
@@ -155,7 +244,29 @@ test("the prior-bundle driver delegates updater install and restart to real Taur
   assert.match(driver, /"video-status-polled"/);
   assert.match(driver, /path\.startsWith\("\/videos\/"\)/);
   assert.match(driver, /sourceWorkspaceIsolated && managedScanIsolated/);
+  assert.doesNotMatch(driver, /internals\.invoke\s*=/);
   assert.doesNotMatch(driver, /plugin:updater\|download_and_install[^]*return \{[^]*available:/);
+});
+
+test("installs the invoke bridge only in the synthetic prior worktree dependency", async () => {
+  const root = await mkdtemp(join(tmpdir(), "fruit-truck-prior-invoke-bridge."));
+  const api = join(root, "apps", "desktop", "node_modules", "@tauri-apps", "api");
+  const corePath = join(api, "core.js");
+  try {
+    await mkdir(api, { recursive: true });
+    await writeFile(corePath, `export async function invoke(cmd, args, options) {
+  return window.__TAURI_INTERNALS__.invoke(cmd, args, options);
+}\n`);
+    const result = await installPriorInvokeBridge(root);
+    assert.equal(result.corePath, corePath);
+    const bridged = await readFile(corePath, "utf8");
+    assert.match(bridged, /__FRUIT_TRUCK_PACKAGED_UPDATE_INVOKE__/);
+    assert.match(bridged, /if \(typeof smokeInvoke === 'function'\) return smokeInvoke\(cmd, args, options\)/);
+    assert.match(bridged, /return window\.__TAURI_INTERNALS__\.invoke\(cmd, args, options\)/);
+    await assert.rejects(() => installPriorInvokeBridge(root), /invoke bridge was already installed/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("prepares only a hidden, non-focused prior app and leaves production config untouched", async () => {
@@ -166,6 +277,8 @@ test("prepares only a hidden, non-focused prior app and leaves production config
   try {
     await mkdir(tauri, { recursive: true });
     await mkdir(dist, { recursive: true });
+    const api = join(desktop, "node_modules", "@tauri-apps", "api");
+    await mkdir(api, { recursive: true });
     const production = {
       app: {
         windows: [{ title: "Fruit Truck", maximized: true }],
@@ -178,6 +291,7 @@ test("prepares only a hidden, non-focused prior app and leaves production config
     await writeFile(join(desktop, "package.json"), JSON.stringify({ name: "fruit-truck", version: "0.6.7" }));
     await writeFile(join(tauri, "Cargo.toml"), "[package]\nname = \"fruit-truck\"\nversion = \"0.6.7\"\n");
     await writeFile(join(dist, "index.html"), "<html><head></head><body></body></html>");
+    await writeFile(join(api, "core.js"), "export function invoke(cmd, args, options) { return window.__TAURI_INTERNALS__.invoke(cmd, args, options); }\n");
     const result = await preparePriorBundle(root, "http://127.0.0.1:43127", "0.6.6", "0.6.7");
 
     const after = JSON.parse(await readFile(join(tauri, "tauri.conf.json"), "utf8"));
@@ -194,6 +308,7 @@ test("prepares only a hidden, non-focused prior app and leaves production config
     assert.deepEqual(smoke.plugins.updater.endpoints, ["http://127.0.0.1:43127/latest.json"]);
     assert.match(smoke.app.security.csp, /http:\/\/127\.0\.0\.1:43127/);
     assert.match(await readFile(join(dist, "index.html"), "utf8"), /packaged-update-driver\.js/);
+    assert.match(await readFile(join(api, "core.js"), "utf8"), /__FRUIT_TRUCK_PACKAGED_UPDATE_INVOKE__/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -209,7 +324,7 @@ test("enforces isolated homes and bounded update waits", () => {
   assert.throws(() => smokeTimeoutMs("901"), /30 to 900/);
 });
 
-test("verifies the post-relaunch marker, recovered video poll, v8 invariants, Director bytes, and exact assets", async () => {
+test("verifies the post-relaunch marker, retained provider job, v8 invariants, Director bytes, and exact assets", async () => {
   const root = await mkdtemp(join(tmpdir(), "fruit-truck-packaged-verify."));
   const dataRoot = join(root, "data");
   const statusPath = join(root, "status.json");
@@ -241,14 +356,11 @@ test("verifies the post-relaunch marker, recovered video poll, v8 invariants, Di
       "updater-install-finished",
       "restart-intercepted",
       "pre-relaunch-transaction-verified",
-      "video-status-polled",
     ];
     const validStatus = {
       preInstallTransactionVerified: true,
       preRelaunchTransactionVerified: true,
-      events: types.map((type) => type === "video-status-polled"
-        ? { type, detail: { path: "/videos/provider-video-job-phase3" } }
-        : { type }),
+      events: types.map((type) => ({ type })),
     };
     await writeFile(statusPath, JSON.stringify(validStatus));
 
@@ -256,25 +368,7 @@ test("verifies the post-relaunch marker, recovered video poll, v8 invariants, Di
     assert.equal(report.schemaVersion, 8);
     assert.equal(report.assets.length, 3);
     assert.ok(report.invariants.costLedgerIds.length > 0);
-    assert.ok(report.eventTypes.includes("video-status-polled"));
-
-    const wrongVideoPollStatus = structuredClone(validStatus);
-    wrongVideoPollStatus.events.find((event) => event.type === "video-status-polled").detail.path = "/videos/wrong-job";
-    await writeFile(statusPath, JSON.stringify(wrongVideoPollStatus));
-    await assert.rejects(
-      verifyPackagedUpdate({ dataRoot, statusPath, fromVersion: "0.6.6", toVersion: "0.6.7" }),
-      /video-status-polled for \/videos\/provider-video-job-phase3/,
-    );
-
-    const prematureVideoPollStatus = structuredClone(validStatus);
-    const [videoPollEvent] = prematureVideoPollStatus.events.splice(-1, 1);
-    prematureVideoPollStatus.events.unshift(videoPollEvent);
-    await writeFile(statusPath, JSON.stringify(prematureVideoPollStatus));
-    await assert.rejects(
-      verifyPackagedUpdate({ dataRoot, statusPath, fromVersion: "0.6.6", toVersion: "0.6.7" }),
-      /recovered video poll events were not ordered/,
-    );
-    await writeFile(statusPath, JSON.stringify(validStatus));
+    assert.deepEqual(report.invariants.providerJobIds, ["provider-video-job-phase3"]);
 
     const verifiedWorkspace = await readFile(workspacePath, "utf8");
     const missingLedger = JSON.parse(verifiedWorkspace);
@@ -314,8 +408,9 @@ test("the CI launcher has a bounded cleanup trap for app, server, worktree, and 
   assert.match(script, /notarytool submit/);
   assert.match(script, /stapler validate/);
   assert.match(script, /spctl --assess --type execute/);
-  assert.match(script, /expected_video_status_path="\/videos\/provider-video-job-phase3"/);
-  assert.match(script, /any\(\.type == "video-status-polled" and \.detail\.path == \$expected_path\)/);
-  assert.match(script, /transaction_phase\}" == "complete" && "\$\{video_status_polled\}" == "true"/);
-  assert.match(script, /transaction_phase\}" != "complete" \|\| "\$\{video_status_polled\}" != "true"/);
+  assert.match(script, /transaction_phase\}" == "complete"/);
+  assert.match(script, /transaction_phase\}" != "complete"/);
+  assert.doesNotMatch(script, /video_status_polled/);
+  assert.match(script, /Packaged updater smoke status:/);
+  assert.match(script, /jq \. "\$\{status_path\}"/);
 });

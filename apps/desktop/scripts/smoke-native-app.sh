@@ -7,7 +7,6 @@ UPDATER_ARTIFACT="${2:?Path to the signed .app.tar.gz updater artifact is requir
 UPDATER_SIGNATURE="${3:?Path to the updater .sig is required.}"
 PRIOR_TAG="${4:?The published prior release tag is required.}"
 TIMEOUT_SECONDS="${FRUIT_TRUCK_PACKAGED_UPDATE_TIMEOUT_SECONDS:-180}"
-expected_video_status_path="/videos/provider-video-job-phase3"
 
 [[ "$(uname -s)" == "Darwin" ]] || {
   printf 'The real packaged updater smoke requires macOS.\n' >&2
@@ -245,10 +244,7 @@ while (( SECONDS < deadline )); do
   fi
   installed_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${installed_app}/Contents/Info.plist" 2>/dev/null || true)"
   transaction_phase="$(jq -r '.phase // empty' "${data_root}/update-transactions/current.json" 2>/dev/null || true)"
-  video_status_polled="$(jq -er --arg expected_path "${expected_video_status_path}" \
-    '.events | any(.type == "video-status-polled" and .detail.path == $expected_path)' \
-    "${status_path}" 2>/dev/null || true)"
-  if [[ "${installed_version}" == "${new_version}" && "${transaction_phase}" == "complete" && "${video_status_polled}" == "true" ]]; then
+  if [[ "${installed_version}" == "${new_version}" && "${transaction_phase}" == "complete" ]]; then
     break
   fi
   sleep 1
@@ -256,12 +252,15 @@ done
 
 installed_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${installed_app}/Contents/Info.plist" 2>/dev/null || true)"
 transaction_phase="$(jq -r '.phase // empty' "${data_root}/update-transactions/current.json" 2>/dev/null || true)"
-video_status_polled="$(jq -er --arg expected_path "${expected_video_status_path}" \
-  '.events | any(.type == "video-status-polled" and .detail.path == $expected_path)' \
-  "${status_path}" 2>/dev/null || true)"
-if [[ "${installed_version}" != "${new_version}" || "${transaction_phase}" != "complete" || "${video_status_polled}" != "true" ]]; then
-  printf 'The real updater did not replace and verify the app or resume the expected video poll within %ss. Installed=%s transaction=%s video_poll=%s\n' \
-    "${TIMEOUT_SECONDS}" "${installed_version:-missing}" "${transaction_phase:-missing}" "${video_status_polled:-missing}" >&2
+if [[ "${installed_version}" != "${new_version}" || "${transaction_phase}" != "complete" ]]; then
+  printf 'The real updater did not replace and verify the app within %ss. Installed=%s transaction=%s\n' \
+    "${TIMEOUT_SECONDS}" "${installed_version:-missing}" "${transaction_phase:-missing}" >&2
+  printf 'Packaged updater smoke status:\n' >&2
+  if [[ -s "${status_path}" ]]; then
+    jq . "${status_path}" >&2 || sed -n '1,240p' "${status_path}" >&2 || true
+  else
+    printf 'missing\n' >&2
+  fi
   sed -n '1,240p' "${server_log}" >&2 || true
   sed -n '1,240p' "${app_log}" >&2 || true
   exit 1

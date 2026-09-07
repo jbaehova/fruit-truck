@@ -14,7 +14,6 @@ import {
 
 const SEMVER = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
 const RELEASE_TAG = /^v(\d+\.\d+\.\d+)$/;
-const EXPECTED_RECOVERED_VIDEO_STATUS_PATH = "/videos/provider-video-job-phase3";
 const EXPECTED_ASSET_MANIFEST_PATH = fileURLToPath(
   new URL("../fixtures/studio/phase-3/asset-manifest.expected.json", import.meta.url),
 );
@@ -137,7 +136,7 @@ export function createPriorRendererDriver({ origin, expectedVersion }) {
     });
     if (!response.ok) throw new Error("Packaged updater smoke event failed: " + response.status);
   };
-  internals.invoke = async (command, args, options) => {
+  const smokeInvoke = async (command, args, options) => {
     if (command === "load_workspace_state") {
       sourceWorkspaceIsolated = true;
       await report("source-workspace-isolated", { command });
@@ -180,21 +179,63 @@ export function createPriorRendererDriver({ origin, expectedVersion }) {
     }
     return nativeInvoke(command, args, options);
   };
+  Object.defineProperty(window, "__FRUIT_TRUCK_PACKAGED_UPDATE_INVOKE__", {
+    value: smokeInvoke,
+  });
+  const reportDriverError = (event) => {
+    const error = event instanceof Error
+      ? event
+      : event && typeof event === "object" && "reason" in event ? event.reason : event?.error;
+    void report("driver-error", {
+      message: error instanceof Error ? error.message : String(error || "Unknown driver error"),
+    }).catch(() => undefined);
+  };
+  window.addEventListener("error", reportDriverError);
+  window.addEventListener("unhandledrejection", reportDriverError);
   localStorage.setItem("fruit-truck.onboarding.complete.v1", "true");
-  void report("driver-ready", { expectedVersion });
+  void report("driver-ready", { expectedVersion }).catch(reportDriverError);
   const deadline = Date.now() + 90_000;
   const timer = setInterval(() => {
     const buttons = [...document.querySelectorAll(".update-actions button")];
     const install = buttons.find((button) => !button.disabled && button !== buttons[0]);
     if (install && sourceWorkspaceIsolated && managedScanIsolated) {
       clearInterval(timer);
-      void report("update-prompt-accepted", { text: install.textContent || "" }).then(() => install.click());
+      void report("update-prompt-accepted", { text: install.textContent || "" })
+        .then(() => install.click())
+        .catch(reportDriverError);
     } else if (Date.now() >= deadline) {
       clearInterval(timer);
-      void report("driver-timeout", { expectedVersion });
+      void report("driver-timeout", {
+        expectedVersion,
+        sourceWorkspaceIsolated,
+        managedScanIsolated,
+        enabledUpdateButtonCount: buttons.filter((button) => !button.disabled).length,
+      }).catch(reportDriverError);
     }
   }, 100);
 })();\n`;
+}
+
+export async function installPriorInvokeBridge(worktree) {
+  const corePath = join(worktree, "apps", "desktop", "node_modules", "@tauri-apps", "api", "core.js");
+  const core = await readFile(corePath, "utf8");
+  const smokeInvokeName = "__FRUIT_TRUCK_PACKAGED_UPDATE_INVOKE__";
+  const nativeInvoke = "return window.__TAURI_INTERNALS__.invoke(cmd, args, options);";
+  assert.equal(
+    core.includes(smokeInvokeName),
+    false,
+    "The packaged update smoke invoke bridge was already installed.",
+  );
+  assert.equal(
+    core.split(nativeInvoke).length - 1,
+    1,
+    "The installed @tauri-apps/api core invoke implementation is incompatible with the packaged update smoke bridge.",
+  );
+  const bridgedInvoke = `const smokeInvoke = window.${smokeInvokeName};
+    if (typeof smokeInvoke === 'function') return smokeInvoke(cmd, args, options);
+    ${nativeInvoke}`;
+  await writeFile(corePath, core.replace(nativeInvoke, bridgedInvoke));
+  return { corePath };
 }
 
 export async function injectPriorRenderer(worktree, origin, expectedVersion) {
@@ -259,8 +300,9 @@ export async function preparePriorBundle(
     /(^\[package\][\s\S]*?^version\s*=\s*")[^"]+("\s*$)/m,
     (_match, prefix, suffix) => `${prefix}${priorVersion}${suffix}`,
   ));
+  const invokeBridge = await installPriorInvokeBridge(worktree);
   const injected = inject ? await injectPriorRenderer(worktree, originValue, expectedVersion) : {};
-  return { configPath, packagePath, cargoPath, effectiveVersion: priorVersion, ...injected };
+  return { configPath, packagePath, cargoPath, effectiveVersion: priorVersion, ...invokeBridge, ...injected };
 }
 
 async function writeStatus(statusPath, state) {
@@ -397,6 +439,9 @@ export async function runLocalUpdaterServer({
         const event = JSON.parse(await readBody(request));
         assert.equal(typeof event.type, "string");
         state.events.push(event);
+        if (event.type === "driver-error") {
+          state.error = `Packaged updater driver failed: ${String(event.detail?.message ?? "unknown error")}`;
+        }
         await writeStatus(statusPath, state);
         response.writeHead(204);
         return response.end();
@@ -527,14 +572,9 @@ export async function verifyPackagedUpdate({ dataRoot, statusPath, fromVersion, 
     "updater-install-finished",
     "restart-intercepted",
     "pre-relaunch-transaction-verified",
-    "video-status-polled",
   ]) {
     assert.ok(eventTypes.includes(required), `Missing packaged updater event: ${required}`);
   }
-  const expectedVideoStatusPollIndex = status.events.findIndex((event) => event.type === "video-status-polled"
-    && event.detail?.path === EXPECTED_RECOVERED_VIDEO_STATUS_PATH);
-  assert.notEqual(expectedVideoStatusPollIndex, -1,
-    `Missing packaged updater event: video-status-polled for ${EXPECTED_RECOVERED_VIDEO_STATUS_PATH}`);
   const order = [
     "updater-install-started",
     "pre-install-transaction-verified",
@@ -542,9 +582,9 @@ export async function verifyPackagedUpdate({ dataRoot, statusPath, fromVersion, 
     "restart-intercepted",
     "pre-relaunch-transaction-verified",
   ];
-  const indexes = [...order.map((type) => eventTypes.indexOf(type)), expectedVideoStatusPollIndex];
+  const indexes = order.map((type) => eventTypes.indexOf(type));
   assert.deepEqual(indexes, [...indexes].sort((left, right) => left - right),
-    "The updater install, restart, and recovered video poll events were not ordered.");
+    "The updater install and restart events were not ordered.");
 
   const transaction = JSON.parse(await readFile(join(dataRoot, "update-transactions", "current.json"), "utf8"));
   assert.equal(transaction.phase, "complete");

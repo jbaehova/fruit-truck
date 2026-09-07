@@ -123,6 +123,12 @@ jobs:
         working-directory: apps/desktop
         run: node --experimental-strip-types scripts/verify-lossless-update.mjs
 
+      - name: Verify update recovery and resumed video polling
+        working-directory: apps/desktop
+        run: |
+          npx playwright install chromium
+          npm run test:e2e -- e2e/update.spec.ts
+
   release-macos:
     needs: preflight
     runs-on: macos-15
