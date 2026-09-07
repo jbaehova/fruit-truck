@@ -48,11 +48,6 @@ const MEDIA_RESPONSE_TIMEOUT_SECONDS: u64 = 180;
 const DNS_TIMEOUT_SECONDS: u64 = 10;
 const FFPROBE_TIMEOUT_SECONDS: u64 = 20;
 const LOCAL_MEDIA_MARKER: &str = "fruit-truck-local:";
-const KEYCHAIN_DISPLAY_PATH: &str = "macOS Keychain (Fruit Truck)";
-#[cfg(target_os = "macos")]
-const KEYCHAIN_SERVICE: &str = "ui.fruittruck.desktop";
-#[cfg(target_os = "macos")]
-const KEYCHAIN_ACCOUNT: &str = "openrouter-api-key";
 static MEDIA_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 static ALLOW_APP_EXIT: AtomicBool = AtomicBool::new(false);
 static UPDATE_PREPARATION_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -83,18 +78,6 @@ struct ApiKeyValidation {
     state: &'static str,
     status_code: Option<u16>,
     message: Option<&'static str>,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum CredentialStorage {
-    #[cfg(target_os = "macos")]
-    Keychain,
-    File,
-}
-
-struct StoredApiKey {
-    value: String,
-    storage: CredentialStorage,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -1855,105 +1838,12 @@ fn remove_file_api_key(path: &Path) -> Result<(), String> {
     std::fs::remove_file(path).map_err(|error| error.to_string())
 }
 
-#[cfg(target_os = "macos")]
-fn keychain_get_api_key() -> Result<Option<String>, String> {
-    use security_framework::passwords::get_generic_password;
-    use security_framework_sys::base::errSecItemNotFound;
-
-    match get_generic_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT) {
-        Ok(bytes) => {
-            let value = String::from_utf8(bytes)
-                .map_err(|_| "The macOS Keychain entry is not valid UTF-8.".to_string())?;
-            validate_api_key(&value)
-                .map(Some)
-                .map_err(|_| "The macOS Keychain entry is invalid.".into())
-        }
-        Err(error) if error.code() == errSecItemNotFound => Ok(None),
-        Err(error) => Err(format!(
-            "Could not read the OpenRouter key from macOS Keychain: {error}"
-        )),
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn keychain_set_api_key(value: &str) -> Result<(), String> {
-    use security_framework::passwords::set_generic_password;
-
-    set_generic_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, value.as_bytes())
-        .map_err(|error| format!("Could not save the OpenRouter key to macOS Keychain: {error}"))
-}
-
-#[cfg(target_os = "macos")]
-fn keychain_remove_api_key() -> Result<(), String> {
-    use security_framework::passwords::delete_generic_password;
-    use security_framework_sys::base::errSecItemNotFound;
-
-    match delete_generic_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT) {
-        Ok(()) => Ok(()),
-        Err(error) if error.code() == errSecItemNotFound => Ok(()),
-        Err(error) => Err(format!(
-            "Could not remove the OpenRouter key from macOS Keychain: {error}"
-        )),
-    }
-}
-
-fn read_api_key(app: &tauri::AppHandle) -> Result<Option<StoredApiKey>, String> {
+// Credentials stay in the user-selected local data directory on every platform.
+// Reading the key must never migrate it or access an OS credential store.
+fn read_api_key(app: &tauri::AppHandle) -> Result<Option<String>, String> {
     let directory = credentials_directory(app)?;
     secure_directory(&directory)?;
-    let path = directory.join(CREDENTIALS_FILE);
-    #[cfg(target_os = "macos")]
-    match keychain_get_api_key() {
-        Ok(Some(value)) => {
-            return Ok(Some(StoredApiKey {
-                value,
-                storage: CredentialStorage::Keychain,
-            }));
-        }
-        Ok(None) => {}
-        Err(error) => {
-            // A protected fallback remains usable when the Keychain is
-            // temporarily unavailable (for example while it is locked), but
-            // do not hide a Keychain error when no fallback exists.
-            if let Some(value) = read_file_api_key(&path)? {
-                return Ok(Some(StoredApiKey {
-                    value,
-                    storage: CredentialStorage::File,
-                }));
-            }
-            return Err(error);
-        }
-    }
-    let Some(value) = read_file_api_key(&path)? else {
-        return Ok(None);
-    };
-    #[cfg(target_os = "macos")]
-    {
-        // A legacy file is accepted only as a migration source. Once the
-        // Keychain write succeeds, remove the plaintext copy and report the
-        // Keychain as the source of truth.
-        match keychain_set_api_key(&value) {
-            Ok(()) => {
-                if let Err(error) = remove_file_api_key(&path) {
-                    eprintln!(
-                        "Fruit Truck migrated the API key to Keychain but could not remove the legacy file: {error}"
-                    );
-                }
-                return Ok(Some(StoredApiKey {
-                    value,
-                    storage: CredentialStorage::Keychain,
-                }));
-            }
-            Err(error) => {
-                eprintln!(
-                    "Fruit Truck could not migrate the API key to Keychain; using the protected file fallback: {error}"
-                );
-            }
-        }
-    }
-    Ok(Some(StoredApiKey {
-        value,
-        storage: CredentialStorage::File,
-    }))
+    read_file_api_key(&directory.join(CREDENTIALS_FILE))
 }
 
 fn mask_key(key: &str) -> String {
@@ -1971,14 +1861,10 @@ fn mask_key(key: &str) -> String {
 #[tauri::command]
 fn credential_status(app: tauri::AppHandle) -> Result<CredentialStatus, String> {
     let key = read_api_key(&app)?;
-    let path = match key.as_ref().map(|value| value.storage) {
-        #[cfg(target_os = "macos")]
-        Some(CredentialStorage::Keychain) | None => KEYCHAIN_DISPLAY_PATH.to_string(),
-        Some(CredentialStorage::File) => credentials_path(&app)?.to_string_lossy().into_owned(),
-    };
+    let path = credentials_path(&app)?.to_string_lossy().into_owned();
     Ok(CredentialStatus {
         configured: key.is_some(),
-        masked_key: key.as_ref().map(|value| mask_key(&value.value)),
+        masked_key: key.as_deref().map(mask_key),
         path,
     })
 }
@@ -2066,23 +1952,6 @@ fn save_api_key(app: tauri::AppHandle, api_key: String) -> Result<CredentialStat
     let directory = credentials_directory(&app)?;
     secure_directory(&directory)?;
     let path = directory.join(CREDENTIALS_FILE);
-    #[cfg(target_os = "macos")]
-    {
-        if std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_symlink())
-        {
-            return Err("The Fruit Truck credentials path may not be a symlink.".into());
-        }
-        match keychain_set_api_key(&value) {
-            Ok(()) => remove_file_api_key(&path)?,
-            Err(error) => {
-                eprintln!(
-                    "Fruit Truck could not save to Keychain; using the protected file fallback: {error}"
-                );
-                write_file_api_key(&path, &value)?;
-            }
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
     write_file_api_key(&path, &value)?;
     credential_status(app)
 }
@@ -2093,8 +1962,6 @@ fn remove_api_key(app: tauri::AppHandle) -> Result<CredentialStatus, String> {
         .lock()
         .map_err(|_| "The credentials store is unavailable.".to_string())?;
     let path = credentials_path(&app)?;
-    #[cfg(target_os = "macos")]
-    keychain_remove_api_key()?;
     remove_file_api_key(&path)?;
     credential_status(app)
 }
@@ -2138,14 +2005,16 @@ fn openrouter_url(path: &str) -> Result<reqwest::Url, String> {
                 };
                 let normalized = model_id.replace("%2F", "/").replace("%2f", "/");
                 let segments: Vec<_> = normalized.split('/').collect();
-                segments.len() == 2 && segments.iter().all(|segment| {
-                    !segment.is_empty()
-                        && *segment != "." && *segment != ".."
-                        && segment.chars().all(|character| {
-                            character.is_ascii_alphanumeric()
-                                || matches!(character, '-' | '_' | '.' | ':')
-                        })
-                })
+                segments.len() == 2
+                    && segments.iter().all(|segment| {
+                        !segment.is_empty()
+                            && *segment != "."
+                            && *segment != ".."
+                            && segment.chars().all(|character| {
+                                character.is_ascii_alphanumeric()
+                                    || matches!(character, '-' | '_' | '.' | ':')
+                            })
+                    })
             });
     let allowed_path = matches!(
         normalized_path,
@@ -2929,9 +2798,7 @@ async fn openrouter_request_inner(
         return Err("Unsupported HTTP method.".into());
     }
     let url = openrouter_url(&path)?;
-    let api_key = read_api_key(&app)?
-        .map(|stored| stored.value)
-        .ok_or("Add an OpenRouter API key in Settings first.")?;
+    let api_key = read_api_key(&app)?.ok_or("Add an OpenRouter API key in Settings first.")?;
     let _network_permit = network_semaphore()
         .acquire()
         .await
@@ -3193,9 +3060,7 @@ async fn cache_video_content(app: tauri::AppHandle, job_id: String) -> Result<Ca
         return Err("Invalid video job id.".into());
     }
     assert_update_mutations_allowed(&app)?;
-    let api_key = read_api_key(&app)?
-        .map(|stored| stored.value)
-        .ok_or("Add an OpenRouter API key in Settings first.")?;
+    let api_key = read_api_key(&app)?.ok_or("Add an OpenRouter API key in Settings first.")?;
     let _network_permit = network_semaphore()
         .acquire()
         .await
@@ -4467,13 +4332,13 @@ mod tests {
     }
 
     #[test]
-    fn file_credential_fallback_is_atomic_and_private() {
+    fn file_credential_is_atomic_and_private() {
         let root = tempfile::tempdir().expect("credential root");
         secure_directory(root.path()).expect("private root");
         let path = root.path().join(CREDENTIALS_FILE);
-        write_file_api_key(&path, "sk-test-credential-123").expect("write fallback");
+        write_file_api_key(&path, "sk-test-credential-123").expect("write credential");
         assert_eq!(
-            read_file_api_key(&path).expect("read fallback"),
+            read_file_api_key(&path).expect("read credential"),
             Some("sk-test-credential-123".into())
         );
         #[cfg(unix)]
@@ -4546,7 +4411,7 @@ mod tests {
     }
 
     #[test]
-    fn file_credential_fallback_rejects_symlink() {
+    fn file_credential_rejects_symlink() {
         let root = tempfile::tempdir().expect("credential root");
         let target = root.path().join("target");
         std::fs::write(&target, b"secret").expect("target");

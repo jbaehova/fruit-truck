@@ -448,7 +448,9 @@ pub fn save(root: &Path, payload: Value) -> Result<StorageStatus, String> {
                     backup_one.to_string_lossy().into_owned(),
                     backup_two.to_string_lossy().into_owned(),
                 ],
-                byte_size: std::fs::metadata(&path).map_err(|error| error.to_string())?.len(),
+                byte_size: std::fs::metadata(&path)
+                    .map_err(|error| error.to_string())?
+                    .len(),
                 checksum,
                 recovered: false,
             });
