@@ -508,6 +508,83 @@ async function managedAssetHashes(dataRoot) {
   return values;
 }
 
+async function diagnosticFile(dataRoot, path, { includeJson = false } = {}) {
+  const result = { relativePath: relative(dataRoot, path) };
+  try {
+    const bytes = await readFile(path);
+    result.byteSize = bytes.length;
+    result.sha256 = sha256(bytes);
+    if (includeJson) result.json = JSON.parse(bytes.toString("utf8"));
+  } catch (error) {
+    result.error = error instanceof Error ? error.message : String(error);
+  }
+  return result;
+}
+
+/** Collect read-only diagnostics from the isolated packaged updater data root. */
+export async function collectPackagedUpdateDiagnostics({ dataRoot, statusPath }) {
+  const report = {
+    status: await diagnosticFile(dataRoot, statusPath, { includeJson: true }),
+    currentTransaction: await diagnosticFile(
+      dataRoot,
+      join(dataRoot, "update-transactions", "current.json"),
+      { includeJson: true },
+    ),
+    transactionFiles: [],
+    workspaceVerification: {},
+    assetVerification: {},
+  };
+  const transaction = report.currentTransaction.json;
+  if (!transaction || typeof transaction !== "object") return report;
+
+  const transactionId = String(transaction.id ?? "");
+  const snapshotPath = pathWithin(dataRoot, String(transaction.snapshotPath ?? ""));
+  const manifestPath = pathWithin(dataRoot, String(transaction.assetManifestPath ?? ""));
+  const currentWorkspacePath = join(dataRoot, "workspace", "workspace-state-v1.json");
+  const [currentWorkspace, snapshot, manifest] = await Promise.all([
+    diagnosticFile(dataRoot, currentWorkspacePath),
+    diagnosticFile(dataRoot, snapshotPath),
+    diagnosticFile(dataRoot, manifestPath, { includeJson: true }),
+  ]);
+  report.workspaceVerification = {
+    current: currentWorkspace,
+    snapshot,
+    currentMatchesSnapshot: currentWorkspace.sha256 != null && currentWorkspace.sha256 === snapshot.sha256,
+    snapshotMatchesTransaction: snapshot.sha256 != null && snapshot.sha256 === transaction.snapshotChecksum,
+  };
+  report.assetVerification = {
+    manifest,
+    manifestMatchesTransaction: manifest.sha256 != null && manifest.sha256 === transaction.assetManifestChecksum,
+    entries: [],
+  };
+  if (Array.isArray(manifest.json?.entries)) {
+    for (const entry of manifest.json.entries) {
+      const asset = await diagnosticFile(dataRoot, pathWithin(dataRoot, String(entry.relativePath ?? "")));
+      report.assetVerification.entries.push({
+        assetId: entry.assetId,
+        relativePath: entry.relativePath,
+        expectedByteSize: entry.byteSize,
+        expectedSha256: entry.sha256,
+        actualByteSize: asset.byteSize,
+        actualSha256: asset.sha256,
+        byteSizeMatches: asset.byteSize != null && asset.byteSize === entry.byteSize,
+        sha256Matches: asset.sha256 != null && asset.sha256 === entry.sha256,
+        ...(asset.error ? { error: asset.error } : {}),
+      });
+    }
+  }
+  if (transactionId) {
+    const transactionPaths = [
+      join(dirname(snapshotPath), "transaction.json"),
+      pathWithin(dataRoot, join("update-transactions", "history", `${transactionId}.json`)),
+    ];
+    report.transactionFiles = await Promise.all(
+      transactionPaths.map((path) => diagnosticFile(dataRoot, path, { includeJson: true })),
+    );
+  }
+  return report;
+}
+
 function sortedUnique(values) {
   return [...new Set(values)].sort((left, right) => left.localeCompare(right));
 }
@@ -691,7 +768,15 @@ async function main() {
     process.stdout.write(`${JSON.stringify(report)}\n`);
     return;
   }
-  throw new Error("Usage: packaged-update-smoke.mjs select-prior|prepare-source|prepare-prior|inject-prior|serve|verify [options]");
+  if (command === "diagnose") {
+    const report = await collectPackagedUpdateDiagnostics({
+      dataRoot: resolve(option("data-root") ?? ""),
+      statusPath: resolve(option("status") ?? ""),
+    });
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    return;
+  }
+  throw new Error("Usage: packaged-update-smoke.mjs select-prior|prepare-source|prepare-prior|inject-prior|serve|verify|diagnose [options]");
 }
 
 if (import.meta.url === pathToFileURL(resolve(process.argv[1] ?? "")).href) {

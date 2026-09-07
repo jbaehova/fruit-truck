@@ -4488,6 +4488,58 @@ mod tests {
     }
 
     #[test]
+    fn managed_asset_scanner_accepts_packaged_update_fixture_media() {
+        let fixture_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/studio/phase-3");
+        let mut results = Vec::new();
+        scan_managed_root(&fixture_root.join("assets"), &mut results).expect("scan assets");
+        scan_managed_root(&fixture_root.join("generated"), &mut results).expect("scan generated");
+        results.sort_by(|left, right| left.name.cmp(&right.name));
+
+        let observed = results
+            .iter()
+            .map(|asset| {
+                (
+                    asset.name.as_str(),
+                    asset.kind.as_str(),
+                    asset.mime_type.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            observed,
+            vec![
+                ("active-video.mp4", "video", "video/mp4"),
+                ("completed-poster.png", "image", "image/png"),
+                ("source-frame.png", "image", "image/png"),
+            ]
+        );
+    }
+
+    #[test]
+    fn managed_asset_scanner_rejects_extension_only_fixture_placeholders() {
+        let root = tempfile::tempdir().expect("fixture root");
+        std::fs::write(
+            root.path().join("source-frame.png"),
+            b"FRUIT_TRUCK_PHASE_3_SOURCE_FRAME_V1\ndimensions=1920x1080\n",
+        )
+        .expect("source placeholder");
+        std::fs::write(
+            root.path().join("completed-poster.png"),
+            b"FRUIT_TRUCK_PHASE_3_COMPLETED_POSTER_V1\nderived-from=source-frame.png\n",
+        )
+        .expect("poster placeholder");
+        std::fs::write(
+            root.path().join("active-video.mp4"),
+            b"FRUIT_TRUCK_PHASE_3_ACTIVE_VIDEO_PLACEHOLDER_V1\nprovider-job=provider-video-job-phase3\n",
+        )
+        .expect("video placeholder");
+
+        let mut results = Vec::new();
+        scan_managed_root(root.path(), &mut results).expect("scan placeholders");
+        assert!(results.is_empty());
+    }
+
+    #[test]
     fn managed_deletion_is_idempotent_only_inside_a_managed_root() {
         let root = tempfile::tempdir().expect("managed root");
         let existing = root.path().join("existing.png");

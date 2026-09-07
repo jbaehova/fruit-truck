@@ -58,12 +58,37 @@ data_root="${smoke_root}/data"
 status_path="${smoke_root}/server-status.json"
 server_log="${smoke_root}/server.log"
 app_log="${smoke_root}/app.log"
+update_diagnostics_path="${smoke_root}/update-verification-diagnostics.json"
 server_pid=""
 app_pid=""
 installed_binary=""
 smoke_keychain=""
 smoke_keychain_password=""
 original_keychains=()
+
+print_update_diagnostics() {
+  printf 'Current packaged update transaction:\n' >&2
+  if [[ -s "${data_root}/update-transactions/current.json" ]]; then
+    jq . "${data_root}/update-transactions/current.json" >&2 || \
+      sed -n '1,240p' "${data_root}/update-transactions/current.json" >&2 || true
+  else
+    printf 'missing\n' >&2
+  fi
+  if node "${script_dir}/packaged-update-smoke.mjs" diagnose \
+    --data-root "${data_root}" \
+    --status "${status_path}" > "${update_diagnostics_path}"; then
+    printf 'Packaged update verification diagnostics:\n' >&2
+    jq . "${update_diagnostics_path}" >&2 || sed -n '1,360p' "${update_diagnostics_path}" >&2 || true
+  else
+    printf 'Could not collect packaged update verification diagnostics.\n' >&2
+  fi
+  printf 'Packaged updater smoke status:\n' >&2
+  if [[ -s "${status_path}" ]]; then
+    jq . "${status_path}" >&2 || sed -n '1,240p' "${status_path}" >&2 || true
+  else
+    printf 'missing\n' >&2
+  fi
+}
 
 cleanup() {
   set +e
@@ -240,10 +265,19 @@ deadline=$((SECONDS + TIMEOUT_SECONDS))
 while (( SECONDS < deadline )); do
   if [[ -s "${status_path}" ]] && jq -e '.error != null' "${status_path}" >/dev/null 2>&1; then
     jq -r '.error' "${status_path}" >&2
+    print_update_diagnostics
     exit 1
   fi
   installed_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${installed_app}/Contents/Info.plist" 2>/dev/null || true)"
   transaction_phase="$(jq -r '.phase // empty' "${data_root}/update-transactions/current.json" 2>/dev/null || true)"
+  if [[ "${installed_version}" == "${new_version}" && "${transaction_phase}" == "recovery_required" ]]; then
+    printf 'The installed target app entered update recovery instead of completing verification. Installed=%s transaction=%s\n' \
+      "${installed_version}" "${transaction_phase}" >&2
+    print_update_diagnostics
+    sed -n '1,240p' "${server_log}" >&2 || true
+    sed -n '1,240p' "${app_log}" >&2 || true
+    exit 1
+  fi
   if [[ "${installed_version}" == "${new_version}" && "${transaction_phase}" == "complete" ]]; then
     break
   fi
@@ -255,12 +289,7 @@ transaction_phase="$(jq -r '.phase // empty' "${data_root}/update-transactions/c
 if [[ "${installed_version}" != "${new_version}" || "${transaction_phase}" != "complete" ]]; then
   printf 'The real updater did not replace and verify the app within %ss. Installed=%s transaction=%s\n' \
     "${TIMEOUT_SECONDS}" "${installed_version:-missing}" "${transaction_phase:-missing}" >&2
-  printf 'Packaged updater smoke status:\n' >&2
-  if [[ -s "${status_path}" ]]; then
-    jq . "${status_path}" >&2 || sed -n '1,240p' "${status_path}" >&2 || true
-  else
-    printf 'missing\n' >&2
-  fi
+  print_update_diagnostics
   sed -n '1,240p' "${server_log}" >&2 || true
   sed -n '1,240p' "${app_log}" >&2 || true
   exit 1

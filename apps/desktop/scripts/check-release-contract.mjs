@@ -140,8 +140,8 @@ assert.match(
 );
 assert.match(
   releaseWorkflow,
-  /update_transaction::tests/,
-  "Release workflow does not verify native update transactions.",
+  /cargo test --locked \\\r?\n\s+--manifest-path apps\/desktop\/src-tauri\/Cargo\.toml\r?\n/,
+  "Release workflow must run all native tests, including update transactions and managed media fixtures.",
 );
 assert.match(
   releaseWorkflow,

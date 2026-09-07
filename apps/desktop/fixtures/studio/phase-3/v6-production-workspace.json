@@ -33,8 +33,8 @@
           "localPath": "{{FRUIT_TRUCK_HOME}}/assets/source-frame.png",
           "width": 1920,
           "height": 1080,
-          "byteSize": 81,
-          "fingerprint": "995e8cadfc8f2e204081aa2979175ba91dda19f2d44a6021ba93098099168147"
+          "byteSize": 8608,
+          "fingerprint": "ad11a55fde6ffc95d027f57eb5b4d572db91e79dcaa56fcb14f919ccc23f9882"
         },
         {
           "id": "phase3-completed-poster",
@@ -46,8 +46,8 @@
           "localPath": "{{FRUIT_TRUCK_HOME}}/generated/completed-poster.png",
           "width": 1920,
           "height": 1080,
-          "byteSize": 100,
-          "fingerprint": "3ca59f024df106f445c438e6323672b11216d914dda425fcec7fcbcfc784f451",
+          "byteSize": 8609,
+          "fingerprint": "53f8bba9495089d7d7e36ff2082a2b4b754cc40126eeae8246ed161bc3c73a64",
           "derivation": {
             "kind": "resize_crop",
             "sourceAssetId": "phase3-source-frame",
@@ -66,8 +66,8 @@
           "localPath": "{{FRUIT_TRUCK_HOME}}/generated/active-video.mp4",
           "jobId": "provider-video-job-phase3",
           "duration": 8,
-          "byteSize": 120,
-          "fingerprint": "96efcd96508267df393b87fbc12ab6595e727a3de7e910bbac77f8c05f4b5ebc"
+          "byteSize": 1807,
+          "fingerprint": "7850fa5dfedb211838a3efd26fc89313a342739238e48da521746954ef63291a"
         }
       ],
       "generationDefaults": {

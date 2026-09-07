@@ -7,24 +7,24 @@
       "kind": "video",
       "origin": "generated",
       "relativePath": "generated/active-video.mp4",
-      "byteSize": 120,
-      "sha256": "96efcd96508267df393b87fbc12ab6595e727a3de7e910bbac77f8c05f4b5ebc"
+      "byteSize": 1807,
+      "sha256": "7850fa5dfedb211838a3efd26fc89313a342739238e48da521746954ef63291a"
     },
     {
       "assetId": "phase3-completed-poster",
       "kind": "image",
       "origin": "edited",
       "relativePath": "generated/completed-poster.png",
-      "byteSize": 100,
-      "sha256": "3ca59f024df106f445c438e6323672b11216d914dda425fcec7fcbcfc784f451"
+      "byteSize": 8609,
+      "sha256": "53f8bba9495089d7d7e36ff2082a2b4b754cc40126eeae8246ed161bc3c73a64"
     },
     {
       "assetId": "phase3-source-frame",
       "kind": "image",
       "origin": "upload",
       "relativePath": "assets/source-frame.png",
-      "byteSize": 81,
-      "sha256": "995e8cadfc8f2e204081aa2979175ba91dda19f2d44a6021ba93098099168147"
+      "byteSize": 8608,
+      "sha256": "ad11a55fde6ffc95d027f57eb5b4d572db91e79dcaa56fcb14f919ccc23f9882"
     }
   ]
 }

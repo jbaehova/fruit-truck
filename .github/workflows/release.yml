@@ -168,11 +168,10 @@ jobs:
       - name: Prepare self-contained Apple Silicon assets
         run: bash apps/desktop/scripts/prepare-macos-release-assets.sh
 
-      - name: Verify native lossless update transactions
+      - name: Verify native updates and managed media fixtures
         run: |
           cargo test --locked \
-            --manifest-path apps/desktop/src-tauri/Cargo.toml \
-            update_transaction::tests
+            --manifest-path apps/desktop/src-tauri/Cargo.toml
 
       - name: Revalidate immutable release tag
         env:

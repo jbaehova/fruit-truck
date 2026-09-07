@@ -10,6 +10,7 @@ import { migrateStudioForUpdate } from "../src/updateMigration.ts";
 import { preparePackagedUpdateFixture } from "./prepare-packaged-update-fixture.mjs";
 import {
   assertIsolatedDataRoot,
+  collectPackagedUpdateDiagnostics,
   createLocalUpdaterManifest,
   createPriorRendererDriver,
   installPriorInvokeBridge,
@@ -146,6 +147,36 @@ test("rejects a native managed-asset manifest that omits an expected entry", asy
       verifyPreparedUpdateTransaction(dataRoot, "0.6.6", "0.6.7"),
       /native managed-asset manifest entries differ from the complete expected fixture set/i,
     );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("collects recovery diagnostics without exposing workspace payload bytes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "fruit-truck-updater-diagnostics."));
+  const dataRoot = join(root, "data");
+  const statusPath = join(root, "status.json");
+  try {
+    await preparePackagedUpdateFixture(dataRoot, "0.6.7", { fromVersion: "0.6.6" });
+    await writeFile(statusPath, JSON.stringify({ ready: true, events: [] }));
+    const report = await collectPackagedUpdateDiagnostics({ dataRoot, statusPath });
+    assert.equal(report.currentTransaction.json.phase, "awaiting_restart");
+    assert.equal(report.currentTransaction.json.failure, undefined);
+    assert.equal(report.transactionFiles.length, 2);
+    assert.ok(report.transactionFiles.every((file) => file.json.id === "packaged-update-fixture"));
+    assert.equal(report.workspaceVerification.currentMatchesSnapshot, true);
+    assert.equal(report.workspaceVerification.snapshotMatchesTransaction, true);
+    assert.equal(report.assetVerification.manifestMatchesTransaction, true);
+    assert.equal(report.assetVerification.entries.length, 3);
+    assert.ok(report.assetVerification.entries.every((entry) => entry.byteSizeMatches && entry.sha256Matches));
+    assert.equal("json" in report.workspaceVerification.current, false);
+    assert.equal("json" in report.workspaceVerification.snapshot, false);
+
+    await writeFile(join(dataRoot, "assets", "source-frame.png"), "tampered");
+    const changed = await collectPackagedUpdateDiagnostics({ dataRoot, statusPath });
+    const source = changed.assetVerification.entries.find((entry) => entry.assetId === "phase3-source-frame");
+    assert.equal(source.byteSizeMatches, false);
+    assert.equal(source.sha256Matches, false);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -411,6 +442,11 @@ test("the CI launcher has a bounded cleanup trap for app, server, worktree, and 
   assert.match(script, /transaction_phase\}" == "complete"/);
   assert.match(script, /transaction_phase\}" != "complete"/);
   assert.doesNotMatch(script, /video_status_polled/);
+  assert.match(script, /transaction_phase\}" == "recovery_required"/);
+  assert.match(script, /The installed target app entered update recovery instead of completing verification/);
+  assert.match(script, /Current packaged update transaction:/);
+  assert.match(script, /packaged-update-smoke\.mjs" diagnose/);
+  assert.match(script, /Packaged update verification diagnostics:/);
   assert.match(script, /Packaged updater smoke status:/);
   assert.match(script, /jq \. "\$\{status_path\}"/);
 });
