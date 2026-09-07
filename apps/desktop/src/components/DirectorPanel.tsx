@@ -1,5 +1,7 @@
 import { FIDELITY_KEYS } from "@/director/labels";
 import { Collapsible } from "@base-ui/react/collapsible";
+import { Toggle } from "@base-ui/react/toggle";
+import { ToggleGroup } from "@base-ui/react/toggle-group";
 import {
   ArrowLeftRight,
   BoxSelect,
@@ -157,6 +159,7 @@ export function DirectorPanel({
   const [playing, setPlaying] = useState(false);
   const [presetName, setPresetName] = useState("");
   const [selectedPresetId, setSelectedPresetId] = useState("");
+  const [inspectorTab, setInspectorTab] = useState("camera");
   const historyRef = useRef<DirectorHistory | null>(plan ? createDirectorHistory(plan) : null);
   const [, setHistoryRevision] = useState(0);
   const animationFrameRef = useRef<number | null>(null);
@@ -229,6 +232,10 @@ export function DirectorPanel({
   const selectedMotion = selection?.type === "motion"
     ? plan?.motions.find((motion) => motion.id === selection.id)
     : undefined;
+  useEffect(() => {
+    if (selection?.type === "subject" || selectedMotion?.targetType === "subject") setInspectorTab("subject");
+    else if (selectedMotion?.targetType === "camera") setInspectorTab("camera");
+  }, [selection?.type, selection?.id, selectedMotion?.targetType]);
   const activeMotionIds = useMemo(() => new Set(activeShot?.motionIds ?? []), [activeShot?.motionIds]);
   const activeMotions = useMemo(() => plan?.motions.filter((motion) => activeMotionIds.has(motion.id)) ?? [], [activeMotionIds, plan?.motions]);
   const cameraMotions = useMemo(() => activeMotions.filter((motion) => motion.targetType === "camera"), [activeMotions]);
@@ -258,6 +265,7 @@ export function DirectorPanel({
   }
 
   const commit = (next: DirectorPlan) => {
+    setPlaying(false);
     const finalized = { ...next, updatedAt: now() };
     const currentHistory = historyRef.current?.present === plan
       ? historyRef.current
@@ -267,6 +275,7 @@ export function DirectorPanel({
     onPlanChange(finalized);
   };
   const undo = () => {
+    setPlaying(false);
     const history = historyRef.current;
     if (!history?.past.length) return;
     const next = undoDirectorHistory(history);
@@ -275,6 +284,7 @@ export function DirectorPanel({
     onPlanChange(next.present);
   };
   const redo = () => {
+    setPlaying(false);
     const history = historyRef.current;
     if (!history?.future.length) return;
     const next = redoDirectorHistory(history);
@@ -586,9 +596,7 @@ export function DirectorPanel({
     }}>
       <header className="director-panel-header">
         <div>
-          <p className="director-eyebrow">{t("directorTools")}</p>
           <h1 id="director-panel-title">{t("directorPanelTitle")}</h1>
-          <p>{t("directorPanelHint")}</p>
         </div>
         <div className="director-panel-actions">
           <label className="director-enabled-toggle">
@@ -600,7 +608,7 @@ export function DirectorPanel({
       </header>
 
       <div className="director-source-bar">
-        <span><strong>{t("directorSourceFrame")}</strong><small>{sourceAsset?.name ?? t("directorMissingAssetShort")}</small></span>
+        <span><strong>{t("directorSourceFrame")}</strong></span>
         <label>
           <span className="sr-only">{t("directorRelinkAsset")}</span>
           <select value={sourceMissing ? "" : plan.sourceAssetId ?? ""} onChange={(event) => event.target.value && relinkSource(event.target.value)}>
@@ -608,15 +616,16 @@ export function DirectorPanel({
             {availableAssets.map((asset) => <option key={asset.id} value={asset.id}>{asset.name}</option>)}
           </select>
         </label>
-        <small>{t("directorOverlayNonDestructive")}</small>
+        <small>{t("directorAutoSaved")}</small>
       </div>
 
       {sourceMissing ? <p className="director-warning" role="alert">{t(plan.sourceAssetId ? "directorMissingAsset" : "directorSourceRelinkHint")}</p> : null}
       {!plan.enabled ? <p className="director-info" role="status">{t("directorDisabledHint")}</p> : null}
       {warnings.length ? (
-        <section className="director-warning-list" aria-label={t("directorWarnings")}>
+        <details className="director-warning-list" aria-label={t("directorWarnings")}>
+          <summary>{t("directorWarnings")} ({warnings.length})</summary>
           {warnings.map((warning, index) => <p key={`${index}-${warning}`} role="status">{warning}</p>)}
-        </section>
+        </details>
       ) : null}
 
       <div className="director-workspace" data-disabled={!plan.enabled || undefined}>
@@ -656,6 +665,24 @@ export function DirectorPanel({
           <p className="director-tool-hint" role="status">{t(tool === "subject" || tool === "subject_polygon" ? "directorMarkSubjectHint" : tool === "object_path" ? "directorDrawPathForSubject" : tool === "camera_path" ? "directorCameraPathHint" : "directorSelectHint")}</p>
         </nav>
 
+        <DirectorCanvas
+          plan={plan}
+          sourceUrl={sourceUrl}
+          assetUrls={assetUrls}
+          sourceAlt={sourceAsset?.name ?? t("directorSourceFrame")}
+          tool={tool}
+          selection={selection}
+          previewProgress={canvasProgress}
+          visibleMotionIds={new Set(canvasShot?.motionIds ?? [])}
+          availableAssetIds={availableAssetIds}
+          disabled={!plan.enabled || sourceMissing || playing}
+          onSelect={(next) => { setSelection(next); setTool("select"); }}
+          onCreateSubject={addSubject}
+          onCreateMotion={(targetType, path) => addMotion(targetType, { path })}
+          onNudgeSelection={nudgeSelection}
+          onDeleteSelection={deleteSelection}
+        />
+
         <DirectorShotTimeline
           shots={plan.shots}
           motions={plan.motions}
@@ -685,25 +712,24 @@ export function DirectorPanel({
           onToggleMotion={toggleShotMotion}
         />
 
-        <DirectorCanvas
-          plan={plan}
-          sourceUrl={sourceUrl}
-          assetUrls={assetUrls}
-          sourceAlt={sourceAsset?.name ?? t("directorSourceFrame")}
-          tool={tool}
-          selection={selection}
-          previewProgress={canvasProgress}
-          visibleMotionIds={new Set(canvasShot?.motionIds ?? [])}
-          availableAssetIds={availableAssetIds}
-          disabled={!plan.enabled || sourceMissing || playing}
-          onSelect={(next) => { setSelection(next); setTool("select"); }}
-          onCreateSubject={addSubject}
-          onCreateMotion={(targetType, path) => addMotion(targetType, { path })}
-          onNudgeSelection={nudgeSelection}
-          onDeleteSelection={deleteSelection}
-        />
-
         <aside className="director-inspector" aria-label={t("directorControls")}>
+          <div className="director-inspector-tabs">
+            <ToggleGroup value={[inspectorTab]} onValueChange={(value) => { if (value[0]) setInspectorTab(value[0]); }} className="director-inspector-tab-list" aria-label={t("directorControls")}>
+              <Toggle value="camera" aria-controls="director-camera-settings">{t("directorCamera")}</Toggle>
+              <Toggle value="subject" aria-controls="director-subject-settings">{t("directorSubject")}</Toggle>
+              <Toggle value="frames" aria-controls="director-frame-settings">{t("directorKeyframes")}</Toggle>
+            </ToggleGroup>
+            <section id="director-subject-settings" aria-label={t("directorSubject")} className="director-inspector-tab-panel" hidden={inspectorTab !== "subject"}>
+          <section className="director-subject-list" aria-label={t("directorSubject")}>
+            <div className="director-section-heading"><h3>{t("directorSubject")}</h3><span>{plan.subjects.length}/8</span></div>
+            {plan.subjects.map((subject) => (
+              <button type="button" key={subject.id} aria-pressed={selectedSubject?.id === subject.id} onClick={() => { setPlaying(false); setSelection({ type: "subject", id: subject.id }); setTool("select"); }}>
+                <BoxSelect /><span>{subject.label}</span>
+              </button>
+            ))}
+            {!plan.subjects.length ? <p className="director-empty-note">{t("directorSubjectStartHint")}</p> : null}
+            <Button type="button" size="sm" variant="outline" disabled={!plan.enabled || !sourceUrl || plan.subjects.length >= 8} onClick={() => { setPlaying(false); setTool("subject"); }}><BoxSelect />{t("directorAddSubject")}</Button>
+          </section>
           {selectedSubject ? (
             <section className="director-control-section director-subject-controls" aria-labelledby="director-subject-title">
               <div className="director-section-heading">
@@ -725,6 +751,25 @@ export function DirectorPanel({
               <p className="director-control-note">{t("directorDrawPathForSubject")}</p>
             </section>
           ) : null}
+          <DirectorTimeline
+            section="motions"
+            motions={activeMotions}
+            keyframes={[]}
+            assets={availableAssets}
+            selectedMotionId={selectedMotion?.id}
+            fidelityByControlId={fidelityByControlId}
+            disabled={!plan.enabled}
+            onSelectMotion={(id) => setSelection({ type: "motion", id })}
+            onMotionChange={updateMotion}
+            onReverseMotion={reverseMotion}
+            onDeleteMotion={deleteMotion}
+            onAddKeyframe={addKeyframe}
+            onKeyframeChange={updateKeyframe}
+            onMoveKeyframe={moveKeyframe}
+            onDeleteKeyframe={deleteKeyframe}
+          />
+            </section>
+            <section id="director-camera-settings" aria-label={t("directorCamera")} className="director-inspector-tab-panel" hidden={inspectorTab !== "camera"}>
           <CameraMoveControls
             motions={cameraMotions}
             selectedMotionId={selectedMotion?.id}
@@ -747,9 +792,10 @@ export function DirectorPanel({
           />
             </Collapsible.Panel>
           </Collapsible.Root>
-        </aside>
-
+            </section>
+            <section id="director-frame-settings" aria-label={t("directorKeyframes")} className="director-inspector-tab-panel" hidden={inspectorTab !== "frames"}>
         <DirectorTimeline
+          section="frames"
           motions={activeMotions}
           keyframes={activeShot?.keyframeIds.flatMap((keyframeId) => {
             const keyframe = plan.keyframes.find((candidate) => candidate.id === keyframeId);
@@ -772,9 +818,15 @@ export function DirectorPanel({
           onMoveKeyframe={moveKeyframe}
           onDeleteKeyframe={deleteKeyframe}
         />
+            </section>
+          </div>
+        </aside>
       </div>
 
       <footer className="director-panel-footer">
+        <Collapsible.Root className="director-disclosure">
+          <Collapsible.Trigger className="director-disclosure-trigger">{t("directorFidelity")}<ChevronRight /></Collapsible.Trigger>
+          <Collapsible.Panel className="director-disclosure-panel">
         <section className="director-fidelity-summary" aria-labelledby="director-fidelity-title">
           <div><strong id="director-fidelity-title">{t("directorFidelity")}</strong><small>{t("directorFidelityHint")}</small></div>
           <div>
@@ -784,6 +836,11 @@ export function DirectorPanel({
             {!Object.keys(fidelityCounts).length ? <small>{t("directorNoFidelityData")}</small> : null}
           </div>
         </section>
+          </Collapsible.Panel>
+        </Collapsible.Root>
+        <Collapsible.Root className="director-disclosure">
+          <Collapsible.Trigger className="director-disclosure-trigger">{t("directorPresets")}<ChevronRight /></Collapsible.Trigger>
+          <Collapsible.Panel className="director-disclosure-panel">
         <section className="director-presets" aria-labelledby="director-presets-title">
           <strong id="director-presets-title">{t("directorPresets")}</strong>
           <label>
@@ -810,6 +867,8 @@ export function DirectorPanel({
             setSelectedPresetId("");
           }}><Trash2 /></Button>
         </section>
+          </Collapsible.Panel>
+        </Collapsible.Root>
       </footer>
     </section>
   );

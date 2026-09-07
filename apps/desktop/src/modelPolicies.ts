@@ -383,7 +383,7 @@ export type VideoReferenceTransportIssue = {
 
 export function assessVideoReferenceTransport(
   model: VideoModel,
-  references: Array<{ slot: number; kind: InputMediaKind; transport: VideoReferenceTransport }>,
+  references: Array<{ slot: number; kind: InputMediaKind; transport: VideoReferenceTransport; role?: ReferenceRole }>,
   endpoint?: VideoModelEndpoint,
 ): VideoReferenceTransportIssue[] {
   const matrix = buildVideoSupportMatrix(model, endpoint);
@@ -410,11 +410,12 @@ export function assessVideoReferenceTransport(
   const aggregateLimit = knownRouteAggregates.length
     ? Math.min(...knownRouteAggregates)
     : endpoint ? undefined : model.max_input_references ?? videoInputPolicy(model.id).totalReferenceLimit;
-  if (aggregateLimit != null && references.length > aggregateLimit) {
+  const referenceCount = references.filter((reference) => !reference.role || reference.role === "reference").length;
+  if (aggregateLimit != null && referenceCount > aggregateLimit) {
     issues.push({
       code: "too_many_references",
       limit: aggregateLimit,
-      message: `This endpoint accepts at most ${aggregateLimit} total reference inputs; received ${references.length}.`,
+      message: `This endpoint accepts at most ${aggregateLimit} total reference inputs; received ${referenceCount}.`,
     });
   }
   return issues;
@@ -546,7 +547,7 @@ export function assessInputConstraints({
   const general = references.filter((reference) => reference.role === "reference");
   for (const kind of ["image", "video", "audio"] as const) {
     const count = general.filter((reference) => reference.kind === kind).length;
-    const kindLimit = policy.references[kind];
+    const kindLimit = endpoint ? endpointReferenceLimit(endpoint) : policy.references[kind];
     if (kindLimit != null && count > kindLimit) issues.push({ code: "too_many_inputs", severity: "error", limit: kindLimit, value: kind });
   }
   if (referenceLimit != null && general.filter((reference) => reference.kind === "image").length > referenceLimit) {
@@ -580,7 +581,7 @@ export function assessInputConstraints({
     const transportModel: VideoModel = { id: modelId, name: modelId, endpoints: [endpoint] };
     const transportIssues = assessVideoReferenceTransport(transportModel, references
       .filter((reference): reference is InputAssetFacts & { transport: VideoReferenceTransport } => Boolean(reference.transport))
-      .map((reference) => ({ slot: reference.slot, kind: reference.kind, transport: reference.transport })), endpoint);
+      .map((reference) => ({ slot: reference.slot, kind: reference.kind, transport: reference.transport, role: reference.role })), endpoint);
     for (const issue of transportIssues.filter((candidate) => candidate.code === "unverified_reference_transport")) {
       issues.push({ code: "unverified_reference_transport", severity: "error", slot: issue.slot, value: issue.transport });
     }

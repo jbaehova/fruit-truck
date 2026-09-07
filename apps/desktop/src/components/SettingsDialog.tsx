@@ -1,8 +1,8 @@
 import { Dialog } from "@base-ui/react/dialog";
 import { Field } from "@base-ui/react/field";
 import { Form } from "@base-ui/react/form";
-import { useEffect, useState } from "react";
-import { Check, Download, ExternalLink as ExternalLinkIcon, Pencil, RefreshCw, ShieldCheck, SlidersHorizontal, Upload, X } from "lucide-react";
+import { useState } from "react";
+import { Check, ExternalLink as ExternalLinkIcon, Pencil, ShieldCheck, SlidersHorizontal, X } from "lucide-react";
 import { ExternalLink } from "@/components/ExternalLink";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -21,12 +21,6 @@ type Props = {
   promptModel: PromptModel;
   onPromptModelChange: (model: PromptModel) => void;
   promptModelAvailability: Record<PromptModel, "checking" | "available" | "unavailable" | "unknown">;
-  onExportSupport: () => void;
-  onExportWorkspace: () => void;
-  onImportWorkspace: () => void;
-  onStartGuide: () => void;
-  sessionBudgetUsd: number | null;
-  onSessionBudgetChange: (value: number | null) => void;
 };
 
 export function SettingsDialog({
@@ -39,20 +33,12 @@ export function SettingsDialog({
   promptModel,
   onPromptModelChange,
   promptModelAvailability,
-  onExportSupport,
-  onExportWorkspace,
-  onImportWorkspace,
-  onStartGuide,
-  sessionBudgetUsd,
-  onSessionBudgetChange,
 }: Props) {
   const { language, setLanguage, t } = useI18n();
   const [key, setKey] = useState("");
   const [editingKey, setEditingKey] = useState(false);
   const [busy, setBusy] = useState(false);
   const [keyError, setKeyError] = useState<string | null>(null);
-  const [updateState, setUpdateState] = useState<{ status?: string; lastCheckedAt?: number | null }>({});
-  const isCheckingForUpdates = updateState.status === "checking";
   const selectedPromptModel = PROMPT_MODELS.find((model) => model.id === promptModel) ?? PROMPT_MODELS[0];
   const selectedPromptModelAvailability = promptModelAvailability[promptModel];
   const promptModelAvailabilityLabel = {
@@ -61,35 +47,6 @@ export function SettingsDialog({
     unavailable: t("promptModelAvailabilityUnavailable"),
     unknown: t("promptModelAvailabilityUnknown"),
   }[selectedPromptModelAvailability];
-  const updateStatusLabel = (() => {
-    switch (updateState.status) {
-      case "checking": return t("checkingForUpdates");
-      case "available": return t("updateAvailableStatus");
-      case "current": return t("appUpToDate");
-      case "offline": return t("updateCheckOffline");
-      case "error": return t("updateCheckUnavailable");
-      case "idle":
-      default: return updateState.lastCheckedAt ? t("updateCheckComplete") : t("updateNotChecked");
-    }
-  })();
-  const updateStatusText = isCheckingForUpdates || !updateState.lastCheckedAt
-    ? updateStatusLabel
-    : `${t("lastUpdateCheck")}: ${new Date(updateState.lastCheckedAt).toLocaleString(language === "ko" ? "ko-KR" : "en-US")} | ${updateStatusLabel}`;
-
-  useEffect(() => {
-    if (!open) return;
-    const sync = (event?: Event) => {
-      if (event instanceof CustomEvent && event.detail) {
-        setUpdateState(event.detail as { status?: string; lastCheckedAt?: number | null });
-        return;
-      }
-      try { setUpdateState(JSON.parse(localStorage.getItem("fruit-truck.update.last-state") ?? "{}") as { status?: string; lastCheckedAt?: number | null }); } catch { setUpdateState({}); }
-    };
-    sync();
-    window.addEventListener("fruit-truck:update-state", sync);
-    return () => window.removeEventListener("fruit-truck:update-state", sync);
-  }, [open]);
-
   const saveKey = async () => {
     try {
       setBusy(true);
@@ -168,8 +125,8 @@ export function SettingsDialog({
                 <div className="credential-location">
                   <ShieldCheck />
                   <span>
-                    <strong>{t(status?.path.startsWith("macOS Keychain") ? "secureCredentialStorage" : "localPlaintextStorage")}</strong>
-                    <small>{status?.path ?? "~/.fruit-truck/credentials.json"}<br />{t(status?.path.startsWith("macOS Keychain") ? "keychainPermissions" : "storagePermissions")}</small>
+                    <strong>{t("localPlaintextStorage")}</strong>
+                    <small>{status?.path ?? "~/.fruit-truck/credentials.json"}<br />{t("storagePermissions")}</small>
                   </span>
                 </div>
                 <p className="settings-note">{t("keyPrivacyHint")}</p>
@@ -211,40 +168,6 @@ export function SettingsDialog({
                 </p>
                 <Field.Description>{t("promptModelHint")}</Field.Description>
               </Field.Root>
-              <Field.Root className="settings-key-field">
-                <Field.Label className="settings-field-label">{t("sessionBudget")}</Field.Label>
-                <Input type="number" min="0" step="0.01" placeholder="USD" value={sessionBudgetUsd ?? ""} onChange={(event) => {
-                  const value = event.target.value.trim();
-                  onSessionBudgetChange(value ? Math.max(0, Number(value)) : null);
-                }} />
-                <Field.Description>{t("sessionBudgetHint")}</Field.Description>
-              </Field.Root>
-              <section className="settings-support-scope" aria-labelledby="settings-support-title">
-                <header><strong id="settings-support-title">{t("supportScope")}</strong><small>{t("supportScopeHint")}</small></header>
-                <dl>
-                  {(["imageEndpointScope", "videoEndpointScope", "plannerEndpointScope"] as const).map((key) => <div key={key}><dt>{t(key)}</dt><dd data-status="available">{t("supportedNow")}</dd></div>)}
-                  <div><dt>{t("unsupportedEndpointScope")}</dt><dd data-status="unavailable">{t("unavailableNow")}</dd></div>
-                </dl>
-              </section>
-              <Button type="button" variant="outline" size="sm" onClick={onStartGuide}>{t("startWorkflowGuide")}</Button>
-              <div className="settings-workspace-actions">
-                <Button type="button" variant="outline" size="sm" onClick={onExportWorkspace}><Download /> {t("exportWorkspace")}</Button>
-                <Button type="button" variant="outline" size="sm" onClick={onImportWorkspace}><Upload /> {t("importWorkspace")}</Button>
-              </div>
-              <div className="settings-update-check">
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  disabled={isCheckingForUpdates}
-                  aria-busy={isCheckingForUpdates}
-                  onClick={() => window.dispatchEvent(new Event("fruit-truck:check-update"))}
-                >
-                  <RefreshCw /> {isCheckingForUpdates ? t("checkingForUpdates") : t("checkForUpdates")}
-                </Button>
-                <small role="status" aria-live="polite">{updateStatusText}</small>
-              </div>
-              <Button type="button" variant="outline" size="sm" onClick={onExportSupport}><Download /> {t("exportDiagnostics")}</Button>
             </div>
             <footer className="settings-footer"><Dialog.Close render={<Button type="button" />}>{t("done")}</Dialog.Close></footer>
           </Dialog.Popup>

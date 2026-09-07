@@ -648,7 +648,7 @@ test("video generation completes in the same workspace and records session cost"
   await expect(page.getByRole("status", { name: /Session spend: \$0\.27/ })).toBeVisible();
 });
 
-test("routing a generated image into Director invalidates the prior video enhancement", async ({ page }) => {
+test("routing a generated image into the video composer invalidates the prior enhancement", async ({ page }) => {
   await page.getByRole("button", { name: "Video", exact: true }).click();
   const videoToolbar = page.getByRole("toolbar", { name: "Prompt enhancement" });
   await page.getByRole("combobox", { name: /^Prompt/ }).fill("A fruit truck rolls through a quiet market.");
@@ -664,7 +664,8 @@ test("routing a generated image into Director invalidates the prior video enhanc
   await result.getByRole("button", { name: "Use in video" }).click();
 
   await expect(page.getByRole("heading", { name: "Test video model" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Close Director" })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Open Director|Close Director/ })).toHaveCount(0);
+  await expect(page.locator(".reference-row .role-select").first()).toContainText("First frame");
   await expect(page.getByRole("toolbar", { name: "Prompt enhancement" }).getByRole("button", { name: "Enhance Prompt" })).toBeEnabled();
 });
 
@@ -751,6 +752,8 @@ test("an imported asset can be previewed, reused, exported, edited, and explicit
   await expect(preview).toContainText("lifecycle.png");
   await preview.getByRole("button", { name: "Close preview" }).click();
 
+  await expect(tile.getByRole("button", { name: "Use as input" })).toBeDisabled();
+  await page.locator(".reference-row").filter({ hasText: "lifecycle.png" }).getByRole("button", { name: "Remove", exact: true }).click();
   await tile.getByRole("button", { name: "Use as input" }).click();
   await expect(page.locator(".reference-row strong", { hasText: "lifecycle.png" })).toBeVisible();
   await tile.getByRole("button", { name: "Edit on canvas" }).click();
@@ -808,21 +811,6 @@ test("composer and model selector keep favorites without presets or comparison c
   await page.reload();
   await page.getByRole("button", { name: "Choose a model" }).click();
   await expect(page.getByRole("button", { name: "Favorite OpenAI: Comparison image model", exact: true })).toHaveAttribute("aria-pressed", "true");
-});
-
-test("workspace checklist loads a safe sample and guides keyboard focus", async ({ page }) => {
-  await page.getByRole("button", { name: "Settings" }).click();
-  await page.getByRole("button", { name: "Start workspace checklist" }).click();
-  const guide = page.getByRole("complementary", { name: "Workspace checklist" });
-  await expect(guide).toContainText("Image/video generation is cloud processing");
-  await guide.getByRole("button", { name: "Load the safe sample image" }).click();
-  await expect(page.locator(".reference-row strong", { hasText: "fruit-truck-workflow-sample.png" })).toBeVisible();
-  await expect(guide.locator("li").first()).toHaveAttribute("data-complete", "true");
-
-  await guide.getByRole("button", { name: /Bind it in the prompt/ }).click();
-  await expect(page.getByRole("combobox", { name: /^Prompt/ })).toBeFocused();
-  await page.getByRole("combobox", { name: /^Prompt/ }).fill("Use @1 as a restrained visual reference.");
-  await expect(guide.locator("li").nth(1)).toHaveAttribute("data-complete", "true");
 });
 
 test("shortcut help stays contained and focus-trapped at 1440x900", async ({ page }) => {

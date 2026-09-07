@@ -546,18 +546,6 @@ async function persistedUpdatePhases(page: Page): Promise<unknown[]> {
     .map((call) => call.args.phase));
 }
 
-async function downloadSupportBundle(page: Page): Promise<Record<string, unknown>> {
-  await page.getByRole("button", { name: "Settings" }).click();
-  const settings = page.getByRole("dialog", { name: "App settings" });
-  await expect(settings).toBeVisible();
-  const downloadStarted = page.waitForEvent("download");
-  await settings.getByRole("button", { name: "Export redacted diagnostics" }).click();
-  const download = await downloadStarted;
-  const path = await download.path();
-  if (!path) throw new Error("The support bundle download did not produce a local file.");
-  return JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
-}
-
 async function clickHiddenNewSession(page: Page) {
   return page.locator(".session-sidebar-tools button[aria-label='New session']").evaluate((button) => new Promise<string>((resolve) => {
     let settled = false;
@@ -580,31 +568,6 @@ async function clickHiddenNewSession(page: Page) {
     window.setTimeout(() => finish(""), 50);
   }));
 }
-
-test("Settings exposes the localized busy state while an update check is held", async ({ page }) => {
-  await installTauriMock(page, {
-    workspace: cloneFixture(V8_WORKSPACE),
-    updaterAvailable: false,
-    holdUpdateCheck: true,
-  });
-  await page.goto("/");
-  await expect(page.getByText("Phase 3 Director recovery workspace", { exact: true })).toBeVisible({ timeout: 15_000 });
-
-  await page.getByRole("button", { name: "Settings" }).click();
-  const settings = page.getByRole("dialog", { name: "App settings" });
-  await expect(settings).toBeVisible();
-  const checkingButton = settings.getByRole("button", { name: "Checking for updates…" });
-  await expect(checkingButton).toBeDisabled();
-  await expect(checkingButton).toHaveAttribute("aria-busy", "true");
-  await expect(settings.getByRole("status").filter({ hasText: "Checking for updates…" }))
-    .toHaveText("Checking for updates…");
-
-  await page.evaluate(() => (
-    window as Window & typeof globalThis & {
-      __FRUIT_TRUCK_UPDATE_E2E__: { releaseUpdateCheck: () => void };
-    }
-  ).__FRUIT_TRUCK_UPDATE_E2E__.releaseUpdateCheck());
-});
 
 test("update preparation locks workspace mutations until a cancelled snapshot releases the lock", async ({ page }) => {
   const updateDialog = await gotoUpdateReady(page, {
@@ -645,6 +608,10 @@ test("an active operation blocks install before snapshot or updater IPC", async 
   await page.goto("/");
   const prompt = page.getByRole("combobox", { name: /^Prompt/ });
   await expect(prompt).toHaveValue("Track the fruit truck through the market.", { timeout: 15_000 });
+  // This recovery fixture deliberately includes missing legacy frame assets.
+  // Start the held planner from a clean text draft to isolate the update lock.
+  await page.getByRole("button", { name: "Image", exact: true }).click();
+  await prompt.fill("A fruit truck in the market.");
 
   const toolbar = page.getByRole("toolbar", { name: "Prompt enhancement actions" });
   await toolbar.getByRole("button", { name: "Enhance Prompt" }).click();
@@ -827,8 +794,8 @@ test("post-update verification failure exposes recovery actions and retry restor
     }
   ).__FRUIT_TRUCK_UPDATE_E2E__.releaseVideoPoll());
 
-  const supportBundle = await downloadSupportBundle(page);
-  const completionEntry = (supportBundle.logs as Array<{ event?: string; details?: Record<string, unknown> }>)
+  const diagnosticLogs = await page.evaluate(() => JSON.parse(localStorage.getItem("fruit-truck.diagnostics.v1") ?? "[]")) as Array<{ event?: string; details?: Record<string, unknown> }>;
+  const completionEntry = diagnosticLogs
     .find((entry) => entry.event === "update.verification_complete");
   expect(completionEntry?.details).toMatchObject({
     fromAppVersion: CURRENT_VERSION,
@@ -841,7 +808,7 @@ test("post-update verification failure exposes recovery actions and retry restor
     assetVerification: { verifiedEntries: 2, errorCount: 0 },
     migrationSteps: ["v6→v7", "v7→v8"],
   });
-  const serializedSupport = JSON.stringify(supportBundle);
+  const serializedSupport = JSON.stringify(diagnosticLogs);
   expect(serializedSupport).not.toContain("Track alongside @1 while the fruit truck rolls through the market.");
   expect(serializedSupport).not.toContain("data:image");
 });

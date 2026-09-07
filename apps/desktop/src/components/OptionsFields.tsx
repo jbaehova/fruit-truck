@@ -36,16 +36,19 @@ const LABEL_KEYS: Record<string, MessageKey> = {
 function EnumField({ name, values, value, onChange }: { name: string; values: Array<string | number>; value: unknown; onChange: (value: string | number) => void }) {
   const { t } = useI18n();
   const stringValue = value == null ? "" : String(value);
+  const unsupportedValue = stringValue !== "" && !values.some((item) => String(item) === stringValue);
+  const items = Object.fromEntries(values.map((item) => [String(item), name === "duration" ? t("seconds", { value: item }) : String(item)]));
+  if (unsupportedValue) items[stringValue] = `${stringValue} (${t("unsupported")})`;
   return (
     <Field.Root className="option-field">
       <Field.Label className="option-field-label" nativeLabel={false} render={<div />}>{LABEL_KEYS[name] ? t(LABEL_KEYS[name]) : name.replaceAll("_", " ")}</Field.Label>
-      <Select items={Object.fromEntries(values.map((item) => [String(item), name === "duration" ? t("seconds", { value: item }) : String(item)]))} value={stringValue} onValueChange={(next) => {
+      <Select items={items} value={stringValue} onValueChange={(next) => {
         if (next == null) return;
         const original = values.find((item) => String(item) === next);
         onChange(original ?? next);
       }}>
         <SelectTrigger><SelectValue /></SelectTrigger>
-        <SelectContent>{values.map((item) => <SelectItem value={String(item)} key={String(item)}>{name === "duration" ? t("seconds", { value: item }) : String(item)}</SelectItem>)}</SelectContent>
+        <SelectContent>{unsupportedValue ? <SelectItem value={stringValue} disabled>{items[stringValue]}</SelectItem> : null}{values.map((item) => <SelectItem value={String(item)} key={String(item)}>{name === "duration" ? t("seconds", { value: item }) : String(item)}</SelectItem>)}</SelectContent>
       </Select>
     </Field.Root>
   );
@@ -110,8 +113,16 @@ export function OptionsFields({ mode, model, options, providerJson, providerErro
   } else {
     const video = model as VideoModel;
     if (video.supported_durations?.length) basic.push(<EnumField key="duration" name="duration" values={video.supported_durations} value={options.duration} onChange={(value) => patch("duration", value)} />);
+    else if (video.supported_parameters?.duration?.type === "range") {
+      const { min, max } = video.supported_parameters.duration;
+      basic.push(<Field.Root className="option-field" key="duration">
+        <Field.Label>{t("duration")}</Field.Label>
+        <Input type="number" min={min} max={max} value={options.duration == null ? "" : Number(options.duration)} onChange={(event) => onOptionsChange({ ...options, duration: normalizeRangeValue(event.target.value, min, max) })} />
+      </Field.Root>);
+    }
     if (video.supported_resolutions?.length) basic.push(<EnumField key="resolution" name="resolution" values={video.supported_resolutions} value={options.resolution} onChange={(value) => patch("resolution", value)} />);
     if (video.supported_aspect_ratios?.length) basic.push(<EnumField key="aspect_ratio" name="aspect_ratio" values={video.supported_aspect_ratios} value={options.aspect_ratio} onChange={(value) => patch("aspect_ratio", value)} />);
+    if (video.supported_sizes?.length) basic.push(<EnumField key="size" name="size" values={video.supported_sizes} value={options.size} onChange={(value) => patch("size", value)} />);
     if (video.generate_audio) basic.push(
       <Field.Root className="option-toggle" key="audio"><span><Field.Label nativeLabel={false} render={<div />}><strong>{t("generateAudio")}</strong></Field.Label><Field.Description>{t("includeSound")}</Field.Description></span><Switch checked={Boolean(options.generate_audio)} onCheckedChange={(value) => patch("generate_audio", value)} /></Field.Root>,
     );

@@ -25,6 +25,8 @@ export function GenerationResultDialog({
   onEditImage,
   onUseInVideo,
   onUseAsInput,
+  canUseInVideo,
+  canUseAsInput,
 }: {
   notice: GenerationResultNotice | null;
   assets: SessionAsset[];
@@ -34,6 +36,8 @@ export function GenerationResultDialog({
   onEditImage: (assetId: string) => void;
   onUseInVideo: (assetId: string) => void;
   onUseAsInput: (assetId: string) => void;
+  canUseInVideo?: (assetId: string) => boolean;
+  canUseAsInput?: (assetId: string) => boolean;
 }) {
   const { t } = useI18n();
   const resultAssets = useMemo(() => notice?.assetIds.flatMap((id) => {
@@ -107,10 +111,10 @@ export function GenerationResultDialog({
                 {selected?.kind === "image" ? (
                   <>
                     <Button type="button" variant="outline" onClick={() => onEditImage(selected.id)}><Pencil /> {t("editThisImage")}</Button>
-                    <Button type="button" variant="outline" onClick={() => onUseInVideo(selected.id)}><Film /> {t("useInVideo")}</Button>
+                    <Button type="button" variant="outline" disabled={canUseInVideo && !canUseInVideo(selected.id)} onClick={() => onUseInVideo(selected.id)}><Film /> {t("useInVideo")}</Button>
                   </>
                 ) : null}
-                {selected ? <Button type="button" variant="outline" onClick={() => onUseAsInput(selected.id)}><Plus /> {t("useAsInput")}</Button> : null}
+                {selected ? <Button type="button" variant="outline" disabled={canUseAsInput && !canUseAsInput(selected.id)} onClick={() => onUseAsInput(selected.id)}><Plus /> {t("useAsInput")}</Button> : null}
                 <Button type="button" autoFocus onClick={onDismiss}>{t("done")}{selectedIndex >= 0 && resultAssets.length > 1 ? ` · ${selectedIndex + 1}/${resultAssets.length}` : ""}</Button>
               </div>
             </footer>

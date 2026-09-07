@@ -3,7 +3,7 @@ import { Dialog } from "@base-ui/react/dialog";
 import { Progress } from "@base-ui/react/progress";
 import { Toggle } from "@base-ui/react/toggle";
 import { ToggleGroup } from "@base-ui/react/toggle-group";
-import { AudioLines, Check, Download, Eye, FolderOpen, ImageIcon, Paintbrush, Plus, RefreshCw, Trash2, Video, X } from "lucide-react";
+import { AudioLines, Check, Download, Eye, FolderOpen, ImageIcon, Paintbrush, PanelRightClose, Plus, RefreshCw, Trash2, Video, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { AssetPreview } from "@/components/AssetPreview";
@@ -37,6 +37,7 @@ export function AssetLibrary({
   onImport,
   onPick,
   onUse,
+  canUse,
   onEdit,
   onDelete,
   onReimport,
@@ -52,6 +53,7 @@ export function AssetLibrary({
   onImport: (files: FileList | File[]) => Promise<void>;
   onPick: () => Promise<void>;
   onUse: (assetId: string) => void;
+  canUse?: (asset: SessionAsset) => boolean;
   onEdit: (assetId: string) => void;
   onDelete: (ids: string[]) => void;
   onReimport: (assetId: string) => void;
@@ -199,7 +201,7 @@ export function AssetLibrary({
         </div>
         <div className="asset-library-actions">
           <Button size="icon-sm" variant="outline" aria-label={t("importAssets")} aria-keyshortcuts="Meta+O" onClick={() => void onPick()}><Plus /></Button>
-          {onClose ? <Button type="button" size="icon-sm" variant="ghost" aria-label={t("closeAssetPanel")} title={t("closeAssetPanel")} onClick={onClose}><X /></Button> : null}
+          {onClose ? <Button type="button" size="icon-sm" variant="outline" aria-label={t("closeAssetPanel")} title={t("closeAssetPanel")} onClick={onClose}><PanelRightClose /></Button> : null}
         </div>
       </header>
 
@@ -317,7 +319,7 @@ export function AssetLibrary({
               <div>
                 <Button variant="ghost" size="icon-xs" aria-label={t("export")} aria-keyshortcuts="Meta+Shift+E" disabled={asset.storageAvailability === "missing"} onClick={() => void exportAsset(asset)}><Download /></Button>
                 <Button variant="ghost" size="icon-xs" aria-label={t("preview")} onClick={() => setPreview(asset)}><Eye /></Button>
-                <Button variant="ghost" size="icon-xs" aria-label={t("useInput")} disabled={asset.storageAvailability === "missing"} onClick={() => onUse(asset.id)}><Plus /></Button>
+                <Button variant="ghost" size="icon-xs" aria-label={t("useInput")} disabled={asset.storageAvailability === "missing" || (canUse && !canUse(asset))} onClick={() => onUse(asset.id)}><Plus /></Button>
                 {asset.kind === "image" ? <Button variant="ghost" size="icon-xs" aria-label={t("editOnCanvas")} disabled={asset.storageAvailability === "missing"} onClick={() => onEdit(asset.id)}><Paintbrush /></Button> : null}
               </div>
             </footer>

@@ -1428,14 +1428,19 @@ export function allowedAssetRolesForKind(
   mode: GenerationMode,
   model: GenerationModel | null,
   kind: InputMediaKind,
+  route?: GenerationRoute,
 ): ReferenceRole[] {
-  if (mode === "image") return kind === "image" ? allowedAssetRoles(mode, model) : [];
+  if (mode === "image") return kind === "image"
+    ? route ? (route.capabilities.input_references?.max ?? 0) > 0 ? ["reference"] : [] : allowedAssetRoles(mode, model)
+    : [];
   const video = model as VideoModel | null;
+  const endpoint = route?.endpoint as VideoModelEndpoint | undefined;
+  const frames = endpoint ? endpoint.supported_frame_images : video?.supported_frame_images;
   const roles: ReferenceRole[] = [];
-  if (videoReferenceTypes(video).includes(kind)) roles.push("reference");
+  if (videoReferenceLimit(video, kind, endpoint) > 0) roles.push("reference");
   if (kind === "image") {
-    if (video?.supported_frame_images?.includes("first_frame")) roles.push("first_frame");
-    if (video?.supported_frame_images?.includes("last_frame")) roles.push("last_frame");
+    if (frames?.includes("first_frame")) roles.push("first_frame");
+    if (frames?.includes("last_frame")) roles.push("last_frame");
   }
   return roles;
 }
@@ -1865,7 +1870,7 @@ function bindPromptReferences(
   return missingBindings.length ? `${missingBindings.join("\n")}\n\n${rewritten.trim()}` : rewritten.trim();
 }
 
-function requestAssetOrder(draft: GenerationDraft, model: GenerationModel): ReferenceAsset[] {
+function requestAssetOrder(draft: GenerationDraft, model: GenerationModel, route?: GenerationRoute): ReferenceAsset[] {
   if (draft.mode === "image") {
     let images = draft.assets.filter((asset) => assetMediaKind(asset) === "image");
     if (draft.editTargetSlot && /^openai\/(?:gpt-image|chatgpt-image)/.test(draft.model)) {
@@ -1875,14 +1880,15 @@ function requestAssetOrder(draft: GenerationDraft, model: GenerationModel): Refe
     return images;
   }
   const video = model as VideoModel;
-  const referenceTypes = videoReferenceTypes(video);
+  const endpoint = route?.endpoint as VideoModelEndpoint | undefined;
+  const referenceTypes = videoReferenceTypes(video, endpoint);
   const references = draft.assets.filter((asset) =>
     asset.role === "reference" && referenceTypes.includes(assetMediaKind(asset))
   );
   const frames = draft.assets.filter((asset) =>
     (asset.role === "first_frame" || asset.role === "last_frame")
     && assetMediaKind(asset) === "image"
-    && video.supported_frame_images?.includes(asset.role)
+    && (endpoint ? endpoint.supported_frame_images : video.supported_frame_images)?.includes(asset.role)
   );
   return [...references, ...frames];
 }
@@ -1892,6 +1898,7 @@ export function referenceCoverageReport(
   model: GenerationModel | null,
   payload?: Readonly<Record<string, unknown>>,
   referencePriorities?: Record<number, PromptPlanReference["priority"]>,
+  route?: GenerationRoute,
 ): ReferenceCoverage[] {
   if (!model) {
     return draft.assets.map((asset) => {
@@ -1908,7 +1915,7 @@ export function referenceCoverageReport(
     });
   }
   const request = payload ?? buildRequest(draft, model);
-  const sentAssets = requestAssetOrder(draft, model);
+  const sentAssets = requestAssetOrder(draft, model, route);
   const sentSlots = new Set(sentAssets.map((asset) => asset.slot));
   const labels = providerReferenceLabels(
     draft.mode,
@@ -1919,7 +1926,7 @@ export function referenceCoverageReport(
   return draft.assets.map((asset) => {
     const priority = referencePriorities?.[asset.slot] ?? "required";
     const sent = sentSlots.has(asset.slot);
-    const transportRoleValid = allowedAssetRolesForKind(draft.mode, model, assetMediaKind(asset)).includes(asset.role);
+    const transportRoleValid = allowedAssetRolesForKind(draft.mode, model, assetMediaKind(asset), route).includes(asset.role);
     const providerLabel = labels.get(asset.slot);
     const boundInPrompt = Boolean(providerLabel && requestPrompt.includes(providerLabel));
     return {
@@ -2061,6 +2068,7 @@ function buildRequestInternal(
     if (strict && (references.length || frames.length)) {
       const transportIssues = assessVideoReferenceTransport(videoModel, [...references, ...frames].map((asset) => ({
         slot: asset.slot,
+        role: asset.role,
         kind: assetMediaKind(asset),
         transport: videoReferenceTransportForUrl(asset.dataUrl),
       })), videoEndpoint);

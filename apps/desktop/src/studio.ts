@@ -32,6 +32,7 @@ import {
   ensureDirectorPlan,
 } from "./director/defaults.ts";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { simplifyVideoDraft } from "./videoDraft.ts";
 
 export type AssetKind = "image" | "video" | "audio";
 export type AssetOrigin = "upload" | "generated" | "edited";
@@ -705,7 +706,7 @@ export function createGenerationThread(
 
 export function effectiveThreadDraft(session: StudioSession, thread: GenerationThread): GenerationDraftState {
   return {
-    ...thread.draft,
+    ...(thread.mode === "video" ? simplifyVideoDraft(thread.draft) : thread.draft),
     options: { ...session.generationDefaults.options[thread.mode], ...thread.optionOverrides },
     providerJson: thread.providerJsonOverride ?? session.generationDefaults.providerJson[thread.mode],
   };
