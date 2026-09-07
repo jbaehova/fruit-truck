@@ -15,3 +15,10 @@ apps/desktop/src-tauri/gen/
 
 .agents/
 AGENTS.md
+
+# Private project operations and handoffs
+/AGENTS.md
+/.env
+/.agents/
+/HANDOFF.md
+/.ops/
