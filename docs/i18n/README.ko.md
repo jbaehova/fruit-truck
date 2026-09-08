@@ -1,6 +1,6 @@
 # Fruit Truck
 
-<img src="../../assets/readme/fruit-truck-hero.png" alt="아이보리 바탕 전체에 선명한 주홍색 과일 무늬를 펼친 Fruit Truck 이미지 및 영상 스튜디오 배너" width="1200" />
+https://github.com/user-attachments/assets/e1cce464-0311-46fa-ae96-fe360019dee2
 
 Fruit Truck은 OpenRouter를 통해 이미지와 영상을 생성하는 macOS 작업 공간입니다.
 

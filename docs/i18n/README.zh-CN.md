@@ -1,6 +1,6 @@
 # Fruit Truck
 
-<img src="../../assets/readme/fruit-truck-hero.png" alt="Fruit Truck 图像与视频工作室横幅，暖象牙白背景铺满鲜艳的朱红色切分果实图案" width="1200" />
+https://github.com/user-attachments/assets/e1cce464-0311-46fa-ae96-fe360019dee2
 
 Fruit Truck 是一款通过 OpenRouter 生成图像和视频的 macOS 工作区。
 

@@ -1,6 +1,6 @@
 # Fruit Truck
 
-<img src="../../assets/readme/fruit-truck-hero.png" alt="アイボリー地いっぱいに鮮やかな朱色の果実模様を配した画像と動画のスタジオ Fruit Truck のバナー" width="1200" />
+https://github.com/user-attachments/assets/e1cce464-0311-46fa-ae96-fe360019dee2
 
 Fruit Truck は、OpenRouter を通じて画像と動画を生成する macOS ワークスペースです。
 

@@ -1,6 +1,6 @@
 # Fruit Truck
 
-<img src="../../assets/readme/fruit-truck-hero.png" alt="Fruit Truck, estudio de imagen y vídeo con un vibrante patrón de frutas en bermellón sobre marfil cálido" width="1200" />
+https://github.com/user-attachments/assets/e1cce464-0311-46fa-ae96-fe360019dee2
 
 Fruit Truck es un espacio de trabajo para macOS que genera imágenes y vídeos mediante OpenRouter.
 

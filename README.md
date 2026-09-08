@@ -16,7 +16,7 @@ Explore OpenRouter models, shape a request around each model's real capabilities
 
 <br />
 
-<img src="./assets/readme/fruit-truck-hero.png" alt="Fruit Truck image and video studio, with vivid vermilion split-fruit patterns across warm ivory" width="1200" />
+https://github.com/user-attachments/assets/e1cce464-0311-46fa-ae96-fe360019dee2
 
 <br />
 
