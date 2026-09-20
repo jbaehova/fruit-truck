@@ -259,6 +259,14 @@ async function installTauriMock(page: Page, options: UpdateE2EOptions) {
         return openRouterResponse(path);
       }
       if (cmd === "load_pending_update_transaction") return pendingTransaction;
+      if (cmd === "adopt_update_transaction_for_reinstall") {
+        if (!pendingTransaction || config.runningVersion !== "0.8.0") {
+          throw new Error("Only a newer stable repair release may resume this update.");
+        }
+        pendingTransaction = { ...pendingTransaction, toAppVersion: config.runningVersion };
+        persistMock();
+        return pendingTransaction;
+      }
       if (cmd === "load_workspace_state") return loaded(workspacePayload, workspaceChecksum);
       if (cmd === "save_workspace_state") {
         workspacePayload = structuredClone(args.payload);
@@ -969,5 +977,45 @@ for (const phase of ["installing", "awaiting_restart", "recovery_required"]) {
     const commands = await invokedCommands(page);
     expect(commands).toContain("abandon_update_transaction_after_source_relaunch");
     expect(commands).not.toContain("verify_update_assets");
+  });
+}
+
+for (const assetVerificationValid of [true, false]) {
+  test(`a newer manual reinstall preserves workspace ownership with assets valid=${assetVerificationValid}`, async ({ page }) => {
+    await installTauriMock(page, {
+      workspace: cloneFixture(V6_WORKSPACE),
+      pendingPhase: "installing",
+      runningVersion: "0.8.0",
+      updaterAvailable: false,
+      assetVerificationValid,
+      holdVideoPoll: true,
+    });
+    await page.goto("/");
+    if (assetVerificationValid) {
+      await expect.poll(async () => (await invokedCommands(page)).includes("complete_update_transaction")).toBe(true);
+      await expect(page.locator(".app-shell")).toHaveAttribute("data-workspace-boot-state", "ready");
+    } else {
+      await expect(page.getByRole("alertdialog", { name: "Your workspace needs verification." })).toBeVisible();
+      await expect(page.locator(".app-shell")).toHaveAttribute("inert", "");
+      expect(await invokedCommands(page)).not.toContain("save_verified_update_workspace");
+      expect(await invokedCommands(page)).not.toContain("complete_update_transaction");
+    }
+    const calls = await invokedCommands(page);
+    expect(calls).toContain("adopt_update_transaction_for_reinstall");
+    expect(calls).toContain("verify_update_assets");
+    const persisted = await page.evaluate(() => (
+      window as Window & typeof globalThis & {
+        __FRUIT_TRUCK_UPDATE_E2E__: { workspacePayload: () => unknown };
+      }
+    ).__FRUIT_TRUCK_UPDATE_E2E__.workspacePayload());
+    const ownership = (value: unknown) => (value as {
+      sessions: Array<{ id: string; assets: Array<{ id: string; localPath?: string }>; threads: Record<string, Array<{ id: string }>> }>;
+    }).sessions.map((session) => ({
+      id: session.id,
+      assets: session.assets.map(({ id, localPath }) => ({ id, localPath })),
+      imageThreads: session.threads.image.map(({ id }) => id),
+      videoThreads: session.threads.video.map(({ id }) => id),
+    }));
+    expect(ownership(persisted)).toEqual(ownership(V6_WORKSPACE));
   });
 }

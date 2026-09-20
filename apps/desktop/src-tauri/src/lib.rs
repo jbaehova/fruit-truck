@@ -3699,6 +3699,21 @@ fn load_pending_update_transaction(
 }
 
 #[tauri::command]
+fn adopt_update_transaction_for_reinstall(
+    app: tauri::AppHandle,
+    transaction_id: String,
+) -> Result<update_transaction::UpdateTransaction, String> {
+    let _lock = WORKSPACE_STORAGE_LOCK
+        .lock()
+        .map_err(|_| "The workspace store is unavailable.".to_string())?;
+    update_transaction::adopt_update_transaction_for_reinstall(
+        &credentials_directory(&app)?,
+        &transaction_id,
+        &app.package_info().version.to_string(),
+    )
+}
+
+#[tauri::command]
 fn load_pre_update_snapshot(
     app: tauri::AppHandle,
     transaction_id: String,
@@ -4025,6 +4040,7 @@ pub fn run() {
             cancel_update_snapshot_preparation,
             save_verified_update_workspace,
             load_pending_update_transaction,
+            adopt_update_transaction_for_reinstall,
             load_pre_update_snapshot,
             set_update_transaction_phase,
             fail_update_transaction,

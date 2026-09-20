@@ -1090,12 +1090,13 @@ dependencies = [
 
 [[package]]
 name = "fruit-truck"
-version = "0.6.11"
+version = "0.6.12"
 dependencies = [
  "base64 0.22.1",
  "image",
  "quick-xml",
  "reqwest 0.12.28",
+ "semver",
  "serde",
  "serde_json",
  "sha2",
@@ -4100,8 +4101,6 @@ dependencies = [
 [[package]]
 name = "tauri-plugin-updater"
 version = "2.10.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "806d9dac662c2e4594ff03c647a552f2c9bd544e7d0f683ec58f872f952ce4af"
 dependencies = [
  "base64 0.22.1",
  "dirs",
@@ -4109,6 +4108,7 @@ dependencies = [
  "futures-util",
  "http",
  "infer",
+ "libc",
  "log",
  "minisign-verify",
  "osakit",

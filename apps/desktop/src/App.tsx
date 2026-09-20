@@ -1165,11 +1165,14 @@ export default function App() {
             return;
           }
         } else {
-          await requireUpdateRecovery(
-            pending,
-            "app_version_mismatch",
-            new Error(`Expected app version ${pending.toAppVersion} after the update, but found ${runningVersion}.`),
-          );
+          try {
+            const adopted = await invoke<NativeUpdateTransaction>("adopt_update_transaction_for_reinstall", {
+              transactionId: pending.id,
+            });
+            await verifyPendingNativeUpdate(adopted);
+          } catch (error) {
+            await requireUpdateRecovery(pending, "app_version_mismatch", error);
+          }
           return;
         }
       }

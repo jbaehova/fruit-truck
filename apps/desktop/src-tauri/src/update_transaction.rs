@@ -62,6 +62,8 @@ pub struct UpdateTransaction {
     pub id: String,
     pub from_app_version: String,
     pub to_app_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_to_app_version: Option<String>,
     pub from_studio_schema: u64,
     pub target_studio_schema: u64,
     pub phase: UpdateTransactionPhase,
@@ -341,6 +343,9 @@ fn validate_transaction(transaction: &UpdateTransaction) -> Result<(), String> {
     validate_transaction_id(&transaction.id)?;
     validate_version(&transaction.from_app_version, "The source app version")?;
     validate_version(&transaction.to_app_version, "The target app version")?;
+    if let Some(original) = &transaction.original_to_app_version {
+        validate_version(original, "The original target app version")?;
+    }
     if transaction.target_studio_schema < transaction.from_studio_schema {
         return Err("The target Studio schema may not precede the source schema.".into());
     }
@@ -1019,6 +1024,7 @@ where
             id: transaction_id.clone(),
             from_app_version: from_version,
             to_app_version: to_version,
+            original_to_app_version: None,
             from_studio_schema,
             target_studio_schema: 8,
             phase: UpdateTransactionPhase::SnapshotReady,
@@ -1147,6 +1153,45 @@ pub fn abandon_update_transaction_after_source_relaunch(
     // Archive first. If current.json removal fails, mutation remains blocked.
     persist_transaction(root, &transaction)?;
     remove_current_transaction(root)?;
+    Ok(transaction)
+}
+
+/// A newer manually installed repair release can finish an interrupted update.
+/// Keep the original target for diagnostics and retain every workspace/media
+/// byte. The ordinary migration, asset checks and completion gate still apply.
+pub fn adopt_update_transaction_for_reinstall(
+    root: &Path,
+    transaction_id: &str,
+    running_app_version: &str,
+) -> Result<UpdateTransaction, String> {
+    let mut transaction = current_transaction_for_id(root, transaction_id)?;
+    let running = semver::Version::parse(running_app_version).map_err(|error| error.to_string())?;
+    let target =
+        semver::Version::parse(&transaction.to_app_version).map_err(|error| error.to_string())?;
+    let source =
+        semver::Version::parse(&transaction.from_app_version).map_err(|error| error.to_string())?;
+    if running <= target || running <= source || !running.pre.is_empty() {
+        return Err("Only a newer stable repair release may resume this update.".into());
+    }
+    if !matches!(
+        transaction.phase,
+        UpdateTransactionPhase::SnapshotReady
+            | UpdateTransactionPhase::Downloading
+            | UpdateTransactionPhase::Installing
+            | UpdateTransactionPhase::AwaitingRestart
+            | UpdateTransactionPhase::Verifying
+            | UpdateTransactionPhase::RecoveryRequired
+    ) {
+        return Err("This update has no recoverable installation to resume.".into());
+    }
+    verify_snapshot_checksum(root, &transaction)?;
+    load_verified_manifest(root, &transaction)?;
+    if transaction.original_to_app_version.is_none() {
+        transaction.original_to_app_version = Some(transaction.to_app_version.clone());
+    }
+    transaction.to_app_version = running_app_version.to_string();
+    transaction.updated_at = timestamp_string(unix_time_ms());
+    persist_transaction(root, &transaction)?;
     Ok(transaction)
 }
 
@@ -2792,6 +2837,117 @@ mod tests {
         assert!(load_pending_update_transaction(root.path())
             .expect_err("wrong receipt schema")
             .contains("receipt"));
+    }
+
+    #[test]
+    fn newer_reinstall_restores_all_sessions_and_asset_bytes_after_interrupted_update() {
+        for phase in [
+            UpdateTransactionPhase::SnapshotReady,
+            UpdateTransactionPhase::Downloading,
+            UpdateTransactionPhase::Installing,
+            UpdateTransactionPhase::AwaitingRestart,
+            UpdateTransactionPhase::Verifying,
+            UpdateTransactionPhase::RecoveryRequired,
+        ] {
+            let root = temp_root();
+            let original_bytes = prepare_workspace(root.path());
+            let mut transaction = create_transaction(root.path());
+            transaction.phase = phase;
+            persist_transaction(root.path(), &transaction).unwrap();
+            let adopted =
+                adopt_update_transaction_for_reinstall(root.path(), &transaction.id, "0.9.0")
+                    .unwrap();
+            assert_eq!(adopted.original_to_app_version.as_deref(), Some("0.8.0"));
+            assert_eq!(adopted.to_app_version, "0.9.0");
+            assert_eq!(adopted.snapshot_checksum, transaction.snapshot_checksum);
+            assert_eq!(
+                adopted.asset_manifest_checksum,
+                transaction.asset_manifest_checksum
+            );
+            assert!(update_transaction_blocks_mutation(root.path()).unwrap());
+            assert_eq!(
+                std::fs::read(workspace_storage::current_state_file(root.path()).unwrap()).unwrap(),
+                original_bytes
+            );
+
+            begin_update_verification(root.path(), &transaction.id, "0.9.0").unwrap();
+            assert!(assert_update_transaction_target_version(
+                root.path(),
+                &transaction.id,
+                "0.8.0"
+            )
+            .is_err());
+            let mut migrated = test_payload(root.path());
+            migrated["schemaVersion"] = serde_json::json!(8);
+            save_verified_update_workspace(root.path(), &transaction.id, migrated.clone()).unwrap();
+            complete_update_transaction(root.path(), transaction.id.clone()).unwrap();
+            assert_eq!(
+                workspace_storage::load(root.path())
+                    .unwrap()
+                    .unwrap()
+                    .payload,
+                migrated
+            );
+            assert_eq!(
+                std::fs::read(root.path().join("assets/reference.png")).unwrap(),
+                b"reference-bytes"
+            );
+            assert_eq!(
+                std::fs::read(root.path().join("generated/result.mp4")).unwrap(),
+                b"generated-bytes"
+            );
+            assert!(load_pending_update_transaction(root.path())
+                .unwrap()
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn reinstall_rejects_older_prerelease_and_corrupt_snapshots_without_writes() {
+        let root = temp_root();
+        let original_bytes = prepare_workspace(root.path());
+        let transaction = create_transaction(root.path());
+        let metadata_before = std::fs::read(current_transaction_path(root.path())).unwrap();
+        for version in ["0.6.7", "0.7.9", "0.8.0", "0.9.0-beta.1", "invalid"] {
+            assert!(
+                adopt_update_transaction_for_reinstall(root.path(), &transaction.id, version)
+                    .is_err()
+            );
+            assert_eq!(
+                std::fs::read(current_transaction_path(root.path())).unwrap(),
+                metadata_before
+            );
+        }
+        std::fs::write(root.path().join(&transaction.snapshot_path), b"broken").unwrap();
+        assert!(
+            adopt_update_transaction_for_reinstall(root.path(), &transaction.id, "0.9.0").is_err()
+        );
+        assert_eq!(
+            std::fs::read(current_transaction_path(root.path())).unwrap(),
+            metadata_before
+        );
+        assert_eq!(
+            std::fs::read(workspace_storage::current_state_file(root.path()).unwrap()).unwrap(),
+            original_bytes
+        );
+    }
+
+    #[test]
+    fn reinstall_with_missing_assets_remains_locked_and_retains_workspace() {
+        let root = temp_root();
+        let original_bytes = prepare_workspace(root.path());
+        let transaction = create_transaction(root.path());
+        adopt_update_transaction_for_reinstall(root.path(), &transaction.id, "0.9.0").unwrap();
+        std::fs::remove_file(root.path().join("generated/result.mp4")).unwrap();
+        begin_update_verification(root.path(), &transaction.id, "0.9.0").unwrap();
+        let mut migrated = test_payload(root.path());
+        migrated["schemaVersion"] = serde_json::json!(8);
+        assert!(save_verified_update_workspace(root.path(), &transaction.id, migrated).is_err());
+        assert!(update_transaction_blocks_mutation(root.path()).unwrap());
+        assert_eq!(
+            std::fs::read(workspace_storage::current_state_file(root.path()).unwrap()).unwrap(),
+            original_bytes
+        );
     }
 
     #[test]

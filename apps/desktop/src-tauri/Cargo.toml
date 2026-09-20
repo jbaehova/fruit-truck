@@ -1,6 +1,6 @@
 [package]
 name = "fruit-truck"
-version = "0.6.11"
+version = "0.6.12"
 description = "A lightweight OpenRouter image and video generation client"
 authors = ["Johnny Bae"]
 edition = "2021"
@@ -20,6 +20,7 @@ quick-xml = "0.41"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+semver = "1"
 sha2 = "0.10"
 tauri = { version = "2.11.3", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"
@@ -31,3 +32,7 @@ tokio = { version = "1.52", features = ["macros", "sync", "time"] }
 
 [dev-dependencies]
 tempfile = "3"
+
+# macOS atomic bundle exchange fixes upstream issue #3505.
+[patch.crates-io]
+tauri-plugin-updater = { path = "vendor/tauri-plugin-updater" }
