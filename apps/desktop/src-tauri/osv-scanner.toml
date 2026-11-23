@@ -3,56 +3,6 @@
 # cargo tree --target aarch64-apple-darwin
 
 [[IgnoredVulns]]
-id = "RUSTSEC-2024-0411"
-ignoreUntil = 2027-02-28
-reason = "Linux-only GTK3 transitive dependency; not selected by the Apple Silicon release target."
-
-[[IgnoredVulns]]
-id = "RUSTSEC-2024-0412"
-ignoreUntil = 2027-02-28
-reason = "Linux-only GTK3 transitive dependency; not selected by the Apple Silicon release target."
-
-[[IgnoredVulns]]
-id = "RUSTSEC-2024-0413"
-ignoreUntil = 2027-02-28
-reason = "Linux-only GTK3 transitive dependency; not selected by the Apple Silicon release target."
-
-[[IgnoredVulns]]
-id = "RUSTSEC-2024-0414"
-ignoreUntil = 2027-02-28
-reason = "Linux-only GTK3 transitive dependency; not selected by the Apple Silicon release target."
-
-[[IgnoredVulns]]
-id = "RUSTSEC-2024-0415"
-ignoreUntil = 2027-02-28
-reason = "Linux-only GTK3 transitive dependency; not selected by the Apple Silicon release target."
-
-[[IgnoredVulns]]
-id = "RUSTSEC-2024-0416"
-ignoreUntil = 2027-02-28
-reason = "Linux-only GTK3 transitive dependency; not selected by the Apple Silicon release target."
-
-[[IgnoredVulns]]
-id = "RUSTSEC-2024-0417"
-ignoreUntil = 2027-02-28
-reason = "Linux-only GTK3 transitive dependency; not selected by the Apple Silicon release target."
-
-[[IgnoredVulns]]
-id = "RUSTSEC-2024-0418"
-ignoreUntil = 2027-02-28
-reason = "Linux-only GTK3 transitive dependency; not selected by the Apple Silicon release target."
-
-[[IgnoredVulns]]
-id = "RUSTSEC-2024-0419"
-ignoreUntil = 2027-02-28
-reason = "Linux-only GTK3 transitive dependency; not selected by the Apple Silicon release target."
-
-[[IgnoredVulns]]
-id = "RUSTSEC-2024-0420"
-ignoreUntil = 2027-02-28
-reason = "Linux-only GTK3 transitive dependency; not selected by the Apple Silicon release target."
-
-[[IgnoredVulns]]
 id = "RUSTSEC-2024-0429"
 ignoreUntil = 2027-02-28
 reason = "Affected glib 0.18 is reachable only through the Linux GTK3 branch and is absent from the macOS release target."
